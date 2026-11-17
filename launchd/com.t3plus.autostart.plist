@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.t3plus.autostart</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/sh</string>
+    <string>__HOME__/.t3plus/autostart.sh</string>
+  </array>
+  <!-- T3 Code rewrites this file every time it starts. -->
+  <key>WatchPaths</key>
+  <array>
+    <string>__HOME__/.t3/userdata/server-runtime.json</string>
+  </array>
+  <!-- Also at login, in case the app is already open. -->
+  <key>RunAtLoad</key>
+  <true/>
+  <key>ProcessType</key>
+  <string>Background</string>
+  <key>StandardErrorPath</key>
+  <string>__HOME__/.t3plus/state/autostart.err</string>
+</dict>
+</plist>

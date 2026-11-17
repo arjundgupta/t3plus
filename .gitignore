@@ -1,0 +1,12 @@
+# Local data: never committed
+feeds/
+state/
+
+*.bak
+# Build output (node build-desktop.mjs extension)
+dist/
+extension/node_modules/
+.DS_Store
+
+# Personal settings (t3Home, t3Cli, timeZone)
+config.json
