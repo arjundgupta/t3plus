@@ -113,3 +113,48 @@ test("the toolbar icon's #t3plus link opens the t3+ section once", async () => {
   assert.equal(doc.getElementById(T3PLUS.panelId), null, "a T3 link still closes it");
   app.stop();
 });
+
+test("the t3+ entry takes T3's role and tab stop from Appearance (keyboard reachable in current T3), and T3's page actions hide while it is open", async () => {
+  // Current T3: plain buttons in plain <li>s (no tree roles, no tabindex).
+  const plain = SETTINGS_HTML.replaceAll(' role="treeitem"', "");
+  const dom = createDom("/settings/appearance", plain);
+  const doc = dom.window.document;
+  const { app } = createApp(dom);
+  await app.start();
+  const button = navButton(doc);
+  assert.equal(button.hasAttribute("tabindex"), false, "reachable with Tab like T3's entries");
+  assert.equal(button.hasAttribute("role"), false);
+  assert.equal(button.closest("li").hasAttribute("role"), false);
+  click(dom, button);
+  assert.equal(button.getAttribute("aria-current"), "page");
+  assert.equal(button.hasAttribute("aria-selected"), false, "no aria-selected without a role that has it");
+  app.stop();
+
+  // Older T3 (tree roles): the entry follows those instead.
+  const dom2 = createDom("/settings/appearance", SETTINGS_HTML);
+  const { app: app2 } = createApp(dom2);
+  await app2.start();
+  assert.equal(navButton(dom2.window.document).getAttribute("role"), "treeitem");
+  app2.stop();
+
+  const { readFileSync } = await import("node:fs");
+  const css = readFileSync(new URL("../src/styles/content.css", import.meta.url), "utf8");
+  assert.match(css, /html\[data-t3plus-settings\] nav\[aria-label="Settings breadcrumb"\] ~ div > :not\(\[aria-label="Close"\]\)\s*\{\s*display: none !important;/, "Restore device defaults & co. hide; Close stays");
+});
+
+test("settings nav: t3+'s entry is one of T3's arrow-key stops, and only one entry is the current page", async () => {
+  const { createSettingsNavItem } = await import("../src/settingsSection.js");
+  const { createDom } = await import("./helpers.js");
+  const dom = createDom("/settings/appearance", `<ul><li><button data-settings-section="/settings/appearance" data-active="true" aria-current="page">Appearance</button></li></ul>`);
+  const doc = dom.window.document;
+  const appearance = doc.querySelector("button");
+  const nav = createSettingsNavItem(doc, () => {});
+  nav.mount(appearance);
+  assert.ok(nav.button.matches("[data-settings-section]"), "T3's arrow keys include it");
+  nav.setActive(true);
+  assert.equal(nav.button.getAttribute("aria-current"), "page");
+  assert.equal(appearance.hasAttribute("aria-current"), false, "Appearance is not current while t3+ is open");
+  nav.setActive(false);
+  assert.equal(appearance.getAttribute("aria-current"), "page", "and is again after");
+  assert.equal(nav.button.hasAttribute("aria-current"), false);
+});

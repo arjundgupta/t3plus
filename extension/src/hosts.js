@@ -22,9 +22,10 @@ export const FEEDS_CONFIGURED = FEED_BASE !== DEFAULT_FEED_BASE;
 export function feedEndpoints(base = FEED_BASE) {
   const root = base.endsWith("/") ? base : `${base}/`;
   return {
-    // Each URL is an exact-path host permission, so the extension can read these
-    // files and nothing else on the host. Fetched by the background worker,
-    // because a plain file share sends no CORS headers.
+    // Each URL is listed as an exact-path host permission, but Chrome grants host
+    // permissions per origin, whatever the path: what keeps t3+ to these two files is
+    // the background worker's allowlist (FETCH_ENDPOINTS, background.js). Fetched
+    // there because a plain file share sends no CORS headers.
     // t3plus-bots.json: the latest message of each bot thread (server/publish_bot_feed.py).
     bots: `${root}t3plus-bots.json`,
     // t3plus-home.json: pools, activity and usage for the home widgets (server/publish_home.py).

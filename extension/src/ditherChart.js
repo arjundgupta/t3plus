@@ -94,21 +94,25 @@ export function createDitherCanvas(doc, series, { className = "t3plus-w-dither" 
     const raw = parseFloat(win.getComputedStyle(doc.documentElement).getPropertyValue("--t3plus-dither-cell"));
     const cellCss = Number.isFinite(raw) && raw > 0 ? raw : DITHER_CELL_CSS.medium;
     const cell = Math.max(2, Math.round(cellCss * dpr)); // whole device px, same rule as the backdrop
-    const next = [width, height, dpr, cell].join();
+    // The theme is part of the key: after a switch (dark to light at sunset) the old
+    // colors stayed, a white Codex line on a white page. T3 changes themes on <html>.
+    const root = doc.documentElement;
+    const theme = `${root.className}|${root.getAttribute("data-theme") ?? ""}|${root.getAttribute("data-theme-id") ?? ""}|${root.style.length}`;
+    const next = [width, height, dpr, cell, theme].join();
     if (next === key) return true;
     const ctx = canvas.getContext?.("2d");
     if (!ctx) return false;
     key = next;
-    canvas.width = Math.round(width * dpr);
-    canvas.height = Math.round(height * dpr);
-    const cols = Math.ceil(canvas.width / cell);
-    const rows = Math.ceil(canvas.height / cell);
     // Colors may be CSS variables or color-mix(): let the browser resolve them.
     const colors = series.map((s) => {
       canvas.style.color = s.color;
       return win.getComputedStyle(canvas).color;
     });
     canvas.style.color = "";
+    canvas.width = Math.round(width * dpr);
+    canvas.height = Math.round(height * dpr);
+    const cols = Math.ceil(canvas.width / cell);
+    const rows = Math.ceil(canvas.height / cell);
     const { fill, edge } = ditherCells({ cols, rows, series });
     ctx.clearRect(0, 0, canvas.width, canvas.height);
     // The grid hangs from the baseline so the solid bottom row is always whole.

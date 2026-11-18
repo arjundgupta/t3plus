@@ -111,7 +111,9 @@ html[data-t3plus-backdrop="image"] :is([data-workspace-area="conversation"], [da
    Moving or resizing the glow restyles only that layer's few elements. While
    it shows, the host's CSS gradient above steps aside. */
 html[data-t3plus-dithered] :is([data-workspace-area="conversation"], [data-t3plus-backdrop-host])::before,
-.t3plus-preview-pane:has(> .t3plus-glow)::before {
+html[data-t3plus-dithered] .t3plus-preview-pane:has(> .t3plus-glow:not([hidden]))::before {
+  /* Only once a render is shown: during the first one, and after a failed one, the
+     preview keeps the CSS look instead of going blank. */
   background: none !important;
 }
 
@@ -128,6 +130,17 @@ html[data-t3plus-dithered] :is([data-workspace-area="conversation"], [data-t3plu
      of ending in a hard edge. */
   -webkit-mask-image: linear-gradient(to right, transparent 0, #000 0.75rem, #000 calc(100% - 0.75rem), transparent 100%);
   mask-image: linear-gradient(to right, transparent 0, #000 0.75rem, #000 calc(100% - 0.75rem), transparent 100%);
+}
+/* A render that failed stays on the CSS fallback (backdropRenderer.js). */
+.t3plus-glow[hidden] {
+  display: none !important;
+}
+/* Increase contrast (macOS): the dithered glow and image recede behind the text,
+   as the CSS fallback's heavier scrim does above. */
+@media (prefers-contrast: more) {
+  .t3plus-glow {
+    opacity: 0.45;
+  }
 }
 
 /* The glow center. Its transform follows the composer exactly, in the same
@@ -182,13 +195,14 @@ html[data-t3plus-dithered] :is([data-workspace-area="conversation"], [data-t3plu
   }
 }
 
-/* The composer's lane slides when T3 (or t3+, see syncComposerLane in app.js)
-   changes the room kept on its right, instead of jumping. */
-html[data-t3plus-backdrop] .chat-composer-lane {
+/* The composer's lane slides when t3+ gives it T3's room back (syncComposerLane in
+   app.js). Room T3 makes for a card beside the composer is made at once, as T3 does:
+   sliding, the composer ran under the card that had just opened. */
+html[data-t3plus-backdrop] .chat-composer-lane[data-t3plus-lane-slide] {
   transition: padding-right 260ms cubic-bezier(0.22, 1, 0.36, 1);
 }
 @media (prefers-reduced-motion: reduce) {
-  html[data-t3plus-backdrop] .chat-composer-lane {
+  html[data-t3plus-backdrop] .chat-composer-lane[data-t3plus-lane-slide] {
     transition: none;
   }
 }
@@ -233,7 +247,8 @@ html[data-t3plus-glass] :is([data-chat-composer-surface="true"], [data-t3plus-su
 
 @media (forced-colors: active) {
   html[data-t3plus-backdrop] :is([data-workspace-area="conversation"], [data-t3plus-backdrop-host])::before,
-  .t3plus-preview .t3plus-preview-pane::before {
+  .t3plus-preview .t3plus-preview-pane::before,
+  .t3plus-glow {
     display: none !important;
   }
   html[data-t3plus-glass] :is([data-chat-composer-surface="true"], [data-t3plus-surface]),
@@ -1294,7 +1309,8 @@ html[data-t3plus-home] [data-chat-composer-overlay="true"].items-center {
    layout measurements are unchanged. Scrolls if the pane is very short. */
 .t3plus-home {
   position: absolute;
-  top: calc(100% + 1rem);
+  /* --t3plus-banner-h: T3's banners under the composer, measured by app.js. */
+  top: calc(100% + 1rem + var(--t3plus-banner-h, 0px));
   left: 50%;
   width: 46rem; /* measured: set inline by app.js */
   max-width: calc(100vw - 1rem);
@@ -1406,6 +1422,13 @@ html[data-t3plus-home] [data-chat-composer-overlay="true"].items-center {
   letter-spacing: -0.01em;
 }
 
+/* "Updated 3 h ago": the pool data stopped refreshing (see homeWidgets.js). */
+.t3plus-w-stale {
+  font-size: 0.6875rem;
+  line-height: 1.2;
+  color: color-mix(in oklab, var(--warning, #d97706) 80%, var(--muted-foreground));
+}
+
 .t3plus-w-reset {
   margin-top: -0.125rem;
   color: var(--muted-foreground);
@@ -1415,10 +1438,15 @@ html[data-t3plus-home] [data-chat-composer-overlay="true"].items-center {
   text-overflow: ellipsis;
 }
 
+/* The plot keeps the drawing's height. Grown to fill a card a taller neighbour
+   stretched, it outgrew its 4.5rem drawing, and the dither, the hover dots and the
+   axis no longer lined up with the line. The card's extra room goes above it, so
+   neighbouring charts still sit at the same height. */
 .t3plus-w-plot {
   position: relative;
   min-width: 0;
-  flex: 1;
+  flex: none;
+  margin-top: auto;
   isolation: isolate;
 }
 
@@ -1577,6 +1605,11 @@ html[data-t3plus-home] [data-chat-composer-overlay="true"].items-center {
 .t3plus-w-axis-spread > span {
   position: static;
   transform: none;
+}
+
+.t3plus-w-axis-spread > .t3plus-w-axis-mid {
+  position: absolute;
+  transform: translateX(-50%);
 }
 
 /* ---- Usage (T3's UsageProviderChart, compact) ---- */
@@ -1871,6 +1904,11 @@ html[data-t3plus-settings] nav[aria-label="Settings breadcrumb"] li[aria-current
 html[data-t3plus-settings] #t3plus-appearance {
   margin-top: 0;
 }
+/* The header's page actions (General's "Restore device defaults") act on the
+   T3 page underneath, not on t3+: hidden while t3+ is shown. Close stays. */
+html[data-t3plus-settings] nav[aria-label="Settings breadcrumb"] ~ div > :not([aria-label="Close"]) {
+  display: none !important;
+}
 
 .t3plus-advanced {
   margin-top: 0.5rem;
@@ -1908,8 +1946,9 @@ html[data-t3plus-settings] #t3plus-appearance {
 
 /* ---------- Thread details ----------
    T3's thread details card (dropdown-glass) gets the same material as the
-   home widget cards and the glass composer, so the three read as one set. */
-[data-thread-details-card] {
+   home widget cards and the glass composer, so the three read as one set.
+   Only with t3+'s glass on: with "Glass composer" off it keeps T3's own look. */
+html[data-t3plus-glass] [data-thread-details-card] {
   border-color: color-mix(in srgb, var(--border) 60%, transparent) !important;
   background-color: color-mix(in srgb, var(--card, #111) 74%, transparent) !important;
   -webkit-backdrop-filter: blur(14px) saturate(1.3) !important;
@@ -2021,7 +2060,7 @@ html[data-t3plus-demo] img[data-t3plus-demo-badge] {
   background: color-mix(in srgb, var(--t3plus-profile-color, var(--foreground)) 60%, transparent);
 }
 /* The open profile's dot stretches into a short pill: the indicator glides between dots. */
-.t3plus-profile-dot[aria-selected="true"]::before {
+.t3plus-profile-dot[aria-pressed="true"]::before {
   width: 0.875rem;
   background: var(--t3plus-profile-color, var(--foreground));
 }

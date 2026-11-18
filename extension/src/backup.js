@@ -17,16 +17,20 @@ import { STORAGE_KEYS } from "./config.js";
 // On start, a key missing locally is restored from Sync, else from the page
 // copy. Local values are never overwritten.
 
-/** Preferences mirrored to Chrome Sync: small, user-made, worth keeping. */
-export const SYNCED_KEYS = Object.freeze([STORAGE_KEYS.settings, STORAGE_KEYS.bots, STORAGE_KEYS.manualBots]);
+/** Preferences mirrored to Chrome Sync: small, user-made, worth keeping. Profiles too (a large one stays local, see fits). */
+export const SYNCED_KEYS = Object.freeze([STORAGE_KEYS.settings, STORAGE_KEYS.bots, STORAGE_KEYS.manualBots, STORAGE_KEYS.profiles]);
 /** Everything in an export. Caches are left out (they refill from the server). */
 export const EXPORTED_KEYS = Object.freeze([...SYNCED_KEYS, STORAGE_KEYS.image, STORAGE_KEYS.knownBots]);
-/** chrome.storage.sync allows 8 KB per item; larger values stay local only. */
+/** chrome.storage.sync allows 8 KB per item (its key and its JSON, in UTF-8 bytes); larger values stay local only. */
 const SYNC_ITEM_LIMIT = 7600;
+const encoder = typeof TextEncoder === "function" ? new TextEncoder() : null;
 
-const fits = (value) => {
+const fits = (value, key = "") => {
   try {
-    return JSON.stringify(value).length <= SYNC_ITEM_LIMIT;
+    // Bytes, not characters: a profile name in another script is two or three
+    // bytes a character, and an item over the limit failed the whole write.
+    const text = key + JSON.stringify(value);
+    return (encoder ? encoder.encode(text).length : text.length * 3) <= SYNC_ITEM_LIMIT;
   } catch {
     return false;
   }
@@ -108,14 +112,21 @@ export function mirrorToSync({ local, sync, page = null, changedEvent, setTimer 
     const remove = [];
     for (const [key, value] of pending) {
       if (value === undefined) remove.push(key);
-      else if (fits(value)) set[key] = value;
+      else if (fits(value, key)) set[key] = value;
     }
     pending.clear();
+    // One write per item: one Sync refuses (its quota) no longer takes the others with it.
+    for (const [key, value] of Object.entries(set)) {
+      try {
+        await sync.set({ [key]: value });
+      } catch {
+        // Sync quota or Chrome Sync off: local storage still has everything.
+      }
+    }
     try {
-      if (Object.keys(set).length) await sync.set(set);
       if (remove.length) await sync.remove(remove);
     } catch {
-      // Sync quota or Chrome Sync off: local storage still has everything.
+      // as above
     }
   };
   const queue = (key, value) => {
@@ -146,10 +157,21 @@ export async function exportAll(local, version) {
   return { app: "t3plus", version, exportedAt: new Date().toISOString(), data: Object.fromEntries(Object.entries(data ?? {}).filter(([, v]) => v !== undefined)) };
 }
 
-/** Restores a backup file. Only known keys are written. Returns the written keys. */
-export async function importAll(local, backup) {
+/**
+ * Restores a backup file. Only known keys are written, each only when it holds
+ * an object (every t3+ key does), and passed through `normalize[key]` when given,
+ * so a hand-edited or damaged file stores the same clean values the app would
+ * have saved. Returns the written keys.
+ */
+export async function importAll(local, backup, normalize = {}) {
   if (!backup || backup.app !== "t3plus" || !backup.data || typeof backup.data !== "object") throw new Error("Not a t3+ backup file.");
-  const write = Object.fromEntries(Object.entries(backup.data).filter(([k]) => EXPORTED_KEYS.includes(k)));
+  const write = {};
+  for (const [k, v] of Object.entries(backup.data)) {
+    if (!EXPORTED_KEYS.includes(k) || !v || typeof v !== "object" || Array.isArray(v)) continue;
+    const value = typeof normalize[k] === "function" ? normalize[k](v) : v;
+    if (value === null || value === undefined) continue; // nothing usable (a broken image)
+    write[k] = value;
+  }
   if (!Object.keys(write).length) throw new Error("The backup has no t3+ settings in it.");
   await local.set(write);
   return Object.keys(write);

@@ -1,4 +1,4 @@
-import { NON_THREAD_ROUTE_SEGMENTS, SIDEBAR_ROW_PREFIX, T3_SELECTORS } from "./config.js";
+import { NON_THREAD_ROUTE_SEGMENTS, SIDEBAR_ROW_PREFIX, T3_SELECTORS, T3PLUS } from "./config.js";
 
 // Reads T3's sidebar through its stable row hooks. t3+ never moves, re-creates
 // or re-parents T3's rows; bot rows are decorated in place (bots.js).
@@ -21,7 +21,7 @@ export function findSidebarInner(doc) {
  * folders: Map<logicalProjectKey, { li, row }>
  * shelves: Map<"shelf:x", li>
  */
-export function scanSidebar(inner) {
+export function scanSidebar(inner, { textOf = null } = {}) {
   const threads = [];
   const folders = new Map();
   const shelves = new Map();
@@ -43,7 +43,7 @@ export function scanSidebar(inner) {
     const item = row.closest(T3_SELECTORS.threadItem);
     if (!item || item.getAttribute("data-thread-item") !== id) continue;
     const parent = row.getAttribute("data-sidebar-parent");
-    const titleInfo = readRowTitle(row);
+    const titleInfo = readRowTitle(row, textOf);
     const ariaParts = (row.getAttribute("aria-label") ?? "").split(", ");
     const projectKey = row.getAttribute("data-project-key") ?? row.getAttribute("data-project") ?? (ariaParts.length > 1 ? ariaParts.at(-1) : null);
     threads.push({
@@ -65,15 +65,18 @@ export function scanSidebar(inner) {
 /**
  * T3 renders the title twice: an sr-only copy (exact text) and an aria-hidden
  * visible span with a dir attribute. Returns both (visible one may be null
- * while the row is being renamed).
+ * while the row is being renamed). `textOf(el)` reads an element's text (screenshot
+ * mode passes one that sees through its stand-ins: read back, a stand-in title was
+ * taken for the real one, and the row's status and the remembered title with it).
  */
-export function readRowTitle(row) {
-  const srOnly = row.querySelector(".sr-only:not([role])");
-  let title = srOnly?.textContent ?? "";
+export function readRowTitle(row, textOf = null) {
+  const text = (el) => (textOf ? textOf(el) : (el.textContent ?? ""));
+  const srOnly = row.querySelector(T3_SELECTORS.rowSrOnlyTitle);
+  let title = srOnly ? text(srOnly) : "";
   let titleEl = null;
   if (title) {
-    for (const span of row.querySelectorAll('span[aria-hidden="true"]')) {
-      if (span.childElementCount === 0 && span.textContent === title) {
+    for (const span of row.querySelectorAll(T3_SELECTORS.rowVisibleTitle)) {
+      if (span.childElementCount === 0 && text(span) === title) {
         titleEl = span;
         break;
       }
@@ -81,10 +84,24 @@ export function readRowTitle(row) {
   }
   if (!titleEl) {
     // T3's project-grouped rows have no sr-only copy: the visible [dir] span is the title.
-    const span = row.querySelector("span[dir]");
-    if (span && span.childElementCount === 0 && (!title || span.textContent === title)) {
+    const span = row.querySelector(T3_SELECTORS.rowDirTitle);
+    if (span && span.childElementCount === 0 && (!title || text(span) === title)) {
       titleEl = span;
-      title ||= span.textContent ?? "";
+      title ||= text(span);
+    }
+  }
+  if (!titleEl && !title) {
+    // T3 leaves dir off a title with no letter in it ("2025", only emoji): then the
+    // title is the plain span the row's label ("<title>, <status>, <project>") starts with.
+    const label = row.getAttribute("aria-label") ?? "";
+    for (const span of row.querySelectorAll("span")) {
+      if (span.childElementCount !== 0 || span.hasAttribute("role") || span.closest(`[${T3PLUS.ownedAttr}]`)) continue;
+      const value = text(span);
+      if (value.trim() && (label === value || label.startsWith(`${value}, `))) {
+        titleEl = span;
+        title = value;
+        break;
+      }
     }
   }
   return { title, titleEl };

@@ -37,8 +37,23 @@ export const T3_SELECTORS = Object.freeze({
   composerStack: '[data-chat-composer-stack="true"]',
   /** The composer's lane: T3 pads its right side by --chat-lane-inset-end (room for the details card or a preview). */
   composerLane: ".chat-composer-lane",
-  /** Things T3 floats on the right of the chat that the composer must not run under. */
-  rightOverlays: 'aside[data-thread-details-panel], [data-preview-viewport]',
+  /** The chat canvas: holds the timeline and the composer lane; T3 keeps the lane's room (--chat-lane-inset-end) on it. */
+  chatCanvas: "[data-chat-canvas]",
+  /** The new-thread headline hanging above the composer (only in the centered hero state). */
+  heroHeadline: '[data-chat-composer-stack="true"] > .absolute.bottom-full',
+  /** T3's banners under the composer (a usage-limit fallback, an upload error). */
+  composerBanner: "[data-composer-banner-stack]",
+  /** T3's terminal (the drawer and xterm's input): its keys belong to the program running there. */
+  terminal: "[data-thread-terminal-drawer], [data-terminal-owner], .xterm",
+  /** T3's command palette (⌘K) and its items. */
+  commandPalette: '[data-command-palette="true"]',
+  commandItem: '[data-slot="command-item"]',
+  /**
+   * Things T3 floats over the chat that the composer must not run under: the
+   * details card, the floating preview window (browser or device mini player),
+   * and a preview's webview.
+   */
+  rightOverlays: 'aside[data-thread-details-panel], section[data-preview-mini-player], [data-preview-viewport]',
   /** Appearance page sections, in render order. t3+ appends after the last one found. */
   appearanceSections: ["section#appearance", "section#appearance-interface"],
   /** T3's thread details panel card (ThreadDetailsPanel) and its usage limits section. */
@@ -47,19 +62,63 @@ export const T3_SELECTORS = Object.freeze({
   /** The Usage page chart (UsageProviderChart): "Daily processed tokens by provider", "Hourly cost by provider".
    *  Builds after 2026-11-16 dropped the label (the svg is aria-hidden); those match by the chart's own viewBox. */
   usageChart: 'svg[role="img"][aria-label$=" by provider"], svg[viewBox="0 0 960 260"][preserveAspectRatio="none"]:has(> path[fill="none"][stroke])',
+  /** A provider's line in that chart (relative to the chart's svg). */
+  usageChartLine: 'path[fill="none"][stroke]',
   /** The composer's model picker; its aria-label names the model ("Claude Opus 5.5, High"). */
   modelPicker: "[data-chat-provider-model-picker]",
   /** The chat's scrolling message list (MessagesTimeline). Mutations inside it are streaming text. */
   messageList: ".messages-timeline-scroll",
 
-  /** Sidebar panel. Several can exist (left/right); t3+ reads the one with thread rows. */
-  sidebarInner: '[data-slot="sidebar-inner"]',
+  /** Sidebar panel. Several can exist (left/right); t3+ reads the one with thread rows. In a
+   *  narrow window (under 768 px) T3 shows the sidebar as a sheet with the same rows instead. */
+  sidebarInner: '[data-slot="sidebar-inner"], [data-slot="sidebar"][data-mobile="true"]',
   /** Every keyboard-navigable sidebar row. Value: thread key, folder:<key>, shelf:<name>, draft:<id>. */
   sidebarRow: "[data-sidebar-row]",
   /** <li> around a thread row. Value: thread key "<environmentId>:<threadId>". */
   threadItem: "[data-thread-item]",
   /** <li> around a project folder header (Boring/project-grouped sidebar). */
   projectFolderItem: '[data-testid="sidebar-project-folder"]',
+  /** A card row's first line (project badge, project name, status), relative to the row. */
+  cardRowTopLine: ":scope > .relative.z-10 > .h-5",
+  /** A slim row's project badge slot (settled and snoozed rows outside a folder), relative to the row. */
+  slimRowBadgeSlot: ":scope > * > span.shrink-0.items-center",
+  /** A project's badge: its icon, or T3's letter monogram (an svg colored by its text color). */
+  projectBadge: 'img, [data-slot="project-monogram"] svg, [data-slot="project-monogram"]',
+  /** Inside a sidebar row: T3's hidden exact copy of the title (older builds), its visible
+   *  title span, and that span without the copy (dir is left off a title with no letter). */
+  rowSrOnlyTitle: ".sr-only:not([role])",
+  rowVisibleTitle: 'span[aria-hidden="true"]',
+  rowDirTitle: "span[dir]",
+  /** A folder header's project name. */
+  folderTitle: ".truncate",
+  /** The sidebar's footer (the profile dots go at its top). */
+  sidebarFooter: '[data-slot="sidebar-footer"], [data-sidebar="footer"]',
+  /** Any sidebar at all, and the desktop sidebar's outer wrapper. */
+  sidebarAny: '[data-slot="sidebar"]',
+  sidebarWrapper: "[data-slot='sidebar-wrapper']",
+  /** The open thread's heading in the top bar. */
+  breadcrumbHeading: '[aria-label="Thread breadcrumb"] h2',
+  /** T3's tooltips and popovers (hover cards are ones too), and a thread hover card's title line. */
+  tooltipPopup: '[data-slot="tooltip-popup"]',
+  hoverCardTitle: '[data-slot="tooltip-popup"] div.truncate:is(.font-medium, .font-semibold)',
+  /** The thread details panel (the floating card's outer element). */
+  threadDetailsPanel: "aside[data-thread-details-panel]",
+  /** Settings: the Appearance entry in the settings nav, the page's scroller and its sections' column. */
+  settingsAppearanceLink: '[data-settings-section="/settings/appearance"]',
+  settingsPageScroll: "[data-settings-page-scroll]",
+  settingsPage: "[data-settings-page-scroll] > div",
+  /** The app's root element: not a popup. */
+  appRootId: "root",
+});
+
+/** Class names of T3's that t3+ checks for (classList, not selectors). */
+export const T3_CLASSES = Object.freeze({
+  /** The status/time slot at the end of a sidebar row's top line. */
+  statusSlot: "group/sidebar-status-slot",
+  /** The composer's lane (T3 animates its padding when the right side's room changes). */
+  composerLane: "chat-composer-lane",
+  /** On the composer overlay while it is centered (the new-thread hero). */
+  centered: "items-center",
 });
 
 /** Prefixes of data-sidebar-row / data-sidebar-parent values. */
@@ -316,6 +375,13 @@ export const IMAGE_LIMITS = Object.freeze({
   maxStoredChars: 3 * 1024 * 1024,
   acceptedTypes: Object.freeze(["image/png", "image/jpeg", "image/webp", "image/avif", "image/gif"]),
 });
+
+/**
+ * The desktop build keeps t3+'s storage in T3's own localStorage (page-stub.js):
+ * one budget of a few million characters shared with T3's drafts and settings. An
+ * image there is held to about a megabyte, so it never leaves T3 short of room.
+ */
+export const DESKTOP_IMAGE_LIMITS = Object.freeze({ ...IMAGE_LIMITS, maxStoredChars: 1024 * 1024 });
 
 export const BOT_LIMITS = Object.freeze({
   /** Most bots t3+ keeps presentation for. */

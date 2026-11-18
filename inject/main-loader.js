@@ -7,6 +7,9 @@
   const path = require("path");
   const os = require("os");
   const HOME = path.join(os.homedir(), ".t3plus");
+  // The version t3+ reports (Settings, backups): the extension's own, not a copy here.
+  let VERSION = "0.0.0";
+  try { VERSION = JSON.parse(fs.readFileSync(path.join(HOME, "extension/package.json"), "utf8")).version || VERSION; } catch {}
   // The data feeds (inject/feeds.js), loaded fresh on every run of the loader.
   const feedsModule = path.join(HOME, "inject/feeds.js");
   delete require.cache[require.resolve(feedsModule)];
@@ -17,11 +20,22 @@
   const read = (f) => { try { return fs.readFileSync(path.join(HOME, f), "utf8"); } catch { return null; } };
   const feeds = () => ({ home: read("feeds/t3plus-home.json"), bots: read("feeds/t3plus-bots.json") });
   const appOrigin = __APP_ORIGIN__;
+  // The origin itself, not a prefix of it ("t3code://app" must not match "t3code://apple").
   const isTarget = (wc) => {
-    try { return !wc.isDestroyed() && wc.getType() === "window" && wc.getURL().startsWith(appOrigin); } catch { return false; }
+    try {
+      if (wc.isDestroyed() || wc.getType() !== "window") return false;
+      const url = wc.getURL();
+      return url === appOrigin || url.startsWith(`${appOrigin}/`);
+    } catch {
+      return false;
+    }
   };
   async function inject(wc) {
-    if (!isTarget(wc)) return "skip";
+    if (state.disposed || !isTarget(wc)) return "skip";
+    // The new files first: missing (a rebuild under way, or never built), the copy
+    // that is running stays as it is rather than being stopped for nothing.
+    const stub = read("inject/page-stub.js"), js = read("dist/content.js"), css = read("dist/content.css");
+    if (!stub || !js || !css) throw new Error("t3+ files missing in ~/.t3plus");
     // A copy that is already running (re-run of `on`, or new files) is stopped first, so
     // the page never needs a reload: newer builds expose their app, the first one bows out
     // when its stand-in extension id goes away.
@@ -38,15 +52,17 @@
     })()`);
     const oldKey = state.cssKeys.get(wc.id) ?? (globalThis.__t3plusCssKeys && globalThis.__t3plusCssKeys.get(wc.id));
     if (oldKey) { try { await wc.removeInsertedCSS(oldKey); } catch {} }
-    const stub = read("inject/page-stub.js"), js = read("dist/content.js"), css = read("dist/content.css");
-    if (!stub || !js || !css) throw new Error("t3+ files missing in ~/.t3plus");
     const svg = read("dist/sample-spectrum.svg") || "";
-    const boot = { version: "0.18.2", sampleUrl: `data:image/svg+xml;base64,${Buffer.from(svg).toString("base64")}`, feeds: feeds() };
+    // The feeds' times, taken before they are read: a publish that lands while this
+    // page is being injected is then seen as newer and pushed (recorded after the
+    // awaits, its time was marked as delivered with the older text).
+    const feedTimes = Object.fromEntries(Object.entries(FEEDS).map(([kind, feed]) => [kind, mtime(feed.file)]));
+    const boot = { version: VERSION, sampleUrl: `data:image/svg+xml;base64,${Buffer.from(svg).toString("base64")}`, feeds: feeds() };
     state.cssKeys.set(wc.id, await wc.insertCSS(css));
     (globalThis.__t3plusCssKeys ??= new Map()).set(wc.id, state.cssKeys.get(wc.id));
     await wc.executeJavaScript(`window.__t3plusBoot=${JSON.stringify(boot)};\n${stub}\n;window.__t3plusInjected=true;\n${js}\n;0`);
     state.injected.add(wc.id);
-    for (const [kind, feed] of Object.entries(FEEDS)) pushed.set(`${wc.id}:${kind}`, mtime(feed.file)); // boot.feeds carried these
+    for (const kind of Object.keys(FEEDS)) pushed.set(`${wc.id}:${kind}`, feedTimes[kind]); // boot.feeds carried these
     log(replaced ? "re-injected into" : "injected into", wc.id);
     return replaced ? "re-injected" : "injected";
   }
@@ -54,7 +70,13 @@
     const onLoad = () => { inject(wc).catch((e) => log("inject failed:", e && e.message)); };
     wc.on("did-finish-load", onLoad);
     // Electron passes the text as the third argument (older) or on the event (newer).
-    const onConsole = (event, _level, message) => onNote(wc, typeof message === "string" ? message : event && event.message);
+    // Only the app's own page speaks for t3+, not a frame embedded in it.
+    const onConsole = (event, _level, message) => {
+      const frame = event && event.frame;
+      const main = wc.mainFrame;
+      if (frame && main && (frame.processId !== main.processId || frame.routingId !== main.routingId)) return;
+      onNote(wc, typeof message === "string" ? message : event && event.message);
+    };
     wc.on("console-message", onConsole);
     state.undo.push(() => { try { wc.off("did-finish-load", onLoad); wc.off("console-message", onConsole); } catch {} });
   }
@@ -110,8 +132,10 @@
       }
       if (!Object.keys(changed).length) continue;
       // Hand over the new copies and let t3+ pick them up now rather than at its next poll.
+      // Through t3+'s own hook: a synthetic "visibilitychange" also reached T3's
+      // listeners, which report activity to every environment and refresh their data.
       wc.executeJavaScript(`(() => { Object.assign(window.__t3plusFeeds = window.__t3plusFeeds || {}, ${JSON.stringify(changed)});
-        if (window.__t3plusApp) document.dispatchEvent(new Event("visibilitychange")); })();0`).catch(() => {});
+        try { window.__t3plusApp?.feedsUpdated?.(); } catch {} })();0`).catch(() => {});
     }
   }
   // The app window never reports itself hidden (T3 turns background throttling off), so
@@ -128,29 +152,43 @@
     if (Date.now() - Math.max(mtime(feed.file), lastRun.get(kind) || 0) > feed.maxAge) publish(kind);
   }
   // Threads made bots by Option-click: the bot feed needs their ids.
+  // Each window reports its own list (its bots and its open thread); the feed covers
+  // all of them. One shared list, replaced by whichever window spoke last, dropped the
+  // other window's previews and spend.
   let botKeys = null;
-  function onBotKeys(keys) {
+  const keysByWindow = new Map(); // webContents id -> thread ids
+  function onBotKeys(wc, keys) {
     const ids = (Array.isArray(keys) ? keys : []).filter((k) => typeof k === "string").map((k) => k.slice(k.indexOf(":") + 1));
-    const next = JSON.stringify(ids);
+    if (!keysByWindow.has(wc.id)) wc.once("destroyed", () => { keysByWindow.delete(wc.id); });
+    keysByWindow.set(wc.id, ids);
+    // Most wanted first, for the worker's cap: every window's first key (its open
+    // thread), then the rest in each window's order (its bots, top down).
+    const lists = [...keysByWindow.values()];
+    const all = [...new Set([...lists.map((l) => l[0]).filter(Boolean), ...lists.flat()])];
+    // Republished when the set changes, not when rows only move.
+    const next = JSON.stringify([...all].sort());
     if (next === botKeys) return;
     botKeys = next;
-    botIds = ids;
+    botIds = all;
     lastRun.delete("bots");
-    if (ids.length) publish("bots");
+    if (all.length) publish("bots");
   }
   function onNote(wc, text) {
     if (typeof text !== "string" || !text.startsWith("[t3plus]") || !isTarget(wc)) return;
     let note;
     try { note = JSON.parse(text.slice(8)); } catch { return; }
     if (note.what === "ask") onAsk(wc, note.kind);
-    else if (note.what === "bots") onBotKeys(note.keys);
+    else if (note.what === "bots") onBotKeys(wc, note.keys);
     else if (note.what === "health") onHealth(note.problems);
   }
   // What t3+ reports it cannot find in T3's page (see src/health.js), with T3's
   // version, so a breaking T3 update is easy to pin down.
   let health = null;
   function onHealth(problems) {
-    const list = (Array.isArray(problems) ? problems : []).filter((p) => p && typeof p.feature === "string").slice(0, 20);
+    const list = (Array.isArray(problems) ? problems : [])
+      .filter((p) => p && typeof p.feature === "string")
+      .slice(0, 20)
+      .map((p) => ({ feature: p.feature.slice(0, 80), missing: (Array.isArray(p.missing) ? p.missing : []).filter((m) => typeof m === "string").slice(0, 10).map((m) => m.slice(0, 80)) }));
     const next = JSON.stringify(list);
     if (next === health) return;
     health = next;
@@ -166,11 +204,14 @@
   state.debug = () => ({ lastRun: Object.fromEntries(lastRun), running: [...running], botKeys, health: health && JSON.parse(health), timers: state.timers.length });
 
   state.dispose = (reload = false) => {
+    // A loader still injecting (a second `on` arrived mid-loop) stops attaching and
+    // injecting from here on.
+    state.disposed = true;
     for (const t of state.timers) clearInterval(t);
     for (const fn of state.undo.splice(0)) fn();
     for (const wc of electron.webContents.getAllWebContents()) {
       const key = state.cssKeys.get(wc.id);
-      try { if (key) { wc.removeInsertedCSS(key); globalThis.__t3plusCssKeys && globalThis.__t3plusCssKeys.delete(wc.id); } } catch {}
+      try { if (key) { Promise.resolve(wc.removeInsertedCSS(key)).catch(() => {}); globalThis.__t3plusCssKeys && globalThis.__t3plusCssKeys.delete(wc.id); } } catch {}
       try { if (reload && state.injected.has(wc.id) && !wc.isDestroyed()) wc.reload(); } catch {}
     }
     delete globalThis.__t3plus;
@@ -182,6 +223,7 @@
   try { fs.rmSync(path.join(HOME, "state/bot-keys.json"), { force: true }); } catch {}
   const results = [];
   for (const wc of electron.webContents.getAllWebContents()) {
+    if (state.disposed) break;
     attach(wc);
     try { results.push(`${wc.id}:${await inject(wc)}`); } catch (e) { results.push(`${wc.id}:error ${e && e.message}`); }
   }

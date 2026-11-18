@@ -7,7 +7,11 @@
  * glow, widgets and decorations never show a frame late or out of place.
  * Several changes in one frame share one check. Only a storm of changes (more
  * than STORM_CHECKS checks within a second) falls back to one check per
- * `throttleMs`, which bounds the cost of anything that keeps the DOM busy.
+ * `throttleMs`, which bounds the cost of anything that keeps the DOM busy. The
+ * storm lasts while changes keep coming (each within a check or so of the
+ * last) and ends once they pause. During one, `quick` (when given) still runs
+ * every frame that had a change: what must never show a frame late (screenshot
+ * mode's cover) keeps up while the full check waits.
  * Without frames (tests), checks wait `throttleMs` as before.
  *
  * `isNoise(node)`, when given, marks mutations t3+ never needs to react to
@@ -15,8 +19,9 @@
  * dropped without scheduling a check.
  */
 const STORM_CHECKS = 40;
+const STORM_HOLD_MS = 1000;
 
-export function createDomWatcher({ win, doc, check, throttleMs, isNoise = null, frames = false }) {
+export function createDomWatcher({ win, doc, check, throttleMs, isNoise = null, frames = false, quick = null }) {
   let timer = null;
   let frame = null;
   let observer = null;
@@ -29,6 +34,20 @@ export function createDomWatcher({ win, doc, check, throttleMs, isNoise = null, 
   const raf = frames && typeof win.requestAnimationFrame === "function" ? (f) => win.requestAnimationFrame(f) : null;
   let windowStart = -Infinity;
   let windowChecks = 0;
+  // A storm, once it starts, holds until the changes pause. Measured per second
+  // only, it ended every second: after a throttled tail, checks went back to
+  // every frame, and a sustained storm still ran about 40 checks a second.
+  let stormUntil = -Infinity;
+  let lastAsk = -Infinity;
+  const stormGap = Math.max(250, throttleMs * 1.5);
+  let quickFrame = null;
+  // Between start() and stop() only: a late schedule() (a save or feed read that
+  // finished after stop) must not run a check in a stopped copy.
+  let running = false;
+  // Text changed in place (React sets a text node's value, as when a reply
+  // streams) is a characterData mutation. Only screenshot mode needs those.
+  let watchText = false;
+  const options = () => ({ childList: true, subtree: true, characterData: watchText });
 
   function run() {
     if (timer !== null) win.clearTimeout(timer);
@@ -41,22 +60,35 @@ export function createDomWatcher({ win, doc, check, throttleMs, isNoise = null, 
       windowChecks = 0;
     }
     windowChecks += 1;
+    if (windowChecks >= STORM_CHECKS) stormUntil = Math.max(stormUntil, t + STORM_HOLD_MS);
     lastRun = t;
+    if (quickFrame !== null) win.cancelAnimationFrame?.(quickFrame);
+    quickFrame = null;
     check();
+  }
+
+  function runQuick() {
+    quickFrame = null;
+    if (running) quick();
   }
 
   // A hidden page (background tab, minimized window) owes nobody a repaint: the
   // check waits until the page is shown again.
   let owed = false;
   function schedule() {
+    if (!running) return;
     if (doc.visibilityState === "hidden") {
       owed = true;
       return;
     }
-    if (timer !== null || frame !== null) return;
     const t = now();
+    if (t < stormUntil && t - lastAsk < stormGap) stormUntil = t + STORM_HOLD_MS;
+    lastAsk = t;
+    if (frame !== null) return;
     const bursting = t < burstUntil;
-    const storming = t - windowStart <= 1000 && windowChecks >= STORM_CHECKS;
+    const storming = t < stormUntil;
+    if (raf && storming && !bursting && quick && quickFrame === null) quickFrame = raf(runQuick);
+    if (timer !== null) return;
     if (raf && (bursting || !storming)) {
       frame = raf(run);
       return;
@@ -82,11 +114,12 @@ export function createDomWatcher({ win, doc, check, throttleMs, isNoise = null, 
 
   return {
     start() {
+      running = true;
       observer = new win.MutationObserver((records) => {
         if (isNoise && records.every((record) => isNoise(record.target))) return;
         schedule();
       });
-      observer.observe(doc.documentElement, { childList: true, subtree: true });
+      observer.observe(doc.documentElement, options());
       // T3 uses client-side routing. The Navigation API sees pushState too;
       // popstate covers back/forward where it is missing.
       win.navigation?.addEventListener?.("currententrychange", onNavigate);
@@ -95,6 +128,7 @@ export function createDomWatcher({ win, doc, check, throttleMs, isNoise = null, 
       run();
     },
     stop() {
+      running = false;
       observer?.disconnect();
       observer = null;
       win.navigation?.removeEventListener?.("currententrychange", onNavigate);
@@ -102,17 +136,25 @@ export function createDomWatcher({ win, doc, check, throttleMs, isNoise = null, 
       doc.removeEventListener("visibilitychange", onVisibility);
       if (timer !== null) win.clearTimeout(timer);
       if (frame !== null) win.cancelAnimationFrame?.(frame);
+      if (quickFrame !== null) win.cancelAnimationFrame?.(quickFrame);
       timer = null;
       frame = null;
+      quickFrame = null;
     },
     schedule,
+    /** Also react to text changed in place (screenshot mode covers streaming text). */
+    watchTextChanges(on) {
+      if (watchText === Boolean(on)) return;
+      watchText = Boolean(on);
+      observer?.observe(doc.documentElement, options());
+    },
     /** Runs a pending check now. For tests, layout changes (ResizeObserver) and state changes that should show immediately. */
     flush() {
       run();
     },
     /** True while changes are coming faster than one check per frame can follow. */
     storming() {
-      return now() - windowStart <= 1000 && windowChecks >= STORM_CHECKS;
+      return now() < stormUntil;
     },
   };
 }

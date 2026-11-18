@@ -61,6 +61,27 @@ test("reset restores defaults and subscribe reports saves from another tab", asy
   assert.deepEqual(await tabB.load(), { ...defaultSettings(), composerGradient: { ...defaultSettings().composerGradient, mode: "image" } });
 });
 
+test("reset restores the appearance only: features and screenshot mode stay", async () => {
+  const storage = createFakeChromeStorage();
+  const store = createSettingsStore(storage.area, storage.onChanged);
+  const d = defaultSettings();
+  await store.save({
+    ...d,
+    composerGradient: { ...d.composerGradient, mode: "image", intensity: 90, accent: "#112233", dither: false },
+    glass: { enabled: false, strength: 10 },
+    sidebar: { bots: false, botsDefault: false, botStyle: "space", profiles: false },
+    home: { widgets: false },
+    demo: { enabled: true },
+  });
+  const after = await store.reset();
+  assert.deepEqual(after.composerGradient, d.composerGradient);
+  assert.deepEqual(after.glass, d.glass);
+  assert.deepEqual(after.sidebar, { bots: false, botsDefault: false, botStyle: "space", profiles: false });
+  assert.deepEqual(after.home, { widgets: false });
+  assert.deepEqual(after.demo, { enabled: true }, "screenshot mode is not switched off by surprise");
+  assert.deepEqual(await store.load(), after);
+});
+
 test("v1 settings (composerGradient only) upgrade with glass and sidebar defaults", () => {
   const v1 = { version: 1, composerGradient: { enabled: true, mode: "image", accent: "#112233", intensity: 40, imageSource: "upload" } };
   const result = normalizeSettings(v1);

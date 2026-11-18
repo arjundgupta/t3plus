@@ -1,6 +1,6 @@
 import { botClipPath, botEdgeColor, botFillUrl, botShapeHasOwnColors } from "./botArt.js";
 import { applyAvatarVars, botPaintColor, PROJECT_COLOR, resolveBotPresentation } from "./bots.js";
-import { APPEARANCE_ROUTE, BOT_COLORS, BOT_SHAPES, BOT_STYLES, IMAGE_LIMITS, T3_SELECTORS, T3PLUS } from "./config.js";
+import { APPEARANCE_ROUTE, BOT_COLORS, BOT_SHAPES, BOT_STYLES, DEFAULT_BOT_MARKER, IMAGE_LIMITS, T3_SELECTORS, T3PLUS } from "./config.js";
 import { createBuilder, setText, uniqueId as id } from "./dom.js";
 
 /**
@@ -34,7 +34,9 @@ export function ensurePanelMounted(container, panel) {
  *   bots: [{ key, title, titleLabel, prefs: { shape, color }, view, preview }], botMessage,
  * }
  */
-export function createAppearancePanel(doc, actions) {
+export function createAppearancePanel(doc, actions, { desktop = false } = {}) {
+  // The desktop build keeps everything in T3's own storage on this computer, not a browser's.
+  const where = desktop ? "on this computer" : "in this browser";
   const h = createBuilder(doc);
   const row = ({ title, description, control, extra }) => {
     const titleId = id("row-title");
@@ -111,7 +113,7 @@ export function createAppearancePanel(doc, actions) {
   const imageCaption = h("p", { class: "t3plus-row-desc" });
   const imageRow = row({
     title: "Image",
-    description: "Stored only in this browser. Large images are resized and saved as WebP.",
+    description: `Stored only ${where}. Large images are resized and saved as WebP.`,
     control: [thumb, uploadButton, sampleButton, removeButton, fileInput],
     extra: imageCaption,
   });
@@ -214,14 +216,16 @@ export function createAppearancePanel(doc, actions) {
   let previewBotsSignature = "";
   function updatePreviewBots(bots) {
     const list = (bots.length ? bots : SAMPLE_PREVIEW_BOTS).slice(0, 2);
-    const signature = JSON.stringify(list.map((b) => [b.key, b.titleLabel, b.preview, b.prefs]));
+    // The bot style and the project color change a face too: switching to Sports
+    // left the preview on the old shapes, and preview bots ignored their project.
+    const signature = JSON.stringify(list.map((b) => [b.key, b.titleLabel, b.preview, b.prefs, b.projectColor ?? null, b.view?.shape ?? null]));
     if (signature === previewBotsSignature) return;
     previewBotsSignature = signature;
     previewBots.replaceChildren(
       ...list.map((bot, index) => {
         // First bot: open and working (animated, full-strength name). Second: idle and receded.
         const status = index === 0 ? "working" : "idle";
-        const view = resolveBotPresentation({ key: bot.key, titleLabel: bot.titleLabel, status }, bot.prefs);
+        const view = resolveBotPresentation({ key: bot.key, titleLabel: bot.titleLabel, status, projectColor: bot.projectColor ?? null }, bot.prefs);
         const avatar = h("span", { class: "t3plus-bot-avatar t3plus-preview-avatar", "data-status": status });
         applyAvatarVars(avatar, view);
         return h("div", { class: `t3plus-preview-bot${index === 0 ? " is-active" : ""}` }, [
@@ -276,10 +280,15 @@ export function createAppearancePanel(doc, actions) {
   const featuresCard = h("div", { class: "t3plus-card" }, [
     row({ title: "Status", extra: healthText }),
     row({ title: "Bot rows", description: "Bots get a face, their name, their latest message, and mini robots while they run subagents.", control: botsToggle }),
-    row({ title: "Every thread is a bot", description: "On: all threads are bots; Option-click a thread to turn its bot off (and on again). Off: only threads you Option-click are bots.", control: botsDefaultToggle }),
+    row({ title: "Every thread is a bot", description: `On: every thread is a bot. Off: only threads whose title starts with ${DEFAULT_BOT_MARKER}.`, control: botsDefaultToggle }),
     row({ title: "Profiles", description: "Dots at the bottom of the sidebar, like Dia's profiles: each shows its own projects. Swipe sideways with two fingers on the sidebar, click a dot, or press Ctrl+Shift+1–9 to switch; drag a project folder onto a profile to move it; right-click a dot to rename or delete it.", control: profilesToggle }),
     row({ title: "Bot style", description: "What bots look like when you have not picked a shape for one: Classic shapes in the project's color, or Sports balls, Space planets, or Fruit.", control: botStyleGroup }),
-    row({ title: "Screenshot mode", description: "Swap thread titles, projects, branches and message text for believable stand-ins, to share the UI without personal details. Widgets stay real. Nothing in T3 changes. Shortcut: Alt+Shift+D.", control: demoToggle }),
+    row({
+      title: "Screenshot mode",
+      description:
+        "Swap thread titles, projects, branches, machine names and message text for believable stand-ins: in the sidebar, the header, the chat, the composer, hover cards, menus and ⌘K. Terminals, diffs, file views and Settings pages still show real content, so keep them out of the shot. Widgets stay real. Nothing in T3 changes.",
+      control: demoToggle,
+    }),
     row({ title: "Usage widgets", description: "Pools, activity and usage under the new-thread composer, and the current provider's pool in thread details (Usage limits).", control: homeToggle }),
   ]);
 
@@ -289,7 +298,7 @@ export function createAppearancePanel(doc, actions) {
       accentRow,
       ditherSizeRow,
       row({ title: "Glass", description: "Turn the translucent composer card off. Falls back to a solid card when the browser cannot blur.", control: glassToggle }),
-      row({ title: "Backup", description: "Settings already carry over between versions (fixed extension ID, Chrome Sync). Export a file to also keep an uploaded image.", control: [exportButton, importButton, importFile] }),
+      row({ title: "Backup", description: "Save your t3+ settings, profiles, bots and uploaded image to a file, to keep a copy or move them to another computer.", control: [exportButton, importButton, importFile] }),
       row({ title: "Reset", description: "Restore appearance defaults. A stored upload is kept until you remove it.", control: resetButton }),
     ]),
   ]);
@@ -299,7 +308,7 @@ export function createAppearancePanel(doc, actions) {
   const botsEmpty = h("p", { class: "t3plus-row-desc t3plus-bots-empty" });
   const botStatus = h("p", { class: "t3plus-status", role: "status", "aria-live": "polite" });
   const botsCard = h("div", { class: "t3plus-card" }, [
-    row({ title: "Bots", description: "A shape and a color for each bot. Unpicked, each bot gets a shape from the bot style and takes its project's color. Option-click a thread in the sidebar to turn its bot on or off.", extra: h("div", {}, [botsEmpty, botsList, botStatus]) }),
+    row({ title: "Bots", description: "A shape and a color for each bot. Unpicked, each bot gets a shape from the bot style and takes its project's color.", extra: h("div", {}, [botsEmpty, botsList, botStatus]) }),
   ]);
 
   const botEditors = new Map();
@@ -400,7 +409,7 @@ export function createAppearancePanel(doc, actions) {
   const titleId = id("title");
   const section = h("section", { id: T3PLUS.panelId, class: "t3plus-section", "aria-labelledby": titleId }, [
     h("div", { class: "t3plus-section-header" }, [
-      h("h2", { class: "t3plus-section-title", id: titleId }, ["t3+", h("span", { class: "t3plus-badge", text: "Extension" })]),
+      h("h2", { class: "t3plus-section-title", id: titleId }, ["t3+", h("span", { class: "t3plus-badge", text: desktop ? "Desktop" : "Extension" })]),
     ]),
     lookCard,
     h("h3", { class: "t3plus-subsection-title", text: "Features" }),
@@ -421,10 +430,12 @@ export function createAppearancePanel(doc, actions) {
     thumb.style.backgroundImage = imageUrl ? `url("${imageUrl.replace(/"/g, '\\"')}")` : "";
     sampleButton.setAttribute("aria-pressed", String(!usingUpload));
     removeButton.disabled = !image;
+    // Screenshot mode: a file name can be personal ("passport-scan.png").
+    const fileName = settings.demo.enabled ? "your image" : image?.name;
     setText(imageCaption, usingUpload
-      ? `Using ${image.name} (${image.width}×${image.height}).`
+      ? `Using ${fileName} (${image.width}×${image.height}).`
       : image
-        ? `Using the packaged sample. Your upload ${image.name} is still stored.`
+        ? `Using the packaged sample. Your upload ${fileName} is still stored.`
         : "Using the packaged sample image.");
 
     themeButton.setAttribute("aria-pressed", String(g.accent === "theme"));
@@ -443,7 +454,7 @@ export function createAppearancePanel(doc, actions) {
     preview.dataset.backdrop = g.enabled ? g.mode : "off";
     updatePreviewBots(state.bots ?? []);
     preview.dataset.glass = String(settings.glass.enabled);
-    setText(status, message);
+    setText(status, settings.demo.enabled && image?.name && message ? message.split(image.name).join("your image") : message);
 
     // Sidebar
     const problems = state.health ?? [];
@@ -462,7 +473,7 @@ export function createAppearancePanel(doc, actions) {
     const marker = state.botMarker;
     setText(botsEmpty, bots.length
       ? ""
-      : `No bots yet. Option-click a thread in the sidebar to make it a bot (Option-click again to undo), turn on "Every thread is a bot", or put ${marker} at the start of its title.`);
+      : `No bots yet. Turn on "Every thread is a bot", or put ${marker} at the start of a thread's title.`);
     botsEmpty.hidden = bots.length > 0;
     updateBots(bots);
     setText(botStatus, state.botMessage);

@@ -29,6 +29,8 @@ function explain(stderr) {
   if (/inspector did not open/.test(text)) return "T3 Code did not open its debugger port, which t3+ loads through. This T3 version may have turned that off.";
   if (/files missing/.test(text)) return "t3+'s built files are missing. Run ~/.t3plus/build.sh.";
   if (/expected one running T3 Code app/.test(text)) return "More than one T3 Code app is running.";
+  if (/port \d+ (belongs to|was taken by) another process/.test(text)) return "Another program is using port 9229 (a Node debugger, maybe). Close it and reopen T3 Code.";
+  if (/needs Node 22/.test(text)) return "The Node found for t3+ is older than 22. Install Node 22 or newer.";
   const last = text.trim().split("\n").filter(Boolean).pop();
   return last ? last.slice(0, 160) : "unknown error";
 }
@@ -36,7 +38,8 @@ function explain(stderr) {
 /** The app's main process: launched by launchd (ppid 1), the app's own binary. Not this
  *  script, which runs on that same binary (ELECTRON_RUN_AS_NODE) when no Node is installed. */
 function mainPid() {
-  const hits = ps("-axo", "pid=,ppid=,comm=").split("\n").map((l) => l.trim().match(/^(\d+)\s+(\d+)\s+(.*)$/))
+  // This user's processes only (fast user switching: another user's T3 is not ours).
+  const hits = ps("-U", String(process.getuid()), "-o", "pid=,ppid=,comm=").split("\n").map((l) => l.trim().match(/^(\d+)\s+(\d+)\s+(.*)$/))
     .filter((m) => m && m[2] === "1" && Number(m[1]) !== process.pid && /\/T3 Code[^/]*\.app\/Contents\/MacOS\/T3 Code[^/]*$/.test(m[3]));
   return hits.length === 1 ? Number(hits[0][1]) : null;
 }
@@ -85,6 +88,8 @@ for (let attempt = 1; attempt <= 40; attempt += 1) {
     process.exit(0);
   }
   if (mainPid() !== main) { log(`app ${id} quit before t3+ loaded`); process.exit(0); }
+  // Errors that trying again cannot fix: stop now (each try opens T3's debugger port).
+  if (/files missing|needs Node 22|belongs to another process/.test(lastError)) break;
   await sleep(2000);
 }
 const reason = explain(lastError);

@@ -41,7 +41,7 @@ export function samplePath(d, width, height) {
 /** The series in one of T3's chart SVGs, heaviest first (T3's paint order). */
 export function readUsageSeries(svg) {
   const [, , width, height] = (svg.getAttribute("viewBox") ?? "").split(/[\s,]+/).map(Number);
-  return [...svg.querySelectorAll('path[fill="none"][stroke]')]
+  return [...svg.querySelectorAll(T3_SELECTORS.usageChartLine)]
     .map((path) => ({ points: samplePath(path.getAttribute("d"), width, height), color: path.getAttribute("stroke"), fillAlpha: 0.75 }))
     .filter((s) => s.points.length > 1);
 }
@@ -65,7 +65,7 @@ export function createUsageDither(doc) {
       for (const svg of doc.querySelectorAll(T3_SELECTORS.usageChart)) {
         const plot = svg.parentElement;
         if (!plot) continue;
-        const signature = [...svg.querySelectorAll('path[fill="none"][stroke]')].map((p) => `${p.getAttribute("stroke")}|${p.getAttribute("d")}`).join("\n");
+        const signature = [...svg.querySelectorAll(T3_SELECTORS.usageChartLine)].map((p) => `${p.getAttribute("stroke")}|${p.getAttribute("d")}`).join("\n");
         let entry = charts.get(svg);
         if (!entry) {
           entry = { dither: createDitherCanvas(doc, [], { className: "t3plus-usage-dither" }), signature: null };

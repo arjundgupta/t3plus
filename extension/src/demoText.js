@@ -36,10 +36,19 @@ const BRANCHES = [
   "perf/bundle-size", "feat/shortcuts", "ci/preview-deploys", "fix/worker-leak", "feat/audit-log",
 ];
 
-const MACHINES = ["studio-mac", "build-box", "dev-laptop", "workstation", "cloud-dev", "mini-server"];
+const MACHINES = [
+  "studio-mac", "build-box", "dev-laptop", "workstation", "cloud-dev", "mini-server",
+  "office-imac", "travel-air", "render-node", "ci-runner", "home-server", "test-rig",
+];
 
 
-const BOTS = ["Release Captain", "Triage Bot", "Nightly Builder", "Docs Gardener", "Deploy Watch", "Inbox Zero", "Dependency Bot", "QA Runner"];
+// With every thread a bot (the default), a sidebar shows many at once: enough names
+// that they rarely repeat.
+const BOTS = [
+  "Release Captain", "Triage Bot", "Nightly Builder", "Docs Gardener", "Deploy Watch", "Inbox Zero", "Dependency Bot", "QA Runner",
+  "Bug Hunter", "Changelog Writer", "Perf Scout", "Schema Keeper", "Flaky Test Fixer", "Design Reviewer", "Onboarding Guide", "Metrics Watcher",
+  "Security Sweeper", "Migration Pilot", "Support Helper", "Code Reviewer", "Backlog Groomer", "Cost Tracker", "Uptime Guard", "Copy Editor",
+];
 
 const BOT_MESSAGES = [
   "Shipped 3 pull requests overnight; all checks are green.",

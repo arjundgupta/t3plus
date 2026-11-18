@@ -4,9 +4,10 @@
 //
 // It fetches only URLs listed in src/hosts.js FETCH_ENDPOINTS (which are also
 // the manifest's only host permissions), sends no cookies, follows no
-// redirects, and returns at most CONFIG_LIMITS.maxChars characters.
+// redirects, and returns at most CONFIG_LIMITS.maxChars * 4 characters (each feed's
+// parser applies its own limit).
 import { CONFIG_LIMITS } from "./config.js";
-import { FEEDS_CONFIGURED, FETCH_ENDPOINTS } from "./hosts.js";
+import { FEEDS_CONFIGURED, FETCH_ENDPOINTS, HOST_MATCHES } from "./hosts.js";
 
 export async function fetchConfig(url, fetchImpl = fetch) {
   if (!FETCH_ENDPOINTS.includes(url)) return { ok: false, status: 0, error: "URL is not a configured t3+ endpoint." };
@@ -14,7 +15,9 @@ export async function fetchConfig(url, fetchImpl = fetch) {
     const response = await fetchImpl(url, { cache: "no-store", credentials: "omit", redirect: "error" });
     if (!response.ok) return { ok: false, status: response.status };
     const text = await response.text();
-    if (text.length > CONFIG_LIMITS.maxChars) return { ok: false, status: response.status, error: "Response is too large." };
+    // The largest feed any parser takes (the home feed: CONFIG_LIMITS.maxChars * 4,
+    // see homeData.js); a heavy user's home feed outgrew the plain limit.
+    if (text.length > CONFIG_LIMITS.maxChars * 4) return { ok: false, status: response.status, error: "Response is too large." };
     return { ok: true, status: response.status, text };
   } catch (error) {
     return { ok: false, status: 0, error: error instanceof Error ? error.message : String(error) };
@@ -35,8 +38,16 @@ if (typeof chrome !== "undefined" && chrome.runtime?.onMessage) {
 }
 
 // The toolbar icon opens T3's Settings on the t3+ section (#t3plus, read by
-// src/app.js). chrome.tabs.create needs no extra permission.
-export const SETTINGS_URL = "https://app.t3.codes/settings/appearance#t3plus";
+// src/app.js), on the T3 the current tab shows (a self-hosted one added in
+// hosts.js too), else the hosted app. chrome.tabs.create needs no extra
+// permission, and the tab's URL is readable on T3's pages (host permission).
+export const SETTINGS_PATH = "/settings/appearance#t3plus";
+export function settingsUrlFor(tabUrl) {
+  const origins = HOST_MATCHES.map((pattern) => pattern.replace(/\/\*$/, ""));
+  const here = typeof tabUrl === "string" ? origins.find((origin) => tabUrl === origin || tabUrl.startsWith(`${origin}/`)) : null;
+  return `${here ?? origins[0]}${SETTINGS_PATH}`;
+}
+export const SETTINGS_URL = settingsUrlFor(null);
 if (typeof chrome !== "undefined" && chrome.action?.onClicked) {
-  chrome.action.onClicked.addListener(() => chrome.tabs.create({ url: SETTINGS_URL }));
+  chrome.action.onClicked.addListener((tab) => chrome.tabs.create({ url: settingsUrlFor(tab?.url) }));
 }

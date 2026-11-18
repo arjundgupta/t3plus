@@ -93,10 +93,14 @@ function hslToRgb([h, s, l]) {
   return [f(0), f(8), f(4)].map((v) => Math.round(v * 255));
 }
 
-/** Shifts hue by `deg` and sets lightness to `l` (0..1), keeping saturation (with a floor so greys still tint). */
+/**
+ * Shifts hue by `deg` and sets lightness to `l` (0..1), keeping saturation (with a
+ * floor so a pale color still tints). A grey stays grey: its hue is 0 (red), and with
+ * the floor a white, grey or black accent made a red glow.
+ */
 function shade(rgb, deg, l) {
   const [h, s] = rgbToHsl(rgb);
-  return hslToRgb([(h + deg + 360) % 360, Math.max(s, 0.35), l]);
+  return hslToRgb([(h + deg + 360) % 360, s < 0.08 ? s : Math.max(s, 0.35), l]);
 }
 
 /**
@@ -108,9 +112,16 @@ function shade(rgb, deg, l) {
  *  - spectrum: the hue drifts across the ramp (a cooler deep tone, a warmer
  *    hot tone), so the glow is a streak of colored pixels.
  */
-export function glowTones(rgb, style) {
+export function glowTones(rgb, style, light = false) {
   const [, , l] = rgbToHsl(rgb);
   const base = Math.min(0.62, Math.max(0.45, l));
+  if (light) {
+    // A light page: the ramp runs the other way, pale tints at the edge (close to the
+    // page, as the deep tones are to a dark one), the accent and a deeper core. The dark
+    // ramp's deep edge tones read as grey dirt on white.
+    if (style === "spectrum") return [null, [shade(rgb, -48, 0.9), 0.75], [shade(rgb, -22, 0.8), 0.9], [rgb, 1], [shade(rgb, 32, Math.max(0.3, base - 0.14)), 1]];
+    return [null, [shade(rgb, 0, 0.9), 0.7], [shade(rgb, 0, 0.8), 0.88], [rgb, 1], [shade(rgb, 0, Math.max(0.3, base - 0.12)), 1]];
+  }
   if (style === "spectrum") {
     return [null, [shade(rgb, -48, base * 0.34), 0.75], [shade(rgb, -22, base * 0.7), 0.9], [rgb, 1], [shade(rgb, 32, Math.min(0.86, base + 0.24)), 1]];
   }
@@ -126,12 +137,12 @@ export function glowTones(rgb, style) {
  * @param {{ width: number, height: number, cx: number, rgb: [number, number, number],
  *           intensity: number, style?: "bayer" | "grain" | "spectrum" }} o  cx and intensity are 0..1.
  */
-export function glowPixelArt({ width, height, cx, rgb, intensity, style = "bayer", cy, sprite = null, out = null, fromRow = 0, toRow = height }) {
+export function glowPixelArt({ width, height, cx, rgb, intensity, style = "bayer", cy, sprite = null, out = null, fromRow = 0, toRow = height, light = false }) {
   // out / fromRow / toRow: fill only rows [fromRow, toRow) of an existing buffer,
   // so a caller can spread a large sprite over several short tasks.
   out ??= new Uint8ClampedArray(width * height * 4);
   if (intensity <= 0) return out;
-  const tones = glowTones(rgb, style);
+  const tones = glowTones(rgb, style, light);
   const threshold = thresholdFor(style);
   const scale = 0.6 + 0.4 * intensity;
   for (let y = fromRow; y < Math.min(height, toRow); y += 1) {

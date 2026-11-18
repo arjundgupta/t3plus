@@ -1,3 +1,6 @@
+import { cssColorBytes } from "./color.js";
+import { T3_SELECTORS } from "./config.js";
+
 // The color of a thread's project, read from the badge T3 already draws for it
 // (the letter tile next to the project name). Bots use it as their own color.
 // Read-only: nothing is drawn into or changed on T3's badge.
@@ -40,9 +43,54 @@ function imageColor(img) {
   }
 }
 
+const toHex = (r, g, b) => `#${[r, g, b].map((v) => Number(v).toString(16).padStart(2, "0")).join("")}`;
+/** "rgb(1, 2, 3)" / "rgba(1, 2, 3, 0.5)" -> "#010203"; fully transparent -> null (no color). */
+const rgb = (css) => {
+  const m = /^rgba?\(\s*(\d+)[,\s]+(\d+)[,\s]+(\d+)(?:\s*[,/]\s*([\d.]+)(%?))?/i.exec(css ?? "");
+  if (!m) return undefined;
+  const alpha = m[4] === undefined ? 1 : Number(m[4]) / (m[5] ? 100 : 1);
+  return alpha > 0 ? toHex(m[1], m[2], m[3]) : null;
+};
+const cssCache = new Map(); // computed CSS color -> "#rrggbb" | null
+
+/**
+ * Any computed CSS color ("oklch(...)", "rgb(...)", a hex) as "#rrggbb", or null
+ * when it is transparent or unknown. The browser converts it (color.js).
+ */
+export function cssColorToHex(doc, css) {
+  if (!css) return null;
+  const plain = normalizeHex(css) ?? rgb(css);
+  if (plain !== undefined) return plain;
+  if (cssCache.has(css)) return cssCache.get(css);
+  const bytes = cssColorBytes(doc, css);
+  const hex = bytes && bytes[3] > 0 ? toHex(bytes[0], bytes[1], bytes[2]) : null;
+  if (cssCache.size > 100) cssCache.clear();
+  cssCache.set(css, hex);
+  return hex;
+}
+
+// A monogram's computed color, per class list and theme: every check asks for every
+// bot's project color, and a computed style read for each was a style recalc each.
+const monogramCache = new Map();
+
 function badgeColor(badge) {
   if (!badge) return null;
-  if (badge.tagName?.toLowerCase() !== "img") return normalizeHex(badge.querySelector?.("rect[fill]")?.getAttribute("fill"));
+  if (badge.tagName?.toLowerCase() !== "img") {
+    const fill = badge.querySelector?.("rect[fill]")?.getAttribute("fill");
+    if (fill) return normalizeHex(fill);
+    // T3's monogram (<span data-slot="project-monogram"><svg class="text-lime-600 ...">):
+    // no filled rect any more; the tile is the svg's text color (currentColor).
+    const svg = badge.matches?.("svg") ? badge : badge.querySelector?.("svg");
+    const doc = badge.ownerDocument;
+    if (!svg || !doc?.defaultView) return null;
+    const root = doc.documentElement;
+    const key = `${svg.getAttribute("class") ?? ""}|${svg.getAttribute("style") ?? ""}|${root.className}|${root.getAttribute("data-theme-id") ?? ""}`;
+    if (monogramCache.has(key)) return monogramCache.get(key);
+    const color = cssColorToHex(doc, doc.defaultView.getComputedStyle(svg).color);
+    if (monogramCache.size > 200) monogramCache.clear();
+    monogramCache.set(key, color);
+    return color;
+  }
   const src = badge.getAttribute("src") ?? "";
   if (!src) return null;
   if (cache.has(src)) return cache.get(src);
@@ -76,7 +124,9 @@ function badgeColor(badge) {
  */
 export function threadProjectColor(scan, thread) {
   const folderRow = thread.folderKey !== null && thread.folderKey !== undefined ? scan.folders.get(thread.folderKey)?.row : null;
-  const host = folderRow ?? thread.row?.querySelector?.(":scope > .relative.z-10 > .h-5");
+  // A settled or snoozed row outside a folder is slim and carries its project's
+  // badge in its one line: without reading it, a bot changed color when it settled.
+  const host = folderRow ?? thread.row?.querySelector?.(T3_SELECTORS.cardRowTopLine) ?? thread.row?.querySelector?.(T3_SELECTORS.slimRowBadgeSlot);
   if (!host) return null;
-  return badgeColor(host.querySelector('img, [data-slot="project-monogram"] svg, [data-slot="project-monogram"]'));
+  return badgeColor(host.querySelector(T3_SELECTORS.projectBadge));
 }

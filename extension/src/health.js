@@ -24,8 +24,8 @@ export const HEALTH_CHECKS = Object.freeze([
   {
     id: "sidebar",
     label: "Sidebar bots and profiles",
-    applies: (doc) => Boolean(doc.querySelector('[data-slot="sidebar"]') && doc.querySelector('[data-slot="sidebar-inner"]')?.offsetParent !== null),
-    parts: { "sidebar list": T3_SELECTORS.sidebarInner, "sidebar rows": T3_SELECTORS.sidebarRow, "sidebar footer": '[data-slot="sidebar-footer"]' },
+    applies: (doc) => Boolean(doc.querySelector(T3_SELECTORS.sidebarAny) && doc.querySelector(T3_SELECTORS.sidebarInner)?.offsetParent !== null),
+    parts: { "sidebar list": T3_SELECTORS.sidebarInner, "sidebar rows": T3_SELECTORS.sidebarRow, "sidebar footer": T3_SELECTORS.sidebarFooter },
   },
   {
     id: "thread",
@@ -36,20 +36,24 @@ export const HEALTH_CHECKS = Object.freeze([
   {
     id: "home",
     label: "New-thread page widgets",
-    applies: (doc, r) => r.draft,
+    // Only while T3 shows the centered new-thread page (its headline hangs over the
+    // composer): T3 docks a draft's composer while a worktree is set up or the draft
+    // is working, and that is not a missing hook. Found without the stack hook, so a
+    // renamed stack or centering class is still caught.
+    applies: (doc, r) => r.draft && Boolean(doc.querySelector(`${T3_SELECTORS.composerOverlay} .absolute.bottom-full`)),
     parts: { "new-thread composer": `${T3_SELECTORS.composerOverlay}.items-center`, "composer stack": T3_SELECTORS.composerStack },
   },
   {
     id: "details",
     label: "Pool card in thread details",
-    applies: (doc, r) => r.thread && Boolean(doc.querySelector("aside[data-thread-details-panel]")),
+    applies: (doc, r) => r.thread && Boolean(doc.querySelector(T3_SELECTORS.threadDetailsPanel)),
     parts: { "thread details card": T3_SELECTORS.threadDetailsCard },
   },
   {
     id: "settings",
     label: "t3+ entry in Settings",
     applies: (doc, r) => r.settings,
-    parts: { "Appearance link": '[data-settings-section="/settings/appearance"]' },
+    parts: { "Appearance link": T3_SELECTORS.settingsAppearanceLink },
   },
   {
     id: "usage",

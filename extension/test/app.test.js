@@ -220,3 +220,278 @@ test("an orphaned copy (extension reloaded) shuts itself down on the next check"
   app.watcher.flush();
   assert.equal(panelIn(dom.window.document), null);
 });
+
+test("composer lane: follows T3's details card when the right panel moves it (style-only changes)", async () => {
+  // ChatView.tsx: the canvas carries T3's room for the details card; the card is
+  // an absolutely placed aside whose top T3 animates (transition-[top]).
+  const dom = createDom(
+    "/env/thread",
+    `<div data-workspace-area="conversation"></div>
+     <div data-chat-canvas="true" id="canvas" style="--chat-lane-inset-end: 212px">
+       <aside data-thread-details-panel="inline" style="right: 12px; top: 12px; width: 280px"></aside>
+       <div class="chat-composer-lane"><div data-chat-composer-surface="true" id="card"></div></div>
+     </div>`,
+  );
+  const doc = dom.window.document;
+  const box = (top, height) => () => ({ left: 0, right: 100, width: 100, top, height, bottom: top + height });
+  doc.getElementById("canvas").getBoundingClientRect = box(52, 814);
+  doc.getElementById("card").getBoundingClientRect = box(735, 131);
+  const aside = doc.querySelector("aside");
+  aside.getBoundingClientRect = box(64, 277);
+  const lane = doc.querySelector(".chat-composer-lane");
+  const { app } = createApp(dom);
+  await app.start();
+  app.watcher.flush();
+  assert.equal(lane.style.getPropertyValue("--chat-lane-inset-end"), "0px", "card above the composer: full width back");
+
+  let scheduled = 0;
+  const schedule = app.watcher.schedule;
+  app.watcher.schedule = () => {
+    scheduled += 1;
+  };
+  // T3 moves the card down beside the composer: only its inline style changes,
+  // and mid-transition its rectangle still shows the old spot.
+  aside.style.top = "640px";
+  await settle();
+  assert.ok(scheduled > 0, "an inline style change on the card triggers a check");
+  app.watcher.schedule = schedule;
+  app.watcher.flush();
+  assert.equal(lane.style.getPropertyValue("--chat-lane-inset-end"), "", "card beside the composer: T3's room is kept");
+
+  scheduled = 0;
+  app.watcher.schedule = () => {
+    scheduled += 1;
+  };
+  doc.getElementById("canvas").style.setProperty("--chat-lane-inset-end", "0px");
+  await settle();
+  assert.ok(scheduled > 0, "T3 changing the room on the canvas triggers a check");
+
+  // A collapsible inside the card opens: only an attribute deep inside changes.
+  scheduled = 0;
+  const section = doc.createElement("section");
+  aside.append(section);
+  await settle();
+  scheduled = 0;
+  section.setAttribute("data-state", "open");
+  await settle();
+  assert.ok(scheduled > 0, "a section opening inside the card triggers a check");
+  scheduled = 0;
+  section.setAttribute("data-on", "");
+  await settle();
+  assert.equal(scheduled, 0, "other attributes inside the card (t3+'s chart hover) do not");
+  app.watcher.schedule = schedule;
+  app.stop?.();
+});
+
+test("new-thread hero: T3 switching the composer overlay's class alone triggers a check; t3+'s own padding does not", async () => {
+  const dom = createDom("/env/draft", `<div data-workspace-area="conversation"></div><div data-chat-composer-overlay="true" class="flex items-end"></div>`);
+  const doc = dom.window.document;
+  const { app } = createApp(dom);
+  await app.start();
+  app.watcher.flush();
+  let scheduled = 0;
+  const schedule = app.watcher.schedule;
+  app.watcher.schedule = () => {
+    scheduled += 1;
+  };
+  const overlay = doc.querySelector('[data-chat-composer-overlay="true"]');
+  overlay.style.paddingTop = "120px";
+  await settle();
+  assert.equal(scheduled, 0, "t3+ writing the hero offset does not re-trigger itself");
+  overlay.className = "flex items-center";
+  await settle();
+  assert.ok(scheduled > 0, "T3 centering the composer (draft hero) triggers a check");
+  app.watcher.schedule = schedule;
+});
+
+test("a stopped copy stays stopped: late saves, late loads and a start() cut short leave nothing behind", async () => {
+  const { STORAGE_KEYS: KEYS } = await import("../src/config.js");
+  const storage = createFakeChromeStorage();
+  const dom = createDom("/settings/appearance", T3_APPEARANCE_HTML);
+  const doc = dom.window.document;
+  const { app } = createApp(dom, storage, { throttleMs: 0 });
+  await app.start();
+  app.stop();
+  const traces = () => [...doc.documentElement.attributes].filter((a) => /t3plus/.test(a.name)).length + doc.querySelectorAll("[data-t3plus-owned], .t3plus-glow, .t3plus-section").length;
+  assert.equal(traces(), 0, "stop() cleans up");
+  await app.actions.setIntensity(70); // a save that lands after stop
+  app.watcher.schedule();
+  await settle();
+  await new Promise((r) => setTimeout(r, 20));
+  assert.equal(traces(), 0, "nothing came back");
+
+  // stop() while start() is still loading the stores: start must not register anything.
+  const storage2 = createFakeChromeStorage();
+  const dom2 = createDom("/settings/appearance", T3_APPEARANCE_HTML);
+  const { app: app2 } = createApp(dom2, storage2, { throttleMs: 0 });
+  const starting = app2.start();
+  app2.stop();
+  await starting;
+  await new Promise((r) => setTimeout(r, 20));
+  assert.equal(storage2.onChanged.listenerCount(), 0, "no storage listeners left behind");
+  await storage2.area.set({ [KEYS.settings]: { composerGradient: { intensity: 10 } } });
+  await settle();
+  assert.equal([...dom2.window.document.documentElement.attributes].filter((a) => /t3plus/.test(a.name)).length, 0);
+});
+
+test("more bots on screen than the remembered-bots cap: storage settles instead of being rewritten every check", async () => {
+  const { STORAGE_KEYS: KEYS, BOT_LIMITS } = await import("../src/config.js");
+  const { threadRowHtml } = await import("./helpers.js");
+  const n = BOT_LIMITS.maxBots * 2 + 12;
+  const rows = Array.from({ length: n }, (_, i) => threadRowHtml({ key: `env1:t${i}`, title: `Thread ${i}` })).join("");
+  const dom = createDom("/", `<div data-slot="sidebar-inner"><div data-slot="sidebar-content"><ul id="thread-list">${rows}</ul></div></div>`);
+  const storage = createFakeChromeStorage();
+  storage.area.data.set(KEYS.settings, { sidebar: { bots: true, botsDefault: true } });
+  let writes = 0;
+  const set = storage.area.set;
+  storage.area.set = async (items) => {
+    if (KEYS.knownBots in items) writes += 1;
+    return set(items);
+  };
+  const { app } = createApp(dom, storage);
+  await app.start();
+  for (let i = 0; i < 5; i += 1) {
+    app.watcher.flush();
+    await settle();
+  }
+  const first = writes;
+  for (let i = 0; i < 10; i += 1) {
+    app.watcher.flush();
+    await settle();
+  }
+  assert.ok(first >= 1, "the bots were remembered");
+  assert.equal(writes, first, "no more writes once every bot on screen is known");
+  assert.equal(Object.keys(app.state.knownBots).length, n, "the bots on screen are all kept");
+  app.stop();
+});
+
+test("composer lane: the floating preview window keeps T3's room; a webview docked outside the chat or parked behind it does not", async () => {
+  const dom = createDom(
+    "/env/thread",
+    `<div data-workspace-area="conversation"></div>
+     <div data-chat-canvas="true" id="canvas" style="--chat-lane-inset-end: 300px">
+       <section data-preview-mini-player="browser" style="left: 700px; top: 500px; width: 320px; height: 300px"></section>
+       <div class="chat-composer-lane"><div data-chat-composer-surface="true" id="card"></div></div>
+     </div>
+     <div data-preview-viewport="tab1" id="docked" style="position: fixed"></div>
+     <div data-preview-viewport="tab2" id="parked" style="position: fixed; z-index: -1"></div>`,
+  );
+  const doc = dom.window.document;
+  const box = (left, width, top, height) => () => ({ left, width, right: left + width, top, height, bottom: top + height });
+  doc.getElementById("canvas").getBoundingClientRect = box(200, 1000, 50, 800);
+  doc.getElementById("card").getBoundingClientRect = box(300, 700, 700, 130);
+  const mini = doc.querySelector("section[data-preview-mini-player]");
+  mini.getBoundingClientRect = box(900, 320, 550, 300);
+  doc.getElementById("docked").getBoundingClientRect = box(1210, 500, 50, 800); // the right panel, beside the canvas
+  doc.getElementById("parked").getBoundingClientRect = box(0, 1280, 0, 800); // a background tab's webview
+  const lane = doc.querySelector(".chat-composer-lane");
+  const { app } = createApp(dom);
+  await app.start();
+  app.watcher.flush();
+  assert.equal(lane.style.getPropertyValue("--chat-lane-inset-end"), "", "the mini player is beside the composer: T3's room stays");
+  mini.remove();
+  app.watcher.flush();
+  assert.equal(lane.style.getPropertyValue("--chat-lane-inset-end"), "0px", "docked or parked webviews do not block centering");
+  app.stop();
+});
+
+test("a T3 theme switch on <html> alone triggers a check (the glow takes the new colors); the new-thread widgets start below T3's composer banners", async () => {
+  const dom = createDom(
+    "/env/draft",
+    `<div data-workspace-area="conversation"></div>
+     <div data-chat-composer-overlay="true" class="flex items-center"><div data-chat-composer-stack="true" id="stack"><div data-chat-composer-surface="true"></div><div data-composer-banner-stack="true" id="banner"></div></div></div>`,
+  );
+  const doc = dom.window.document;
+  const box = (top, height) => () => ({ left: 0, right: 600, width: 600, top, height, bottom: top + height });
+  doc.getElementById("stack").getBoundingClientRect = box(300, 120);
+  doc.getElementById("banner").getBoundingClientRect = box(424, 40); // hangs 44 px below the composer
+  doc.querySelector('[data-workspace-area="conversation"]').getBoundingClientRect = box(0, 900);
+  const { app } = createApp(dom);
+  await app.start();
+  app.watcher.flush();
+  const home = doc.querySelector(".t3plus-home");
+  assert.ok(home, "widgets shown");
+  assert.equal(home.style.getPropertyValue("--t3plus-banner-h"), "44px");
+  let scheduled = 0;
+  const schedule = app.watcher.schedule;
+  app.watcher.schedule = () => {
+    scheduled += 1;
+  };
+  doc.documentElement.setAttribute("data-theme-id", "midnight");
+  await settle();
+  assert.ok(scheduled > 0, "theme change noticed");
+  app.watcher.schedule = schedule;
+  app.stop();
+});
+
+test("a bot title longer than the remembered-bots list keeps is saved once, not rewritten on every check", async () => {
+  const { STORAGE_KEYS: KEYS } = await import("../src/config.js");
+  const { threadRowHtml } = await import("./helpers.js");
+  const long = `A very long thread title ${"that keeps going ".repeat(10)}`;
+  assert.ok(long.length > 120);
+  const dom = createDom("/", `<div data-slot="sidebar-inner"><div data-slot="sidebar-content"><ul id="thread-list">${threadRowHtml({ key: "env1:t1", title: long })}</ul></div></div>`);
+  const storage = createFakeChromeStorage();
+  storage.area.data.set(KEYS.settings, { sidebar: { bots: true, botsDefault: true } });
+  let writes = 0;
+  const set = storage.area.set;
+  storage.area.set = async (items) => {
+    if (KEYS.knownBots in items) writes += 1;
+    return set(items);
+  };
+  const { app } = createApp(dom, storage);
+  await app.start();
+  for (let i = 0; i < 8; i += 1) {
+    app.watcher.flush();
+    await settle();
+  }
+  assert.equal(writes, 1, "remembered once; the storage echo (shortened title) matches what the next check compares");
+  app.stop();
+});
+
+test("no home feed yet: the read is retried at most every few seconds, not on every check", async () => {
+  // Frame checks on and real time: the flush-driven harness cannot see a loop in which
+  // each read ends in a check that reads again.
+  const hero = `
+  <main><div data-workspace-area="conversation"><div class="h-full"></div></div>
+    <div data-chat-composer-overlay="true" class="pointer-events-none absolute inset-0 z-20 flex items-center">
+      <div class="chat-composer-lane w-full"><div data-chat-composer-stack="true" class="relative">
+        <div class="absolute inset-x-0 bottom-full"><h1>What should we build?</h1></div>
+        <div class="relative z-10"><div data-chat-composer-surface="true"><div data-chat-composer-body="true"><div data-testid="composer-editor"></div></div></div></div>
+      </div></div>
+    </div></main>`;
+  const dom = createDom("/draft/abc", hero);
+  let loads = 0;
+  const homeFeed = { load: async () => ((loads += 1), null), readCache: async () => null };
+  const { app } = createApp(dom, createFakeChromeStorage(), { homeFeed, frameChecks: true, throttleMs: 200 });
+  await app.start();
+  await new Promise((r) => setTimeout(r, 600));
+  assert.equal(loads, 1, `${loads} reads in 600 ms`);
+  assert.ok(app.perf.checks < 10, `${app.perf.checks} checks in 600 ms`);
+  app.stop();
+});
+
+test("a check step that throws is skipped: the steps after it (screenshot mode, health) still run", async () => {
+  const { STORAGE_KEYS: KEYS } = await import("../src/config.js");
+  const { sidebarHtml } = await import("./helpers.js");
+  const storage = createFakeChromeStorage();
+  storage.area.data.set(KEYS.settings, { demo: { enabled: true } });
+  const dom = createDom("/env1/a1", sidebarHtml());
+  const errors = [];
+  dom.window.console.error = (...args) => errors.push(args.join(" "));
+  const profiles = {
+    start: async () => {},
+    stop() {},
+    sync() {
+      throw new TypeError("unexpected T3 markup");
+    },
+  };
+  const { app } = createApp(dom, storage, { profiles });
+  await app.start(); // the first check runs inside start(): it must not reject
+  app.watcher.flush();
+  const doc = dom.window.document;
+  assert.ok(doc.documentElement.hasAttribute("data-t3plus-demo"), "screenshot mode still applied");
+  const visible = [...doc.querySelectorAll('[data-thread-item] span[dir="auto"]')].map((s) => s.textContent);
+  assert.ok(!visible.includes("Fix login"), `real titles covered: ${visible}`);
+  assert.equal(errors.filter((e) => /profiles step failed/.test(e)).length, 1, "reported once");
+  app.stop();
+});

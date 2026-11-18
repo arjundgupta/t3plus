@@ -1,3 +1,4 @@
+import { cssColorBytes } from "./color.js";
 import { DITHER_STYLES, ditherRgbInPlace, glowPixelArt, glowSpriteSpan } from "./ditherMath.js";
 
 export { DITHER_STYLES };
@@ -54,15 +55,18 @@ export function createBackdropRenderer({ win, doc, delayMs = 120 }) {
   const root = doc.documentElement;
   let lastKey = null;
   let scheduledKey = null;
+  // A render that failed (an image that will not decode): its key stays on the CSS
+  // fallback. Without this the next update brought the previous render back.
+  let failedKey = null;
   let timer = null;
-  let url = null;
-  let wideUrl = null;
   let generation = 0;
+  // Image mode: the pane's current size. The image shown is stretched to it until the
+  // render for that size lands (left at its own size, a growing pane showed a bare strip).
+  let imageBox = null;
   let shown = null; // { url, wideUrl, mode, w, h, wideW, wideH } of the last render
   const imageCache = new Map(); // src -> Promise<HTMLImageElement>
 
-  // ---- Colors: resolve any CSS color (oklch, var(), color-mix) to sRGB bytes ----
-  let probeCanvas = null;
+  // ---- Colors: resolve any CSS color (oklch, var(), color-mix) to sRGB bytes (color.js) ----
   const rgbCache = new Map(); // css color -> [r, g, b]
   function toRgb(cssColor, fallback) {
     const key = `${cssColor}|${fallback}`;
@@ -73,19 +77,7 @@ export function createBackdropRenderer({ win, doc, delayMs = 120 }) {
     return rgb;
   }
   function paintRgb(cssColor, fallback) {
-    try {
-      probeCanvas ??= doc.createElement("canvas");
-      probeCanvas.width = probeCanvas.height = 1;
-      const ctx = probeCanvas.getContext("2d", { willReadFrequently: true });
-      ctx.clearRect(0, 0, 1, 1);
-      ctx.fillStyle = fallback;
-      ctx.fillStyle = cssColor;
-      ctx.fillRect(0, 0, 1, 1);
-      const [r, g, b] = ctx.getImageData(0, 0, 1, 1).data;
-      return [r, g, b];
-    } catch {
-      return null;
-    }
+    return cssColorBytes(doc, cssColor, fallback)?.slice(0, 3) ?? null;
   }
   // A theme color (T3's --primary or --background) is read from the computed
   // custom property, which already has any var() resolved; the canvas then
@@ -94,7 +86,9 @@ export function createBackdropRenderer({ win, doc, delayMs = 120 }) {
   const colorCache = new Map(); // name -> { stamp, at, value }
   const COLOR_TTL_MS = 3000;
   function themeColor(name, fallback, el) {
-    const stamp = `${root.className}|${root.getAttribute("data-theme") ?? ""}|${root.style.colorScheme}`;
+    // T3 switches palettes with data-theme-id (and its --app-theme-* inline values),
+    // light and dark with .dark: any of them is a new theme.
+    const stamp = `${root.className}|${root.getAttribute("data-theme") ?? ""}|${root.getAttribute("data-theme-id") ?? ""}|${root.style.colorScheme}|${root.style.length}`;
     const at = win.performance?.now?.() ?? Date.now();
     const hit = colorCache.get(name);
     if (hit && hit.stamp === stamp && at - hit.at < COLOR_TTL_MS) return hit.value;
@@ -141,6 +135,7 @@ export function createBackdropRenderer({ win, doc, delayMs = 120 }) {
   const px = (v) => `${v.toFixed(3)}px`;
   function showImages() {
     if (!layer || !shown) return;
+    if (layer.hidden) layer.hidden = false;
     layer.setAttribute("data-kind", shown.mode);
     if (shown.mode === "half-circle") {
       setStyle(nearEl, "background-image", `url("${shown.url}")`);
@@ -148,12 +143,14 @@ export function createBackdropRenderer({ win, doc, delayMs = 120 }) {
       setStyle(layer, "background-image", "none");
     } else {
       setStyle(layer, "background-image", `url("${shown.url}")`);
-      setStyle(layer, "background-size", `${px(shown.w)} ${px(shown.h)}`);
+      const box = imageBox ?? shown;
+      setStyle(layer, "background-size", `${px(box.w)} ${px(box.h)}`);
     }
     if (root.getAttribute("data-t3plus-dithered") !== shown.mode) root.setAttribute("data-t3plus-dithered", shown.mode);
   }
 
   function clear() {
+    failedKey = null; // turned off and on again: try that render anew
     generation += 1;
     if (timer) win.clearTimeout(timer);
     timer = null;
@@ -165,6 +162,9 @@ export function createBackdropRenderer({ win, doc, delayMs = 120 }) {
     if (shown && ![...renders.values()].includes(shown)) for (const u of [shown.url, shown.wideUrl]) if (u) win.URL.revokeObjectURL(u);
     forgetRenders();
     shown = null;
+    imageBox = null;
+    // The decoded upload (up to a few MB) is not kept once nothing is drawn from it.
+    imageCache.clear();
   }
 
   function loadImage(src) {
@@ -252,10 +252,14 @@ export function createBackdropRenderer({ win, doc, delayMs = 120 }) {
     const ctx = canvas.getContext("2d");
     if (!ctx) throw new Error("no 2d canvas");
     const pixels = new Uint8ClampedArray(cols * rows * 4);
-    const options = { width: cols, height: rows, rgb: job.accent, intensity: job.intensity, style: job.style, sprite: job.sprite, out: pixels };
+    const options = { width: cols, height: rows, rgb: job.accent, intensity: job.intensity, style: job.style, sprite: job.sprite, out: pixels, light: job.light };
     if (!(await inSlices(rows, gen, (fromRow, toRow) => glowPixelArt({ ...options, fromRow, toRow })))) return null;
     ctx.putImageData(new win.ImageData(pixels, cols, rows), 0, 0);
-    return new Promise((resolve) => canvas.toBlob(resolve, "image/png"));
+    // No blob is a failed render (out of memory, a canvas too large), not a cancelled
+    // one: taken for cancelled, every later check drew it again.
+    const blob = await new Promise((resolve) => canvas.toBlob(resolve, "image/png"));
+    if (!blob) throw new Error("the glow could not be encoded");
+    return blob;
   }
 
   async function render(job, gen) {
@@ -278,7 +282,8 @@ export function createBackdropRenderer({ win, doc, delayMs = 120 }) {
     if (!(await inSlices(job.rows, gen, (fromRow, toRow) => ditherRgbInPlace(data.data, job.cols, job.rows, 5, job.style, fromRow, toRow)))) return null;
     ctx.putImageData(data, 0, 0);
     const blob = await new Promise((resolve) => canvas.toBlob(resolve, "image/png"));
-    return blob ? { near: blob } : null;
+    if (!blob) throw new Error("the image could not be encoded");
+    return { near: blob };
   }
 
   // The last few renders, by key: a panel toggled back and forth shows the
@@ -320,10 +325,21 @@ export function createBackdropRenderer({ win, doc, delayMs = 120 }) {
       })
       .catch(() => {
         if (gen !== generation) return;
-        // Fall back to the CSS gradient rather than leave a stale image.
+        // Fall back to the CSS gradient rather than leave a stale image: the layer's
+        // images go too (put back by a later update, it showed the last render over
+        // the fallback until the next one landed), and it stays hidden until one does.
         root.removeAttribute("data-t3plus-dithered");
+        for (const el of [layer, nearEl, wideEl]) el?.style.removeProperty("background-image");
+        if (layer) layer.hidden = true;
         layer?.remove();
         lastKey = key;
+        failedKey = key;
+        // The image it was replacing is not shown again by a later update (a resize
+        // would have brought the old image back over the fallback). It stays in
+        // `renders`, so going back to it is still instant (one no longer kept there is
+        // released here, as clear() does).
+        if (shown && ![...renders.values()].includes(shown)) for (const u of [shown.url, shown.wideUrl]) if (u) win.URL.revokeObjectURL(u);
+        shown = null;
       })
       .finally(() => {
         if (scheduledKey === key) scheduledKey = null;
@@ -390,19 +406,36 @@ export function createBackdropRenderer({ win, doc, delayMs = 120 }) {
       if (layer.hasAttribute("data-wide") !== wide) layer.toggleAttribute("data-wide", wide);
     } else {
       const { cell, cols, rows } = ditherGrid(rect.width, rect.height, dpr, cellCss);
-      job = { mode, style, cell, cols, rows, cx: Math.round(cx * 200) / 200 };
+      // Spectrum colors the glow's tones; an image keeps its own, so it is Bayer there
+      // (and switching between the two draws nothing new).
+      job = { mode, style: style === "spectrum" ? "bayer" : style, cell, cols, rows, cx: Math.round(cx * 200) / 200 };
+      imageBox = { w: cols * cell, h: rows * cell };
     }
+    // A light page (T3's light theme) takes the glow's tones the other way round, and a
+    // stronger scrim over an image: the dark ramp read as dirt on white, and an image under
+    // the light scrim quantized to mid greys that muted text could not be read on.
+    const page = toRgb(themeColor("--background", "#0a0a0a", host), "#0a0a0a");
+    const light = Boolean(page) && 0.2126 * page[0] + 0.7152 * page[1] + 0.0722 * page[2] > 140;
     if (mode === "half-circle") {
       job.accent = toRgb(g.accent === "theme" ? themeColor("--primary", "#6d7cff", host) : g.accent, "#6d7cff");
       job.intensity = i;
+      job.light = light;
     } else {
       if (!imageSrc) return;
       job.imageSrc = imageSrc;
-      job.background = toRgb(themeColor("--background", "#0a0a0a", host), "#0a0a0a");
-      Object.assign(job, { scrimTop: 1 - i * 0.55, scrimBottom: 1 - i * 0.9 });
+      job.background = page;
+      Object.assign(job, light ? { scrimTop: 1 - i * 0.3, scrimBottom: 1 - i * 0.5 } : { scrimTop: 1 - i * 0.55, scrimBottom: 1 - i * 0.9 });
     }
     if (!job.accent && !job.background) return;
     const key = JSON.stringify({ ...job, imageSrc: imageSrc ? `${imageSrc.length}:${imageSrc.slice(0, 64)}:${imageSrc.slice(-64)}` : null });
+    if (key === failedKey) {
+      // Hidden, not removed: ensureLayer above put it back, and removing it again
+      // would be a DOM change on every check.
+      root.removeAttribute("data-t3plus-dithered");
+      if (layer && !layer.hidden) layer.hidden = true;
+      return;
+    }
+    failedKey = null;
     if (key === lastKey) {
       // Back to what is shown (a size that only lasted a moment, mid thread
       // switch): drop the render queued for it. A remounted pane gets the

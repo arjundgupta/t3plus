@@ -632,30 +632,53 @@ const keyHash = (key) => {
 };
 
 // The bots on screen get different shapes while the set has enough: each takes
-// its hashed shape, or the next free one. Keys are taken in a fixed order, so
-// a bot keeps its shape while the others come and go less often than not.
+// its hashed shape, or the next free one. A bot then keeps the shape it was
+// given, on screen or the last time it was: re-dealt whenever another row came
+// or went (a folder collapsed, Settled opened), faces changed under people's eyes.
 let assigned = new Map();
+let remembered = new Map(); // bots no longer on screen -> the shape they had (bounded)
 let assignedFor = "";
+let assignedStyle = "";
 export function assignBotShapes(keys) {
   const names = styleShapes();
   const sorted = [...new Set(keys)].sort();
   const signature = `${botStyle}|${sorted.join(",")}`;
   if (signature === assignedFor) return;
   assignedFor = signature;
-  assigned = new Map();
+  if (assignedStyle !== botStyle) {
+    // Another style is another set of shapes: dealt afresh.
+    assignedStyle = botStyle;
+    assigned = new Map();
+    remembered = new Map();
+  }
+  const next = new Map();
   const used = new Set();
+  // More bots than shapes: some share one anyway, so a kept shape may repeat.
+  const crowded = sorted.length > names.length;
   for (const key of sorted) {
+    const had = assigned.get(key) ?? remembered.get(key);
+    if (had && names.includes(had) && (crowded || !used.has(had))) {
+      next.set(key, had);
+      used.add(had);
+    }
+  }
+  for (const key of sorted) {
+    if (next.has(key)) continue;
     let i = keyHash(key) % names.length;
     if (used.size < names.length) while (used.has(names[i])) i = (i + 1) % names.length;
     used.add(names[i]);
-    assigned.set(key, names[i]);
+    next.set(key, names[i]);
   }
+  for (const [key, shape] of assigned) if (!next.has(key)) remembered.set(key, shape);
+  for (const key of next.keys()) remembered.delete(key);
+  while (remembered.size > 500) remembered.delete(remembered.keys().next().value);
+  assigned = next;
 }
 
 /** A stable default shape for a bot that has none picked, so bots do not all look alike: from the current style's set. */
 export function defaultBotShape(key) {
   const names = styleShapes();
-  const picked = assigned.get(key);
+  const picked = assigned.get(key) ?? remembered.get(key);
   if (picked && names.includes(picked)) return picked;
   return names[keyHash(key) % names.length];
 }

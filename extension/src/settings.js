@@ -94,8 +94,16 @@ export function createSettingsStore(area, changedEvent) {
       const current = await load();
       return save({ ...current, composerGradient: { ...current.composerGradient, ...patch } });
     },
+    /**
+     * Settings -> Advanced -> Reset: the appearance (background and glass) goes
+     * back to its defaults. Features (bots, profiles, bot style, usage widgets,
+     * screenshot mode) stay as they are: the button promises appearance only,
+     * and switching screenshot mode off by surprise would show real names.
+     */
     async reset() {
-      return save(defaultSettings());
+      const current = await load();
+      const d = defaultSettings();
+      return save({ ...current, composerGradient: d.composerGradient, glass: d.glass });
     },
     /** Calls `listener(settings)` when another tab or this one saves. Returns an unsubscribe. */
     subscribe(listener) {

@@ -1,7 +1,9 @@
 // t3+ data feeds, worker side (started by inject/feeds.js inside T3 Code's main
 // process). Everything that reads files, T3's database or T3's API, and every
 // feed write, happens here, so T3's main thread only passes two small messages
-// per publish. T3's database is opened read-only; nothing in T3 is ever written.
+// per publish. T3's database is opened read-only. The one thing t3+ makes in T3 is
+// the read-only API session for the home feed (T3's CLI issues it; it is reused for
+// a quarter of an hour, then revoked), which T3 records like any session.
 "use strict";
 const { parentPort, workerData } = require("worker_threads");
 const fs = require("fs");
@@ -51,30 +53,122 @@ function modelLabel(model) {
 }
 
 // ---------- Spend per thread (provider session logs, priced like T3's Usage page) ----------
-let rates = null;
-function rateFor(model) {
-  if (!rates) {
-    try { rates = JSON.parse(fs.readFileSync(path.join(cfg.t3Home, "userdata", "usage-model-rates.json"), "utf8")).document || {}; } catch { rates = {}; }
-  }
-  const m = String(model || "");
-  for (const key of [m, m.split("@")[0], /\d{8}$/.test(m) ? m.replace(/-\d{8}$/, "") : null]) {
-    if (key && rates[key] && typeof rates[key] === "object" && "input_cost_per_token" in rates[key]) return rates[key];
-  }
-  return null;
+// The same rules as T3's usage pricing (server: usagePricing, priceUsage): T3's rate
+// file read the way T3 reads it (long-context tiers, fast and ultrafast prices, model
+// aliases), each request priced on its own (a prompt over a tier's threshold takes
+// that tier's rates), and a cost the log reports itself taken as it is. Tokens are
+// kept per model, speed and tier, and priced when a feed is published, with the rates
+// T3 has then.
+const RATES_FILE = path.join(cfg.t3Home, "userdata", "usage-model-rates.json");
+let rateTable = new Map();
+let ratesStamp = null;
+const finite = (v) => (typeof v === "number" && Number.isFinite(v) ? v : null);
+function readTokenRates(entry, suffix, standard, outputFallback) {
+  const input = finite(entry["input_cost_per_token" + suffix]);
+  const output = finite(entry["output_cost_per_token" + suffix]) ?? outputFallback ?? null;
+  if (input === null || output === null) return null;
+  const cacheRate = (name, field, fallback = input) => finite(entry[name + suffix]) ?? (standard && standard.input > 0 ? (standard[field] / standard.input) * input : fallback);
+  const write = cacheRate("cache_creation_input_token_cost", "write");
+  return { input, output, read: cacheRate("cache_read_input_token_cost", "read"), write, write1h: cacheRate("cache_creation_input_token_cost_above_1hr", "write1h", write) };
 }
-function claudeCost(model, u) {
-  const r = rateFor(model);
-  const oneHour = Number(u.cache_creation?.ephemeral_1h_input_tokens) || 0;
-  const write = Number(u.cache_creation_input_tokens) || 0;
-  const fiveMin = Math.max(0, write - oneHour);
-  const input = Number(u.input_tokens) || 0;
-  const read = Number(u.cache_read_input_tokens) || 0;
-  const out = Number(u.output_tokens) || 0;
-  const tokens = input + read + write + out;
-  if (!r) return [0, tokens];
-  const inRate = r.input_cost_per_token || 0;
-  const cc = r.cache_creation_input_token_cost ?? inRate;
-  return [input * inRate + read * (r.cache_read_input_token_cost ?? inRate) + fiveMin * cc + oneHour * (r.cache_creation_input_token_cost_above_1hr ?? cc) + out * (r.output_cost_per_token || 0), tokens];
+const scaleRates = (r, k) => ({ input: r.input * k, output: r.output * k, read: r.read * k, write: r.write * k, write1h: r.write1h * k });
+function readSpeedRates(entry, standard, suffix = "") {
+  const fastMultiple = finite(entry.provider_specific_entry && entry.provider_specific_entry.fast);
+  return { ...standard, fast: fastMultiple && fastMultiple > 0 ? scaleRates(standard, fastMultiple) : readTokenRates(entry, suffix + "_priority", standard), ultrafast: readTokenRates(entry, suffix + "_ultrafast", standard) };
+}
+function readContextTiers(entry, base) {
+  const thresholds = new Set();
+  for (const key of Object.keys(entry)) { const m = /^input_cost_per_token_above_(\d{1,7})k_tokens(?:_priority|_ultrafast)?$/.exec(key); if (m) thresholds.add(m[1]); }
+  return [...thresholds].map((t) => {
+    const suffix = "_above_" + t + "k_tokens";
+    const standard = readTokenRates(entry, suffix, base, base.output) ?? base;
+    return { threshold: Number(t) * 1000, rate: readSpeedRates(entry, standard, suffix) };
+  }).sort((a, b) => b.threshold - a.threshold);
+}
+const rateKey = (model) => String(model || "").trim().toLowerCase();
+const bareName = (key) => key.slice(key.lastIndexOf("/") + 1);
+const UNPRICEABLE = new Set(["<synthetic>", "synthetic", "opus", "sonnet", "haiku", "fable"]);
+const FIRST_PARTY = new Set(["anthropic", "deepseek", "gemini", "meta", "mistral", "openai", "xai"]);
+function parseRateTable(document) {
+  const table = new Map();
+  if (!document || typeof document !== "object") return table;
+  for (const [name, raw] of Object.entries(document)) {
+    if (!raw || typeof raw !== "object") continue;
+    const standard = readTokenRates(raw, "");
+    const key = rateKey(name);
+    if (standard && key) table.set(key, { ...readSpeedRates(raw, standard), tiers: readContextTiers(raw, standard) });
+  }
+  // "provider/model" and Bedrock's "anthropic.model" also answer to the bare name
+  // (a first-party provider's rate wins), as in T3.
+  const aliases = new Map();
+  for (const [key, rate] of table) {
+    const slash = key.indexOf("/");
+    const alias = slash === -1 ? (key.startsWith("anthropic.") ? key.slice(10) : key) : bareName(key);
+    if (!alias || alias === key || table.has(alias)) continue;
+    const firstParty = slash !== -1 && FIRST_PARTY.has(key.slice(0, slash));
+    const held = aliases.get(alias);
+    if (!held || (firstParty && !held.firstParty)) aliases.set(alias, { rate, firstParty });
+  }
+  for (const [alias, { rate }] of aliases) table.set(alias, rate);
+  return table;
+}
+function loadRates() {
+  let stamp = null;
+  try { const st = fs.statSync(RATES_FILE); stamp = st.mtimeMs + ":" + st.size; } catch {}
+  if (stamp === ratesStamp) return;
+  ratesStamp = stamp;
+  try { rateTable = parseRateTable(JSON.parse(fs.readFileSync(RATES_FILE, "utf8")).document); } catch { rateTable = new Map(); }
+}
+function rateFor(model) {
+  const key = rateKey(model).replace(/\[.*$/, ""); // "model[1m]": the variant is priced as the model
+  if (!key || UNPRICEABLE.has(bareName(key))) return null;
+  return rateTable.get(key) ?? null;
+}
+// [uncached input, cache read, 5-minute cache write, 1-hour cache write, output]
+const promptOf = (p) => p[0] + p[1] + p[2] + p[3];
+const addParts = (a, b) => a.map((v, i) => v + (Number(b[i]) || 0));
+/** The tier a request falls in, with today's rates: its threshold, or, with no rate known yet, its prompt in thousands (exact later). */
+function tierOf(model, parts) {
+  const rate = rateFor(model);
+  const prompt = promptOf(parts);
+  if (!rate) return "k" + Math.ceil(prompt / 1000);
+  return String(rate.tiers.find((t) => prompt > t.threshold)?.threshold ?? 0);
+}
+function ratesAt(rate, speed, tier) {
+  const t = tier.startsWith("k") ? rate.tiers.find((x) => Number(tier.slice(1)) * 1000 > x.threshold) : rate.tiers.find((x) => String(x.threshold) === tier);
+  const base = t ? t.rate : rate;
+  if (speed === "standard") return base;
+  return base[speed] ?? rate[speed] ?? base;
+}
+/** One request into a log's tally: { "model|speed|tier": parts } plus costs the log reported itself. */
+function tally(entry, model, speed, parts, reported) {
+  if (reported !== null) { entry.reported = (entry.reported || 0) + reported; entry.reportedTokens = (entry.reportedTokens || 0) + parts.reduce((n, v) => n + v, 0); return; }
+  const key = model + "|" + speed + "|" + tierOf(model, parts);
+  entry.agg[key] = addParts(entry.agg[key] || [0, 0, 0, 0, 0], parts);
+}
+function entrySpend(entry) {
+  let usd = entry.reported || 0;
+  let tokens = entry.reportedTokens || 0;
+  const all = Object.entries(entry.agg || {});
+  // Each log's message still being written (counted once, if no other log has it).
+  const pending = new Set();
+  for (const f of Object.values(entry.files || {})) {
+    const p = f.pending;
+    if (!p || (entry.seenSet ||= new Set(entry.seen || [])).has(p.key) || pending.has(p.key)) continue;
+    pending.add(p.key);
+    all.push([p.model + "|" + p.speed + "|" + tierOf(p.model, p.parts), p.parts, p.reported]);
+    for (const a of Object.values(p.advisors || {})) all.push([a.model + "|" + p.speed + "|" + tierOf(a.model, a.parts), a.parts]);
+  }
+  for (const [key, p, reported] of all) {
+    tokens += p.reduce((n, v) => n + v, 0);
+    if (typeof reported === "number") { usd += reported; continue; }
+    const [model, speed, tier] = key.split("|");
+    const rate = rateFor(model);
+    if (!rate) continue;
+    const r = ratesAt(rate, speed, tier);
+    usd += p[0] * r.input + p[1] * r.read + p[2] * r.write + p[3] * r.write1h + p[4] * r.output;
+  }
+  return [usd, tokens];
 }
 const SPEND_CACHE = path.join(cfg.home, "state", "spend-cache.json");
 let spendCache = null;
@@ -124,66 +218,135 @@ function* newLines(file, entry, size, needles) {
     fs.closeSync(fd);
   }
 }
-function readClaude(file, entry, size) {
-  for (const lines of newLines(file, entry, size, ['"usage"'])) {
+const tokenCount = (v) => (typeof v === "number" && Number.isFinite(v) && v > 0 ? Math.floor(v) : 0);
+// A thread's logs repeat each other (a resumed Claude session copies the earlier
+// messages into its new log; a forked Codex session its earlier requests): each is
+// counted once per thread, by a short hash of its id, as T3 counts it once overall.
+function shortHash(text) {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < text.length; i += 1) { h ^= text.charCodeAt(i); h = Math.imul(h, 0x01000193) >>> 0; }
+  return h.toString(36) + text.length.toString(36);
+}
+function firstTime(entry, key) {
+  entry.seenSet ||= new Set(entry.seen || []);
+  if (entry.seenSet.has(key)) return false;
+  entry.seenSet.add(key);
+  return true;
+}
+function claudeRequestParts(u) {
+  const write = tokenCount(u.cache_creation_input_tokens);
+  const oneHour = Math.min(tokenCount(u.cache_creation && u.cache_creation.ephemeral_1h_input_tokens), write);
+  return [tokenCount(u.input_tokens), tokenCount(u.cache_read_input_tokens), write - oneHour, oneHour, tokenCount(u.output_tokens)];
+}
+function readClaude(file, entry, f, size) {
+  entry.agg ||= {};
+  // Claude Code writes a message once per content block, its usage growing: each
+  // message counts once, at the largest of each count (as T3 merges the copies).
+  const commit = () => {
+    const p = f.pending;
+    f.pending = null;
+    if (!p || !firstTime(entry, p.key)) return;
+    tally(entry, p.model, p.speed, p.parts, p.reported);
+    for (const a of Object.values(p.advisors || {})) tally(entry, a.model, p.speed, a.parts, null);
+  };
+  for (const lines of newLines(file, f, size, ['"usage"'])) {
     for (const line of lines) {
       if (!line.includes('"usage"')) continue;
       const d = json(line);
-      const m = d?.message;
-      const u = m?.usage;
+      const m = d && d.type === "assistant" ? d.message : null;
+      const u = m && m.usage;
       if (!u || typeof u !== "object" || !m.model || m.model === "<synthetic>") continue;
-      const [usd, tokens] = claudeCost(m.model, u);
-      // A message's lines repeat its usage (the last one is final): count each id once.
-      if (m.id && m.id === entry.pending_id) entry.pending = [usd, tokens];
-      else {
-        const p = entry.pending || [0, 0];
-        entry.usd = (entry.usd || 0) + p[0];
-        entry.tokens = (entry.tokens || 0) + p[1];
-        entry.pending_id = m.id || "";
-        entry.pending = [usd, tokens];
+      const id = m.id || d.requestId ? (m.id || "") + ":" + (d.requestId || "") : null;
+      const speed = u.speed === "fast" ? "fast" : "standard";
+      const parts = claudeRequestParts(u);
+      const reported = typeof d.costUSD === "number" && Number.isFinite(d.costUSD) ? d.costUSD : null;
+      if (f.pending && id !== null && f.pending.id === id) {
+        f.pending.parts = f.pending.parts.map((v, i) => Math.max(v, parts[i]));
+        if (reported !== null) f.pending.reported = Math.max(f.pending.reported ?? 0, reported);
+      } else {
+        commit();
+        f.pending = { id, key: "c" + shortHash(id ?? line), model: m.model, speed, parts, reported };
+      }
+      // An advisor model's turns inside the message are their own requests (merged
+      // across the message's copies like the message itself).
+      for (const [i, it] of (Array.isArray(u.iterations) ? u.iterations : []).entries()) {
+        if (!it || it.type !== "advisor_message" || !it.model || it.model === "<synthetic>") continue;
+        const advisors = (f.pending.advisors ||= {});
+        const next = claudeRequestParts(it);
+        advisors[i] = { model: it.model, parts: advisors[i] ? advisors[i].parts.map((v, k) => Math.max(v, next[k])) : next };
       }
     }
   }
 }
-function readCodex(file, entry, size) {
-  for (const lines of newLines(file, entry, size, ['"turn_context"', '"token_count"'])) {
+const CODEX_FIELDS = ["input_tokens", "cached_input_tokens", "output_tokens", "reasoning_output_tokens", "total_tokens"];
+function readCodex(file, entry, f, size) {
+  entry.agg ||= {};
+  for (const lines of newLines(file, f, size, ['"turn_context"', '"thread_settings_applied"', '"token_count"'])) {
     for (const line of lines) {
-      if (line.includes('"turn_context"') && line.includes('"model"')) {
-        const d = json(line);
-        if (d?.payload?.model) entry.model = d.payload.model;
+      const d = json(line);
+      const p = d && d.payload;
+      if (!p) continue;
+      if (d.type === "turn_context" && p.model) { f.model = p.model; continue; }
+      if (p.type === "thread_settings_applied") {
+        const tier = p.thread_settings && p.thread_settings.service_tier;
+        f.speed = tier === "priority" || tier === "fast" ? "fast" : tier === "ultrafast" ? "ultrafast" : "standard";
+        continue;
       }
-      if (!line.includes('"token_count"')) continue;
-      const total = json(line)?.payload?.info?.total_token_usage;
-      if (total) entry.total = total;
+      if (p.type !== "token_count" || !p.info || !f.model) continue;
+      // Each request's own usage (last_token_usage), priced at its model and speed;
+      // a repeat (the running total unchanged) is not counted again.
+      const last = p.info.last_token_usage;
+      const total = p.info.total_token_usage;
+      if (!last || typeof last !== "object") continue;
+      if (total && f.total && CODEX_FIELDS.every((k) => total[k] === f.total[k])) continue;
+      if (total) f.total = Object.fromEntries(CODEX_FIELDS.map((k) => [k, total[k]]));
+      const input = tokenCount(last.input_tokens);
+      const cached = tokenCount(last.cached_input_tokens);
+      const write = tokenCount(last.cache_write_input_tokens);
+      const output = tokenCount(last.output_tokens);
+      if (input + output === 0) continue;
+      if (!firstTime(entry, "x" + shortHash(String(d.timestamp) + JSON.stringify(last)))) continue; // a fork's copy
+      tally(entry, f.model, f.speed || "standard", [Math.max(0, input - cached - write), cached, write, 0, output], null);
     }
   }
-  const t = entry.total || {};
-  const r = rateFor(entry.model) || {};
-  const cached = Number(t.cached_input_tokens) || 0;
-  const fresh = Math.max(0, (Number(t.input_tokens) || 0) - cached);
-  const out = Number(t.output_tokens) || 0;
-  entry.tokens = Number(t.total_tokens) || 0;
-  entry.usd = fresh * (r.input_cost_per_token || 0) + cached * (r.cache_read_input_token_cost ?? r.input_cost_per_token ?? 0) + out * (r.output_cost_per_token || 0);
 }
 function listDir(dir) { try { return fs.readdirSync(dir); } catch { return []; } }
+// Where the logs are: the default homes, the ones the environment names, and every
+// home T3's own usage scan reads (a provider instance with its own home), as T3's
+// last usage answer listed them (state/usage-homes.json).
+const HOMES_FILE = path.join(cfg.home, "state", "usage-homes.json");
+/** Transcript folders: Claude's <home>/projects, Codex's <home>/sessions (T3 lists the same). */
+function logRoots(provider) {
+  const sub = provider === "claude" ? "projects" : "sessions";
+  const env = (provider === "claude" ? process.env.CLAUDE_CONFIG_DIR : process.env.CODEX_HOME) || "";
+  const roots = new Set([path.join(HOME, provider === "claude" ? ".claude" : ".codex", sub), ...(env.trim() ? [path.join(env.trim(), sub)] : [])]);
+  try { for (const dir of JSON.parse(fs.readFileSync(HOMES_FILE, "utf8"))[provider] || []) if (typeof dir === "string" && dir) roots.add(dir); } catch {}
+  return [...roots];
+}
 function sessionFiles(driver, nativeId) {
   const found = [];
   if (driver === "claudeAgent") {
-    const root = path.join(HOME, ".claude", "projects");
-    for (const project of listDir(root)) {
-      const main = path.join(root, project, nativeId + ".jsonl");
-      if (!fs.existsSync(main)) continue;
-      found.push(["claude", main]); // its subagents' logs are listed on every pass (withSubagents): new ones keep appearing
+    for (const root of logRoots("claude")) {
+      for (const project of listDir(root)) {
+        const main = path.join(root, project, nativeId + ".jsonl");
+        if (!fs.existsSync(main) || found.some(([, f]) => f === main)) continue;
+        found.push(["claude", main]); // its subagents' logs are listed on every pass (withSubagents): new ones keep appearing
+      }
     }
   } else if (driver === "codex") {
-    const root = path.join(HOME, ".codex", "sessions");
-    for (const y of listDir(root)) for (const m of listDir(path.join(root, y))) for (const d of listDir(path.join(root, y, m))) {
-      for (const f of listDir(path.join(root, y, m, d))) if (f.startsWith("rollout-") && f.endsWith("-" + nativeId + ".jsonl")) found.push(["codex", path.join(root, y, m, d, f)]);
+    for (const root of logRoots("codex")) {
+      for (const y of listDir(root)) for (const m of listDir(path.join(root, y))) for (const d of listDir(path.join(root, y, m))) {
+        for (const f of listDir(path.join(root, y, m, d))) if (f.startsWith("rollout-") && f.endsWith("-" + nativeId + ".jsonl")) found.push(["codex", path.join(root, y, m, d, f)]);
+      }
     }
   }
   return found;
 }
-const fileIndex = new Map(); // "driver:nativeId" -> main session files (they do not move)
+// "driver:nativeId" -> { files, at }: main session files (they do not move). One not
+// found (a remote machine's thread, a log elsewhere) is looked for again only now and
+// then: for Codex that is a walk of every day folder.
+const fileIndex = new Map();
+const MISSING_RETRY_MS = 10 * 60 * 1000;
 function withSubagents(files, nativeId) {
   const out = [];
   for (const entry of files) {
@@ -194,8 +357,22 @@ function withSubagents(files, nativeId) {
   }
   return out;
 }
+// The cache is per thread (v4: its logs' read positions, tokens per model, speed and
+// tier, the ids counted); a cache from before is read again from the logs once.
+const SPEND_CACHE_VERSION = 4;
+const SPEND_KEEP_MS = 30 * 86400000;
 function spendFor(conn, threadIds) {
-  if (!spendCache) { try { spendText = fs.readFileSync(SPEND_CACHE, "utf8"); spendCache = JSON.parse(spendText); } catch { spendCache = {}; } }
+  loadRates();
+  if (!spendCache) {
+    try {
+      spendText = fs.readFileSync(SPEND_CACHE, "utf8");
+      const cached = JSON.parse(spendText);
+      spendCache = cached && cached.v === SPEND_CACHE_VERSION && cached.files && typeof cached.files === "object" ? cached.files : {};
+    } catch {
+      spendCache = {};
+    }
+  }
+  const now = Date.now();
   const out = {};
   const sessions = conn.prepare("SELECT payload_json FROM orchestration_v2_projection_provider_threads WHERE thread_id = ?");
   for (const threadId of threadIds) {
@@ -206,24 +383,31 @@ function spendFor(conn, threadIds) {
       const ref = json(row.payload_json)?.nativeThreadRef;
       if (ref?.nativeId && ref?.driver) refs.add(ref.driver + ":" + ref.nativeId);
     }
+    let entry = spendCache[threadId] || { files: {}, agg: {} };
+    const files = [];
     for (const ref of refs) {
       const [driver, nativeId] = [ref.slice(0, ref.indexOf(":")), ref.slice(ref.indexOf(":") + 1)];
-      if (!fileIndex.has(ref) || !fileIndex.get(ref).length) fileIndex.set(ref, sessionFiles(driver, nativeId));
-      for (const [kind, file] of withSubagents(fileIndex.get(ref), nativeId)) {
-        let entry = spendCache[file];
-        let size = 0;
-        try { size = fs.statSync(file).size; } catch { continue; }
-        if (!entry || (entry.offset || 0) > size) entry = {};
-        try { (kind === "claude" ? readClaude : readCodex)(file, entry, size); } catch { continue; }
-        spendCache[file] = entry;
-        const p = kind === "claude" ? entry.pending || [0, 0] : [0, 0];
-        usd += (entry.usd || 0) + p[0];
-        tokens += (entry.tokens || 0) + p[1];
-      }
+      const known = fileIndex.get(ref);
+      if (!known || (!known.files.length && now - known.at > MISSING_RETRY_MS)) fileIndex.set(ref, { files: sessionFiles(driver, nativeId), at: now });
+      files.push(...withSubagents(fileIndex.get(ref).files, nativeId));
     }
+    // Oldest log first: a resumed session's copies are then the ones skipped.
+    const sized = files.map(([kind, file]) => { try { const st = fs.statSync(file); return { kind, file, size: st.size, born: st.birthtimeMs || st.mtimeMs }; } catch { return null; } }).filter(Boolean).sort((a, b) => a.born - b.born);
+    // A log that shrank (rewritten) means reading this thread again from the start.
+    if (sized.some(({ file, size }) => (entry.files[file]?.offset || 0) > size)) entry = { files: {}, agg: {} };
+    for (const { kind, file, size } of sized) {
+      const f = (entry.files[file] ||= {});
+      try { (kind === "claude" ? readClaude : readCodex)(file, entry, f, size); } catch { continue; }
+    }
+    if (now - (entry.seenAt || 0) > 86400000) entry.seenAt = now; // daily: the cache is not rewritten for this alone
+    spendCache[threadId] = entry;
+    [usd, tokens] = entrySpend(entry);
     if (tokens) out[threadId] = { usd: Math.round(usd * 1e4) / 1e4, tokens };
   }
-  const text = JSON.stringify(spendCache);
+  // Logs of threads not looked at in a month are forgotten (read again if they come back).
+  for (const [id, entry] of Object.entries(spendCache)) if (!entry || now - (entry.seenAt || 0) > SPEND_KEEP_MS) delete spendCache[id];
+  for (const entry of Object.values(spendCache)) if (entry.seenSet) entry.seen = [...entry.seenSet];
+  const text = JSON.stringify({ v: SPEND_CACHE_VERSION, files: spendCache }, (k, v) => (k === "seenSet" ? undefined : v));
   if (text !== spendText) {
     try {
       fs.mkdirSync(path.dirname(SPEND_CACHE), { recursive: true });
@@ -246,10 +430,15 @@ function subagents(conn, threadId) {
 function bots(ids) {
   const conn = db();
   try {
+    // ids come most wanted first (each window's open thread, then its bots top
+    // down): with more than MAX_BOTS on screen, the cap drops the ones further down,
+    // not an arbitrary set.
     const manual = ids.slice(0, MAX_BOTS);
+    const rank = new Map(manual.map((id, i) => [id, i]));
     const rows = conn.prepare("SELECT thread_id, title, payload_json FROM orchestration_v2_projection_threads WHERE deleted_at IS NULL AND archived_at IS NULL AND (title LIKE ? OR thread_id IN (" + manual.map(() => "?").join(",") + "))").all("%" + MARKER + "%", ...manual);
     const isBot = (title) => { const w = String(title || "").split(/\s+/).filter(Boolean); return w.length > 0 && (w[0] === MARKER || w[w.length - 1] === MARKER); };
     const messages = conn.prepare("SELECT role, created_at, payload_json FROM orchestration_v2_projection_messages WHERE thread_id = ? AND role IN ('assistant', 'user') ORDER BY created_at DESC LIMIT 6");
+    rows.sort((a, b) => (rank.get(a.thread_id) ?? Infinity) - (rank.get(b.thread_id) ?? Infinity));
     const out = {};
     for (const row of rows.slice(0, MAX_BOTS)) {
       if (!isBot(row.title) && !manual.includes(row.thread_id)) continue;
@@ -271,7 +460,7 @@ function bots(ids) {
   }
 }
 
-// ---------- Home: what only the database knows (projects, runs per day, automations) ----------
+// ---------- Home: what only the database knows (projects, runs per day) ----------
 const localDay = (iso) => {
   const d = new Date(iso || "");
   return Number.isFinite(d.getTime()) ? d.toLocaleDateString("en-CA") : null; // YYYY-MM-DD, machine time zone
@@ -279,11 +468,13 @@ const localDay = (iso) => {
 function homeDatabase(envId, activityDays) {
   const conn = db();
   try {
+    // Only each project's place in the list: the page counts activity per project,
+    // never by its name or folder.
     const projects = [];
     const index = new Map();
-    for (const r of conn.prepare("SELECT project_id, title, workspace_root FROM projection_projects WHERE deleted_at IS NULL").all()) {
+    for (const r of conn.prepare("SELECT project_id FROM projection_projects WHERE deleted_at IS NULL").all()) {
       index.set(r.project_id, projects.length);
-      projects.push({ title: String(r.title || "").slice(0, 60), root: String(r.workspace_root || "").slice(0, 260) });
+      projects.push({});
     }
     const since = new Date(Date.now() - (activityDays + 1) * 86400000).toISOString().slice(0, 19);
     const cells = new Map(); // "day|project" -> [threads, runs]
@@ -302,14 +493,7 @@ function homeDatabase(envId, activityDays) {
     const activity = {};
     const sorted = [...cells.entries()].map(([k, v]) => [k.split("|")[0], Number(k.split("|")[1]), v]).sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : a[1] - b[1]));
     for (const [day, pi, [threads, runs]] of sorted) (activity[day] ||= []).push([pi, threads, runs]);
-    const automations = conn.prepare("SELECT title, enabled, project_id, thread_id, next_run_at, last_run_at, last_run_status, run_count FROM scheduled_tasks WHERE enabled = 1 ORDER BY next_run_at IS NULL, next_run_at LIMIT 60").all().map((r) => ({
-      title: String(r.title || "").slice(0, 80),
-      project: index.has(r.project_id) ? index.get(r.project_id) : null,
-      threadKey: envId && r.thread_id ? envId + ":" + r.thread_id : null,
-      nextRunAt: r.next_run_at, lastRunAt: r.last_run_at,
-      lastStatus: String(r.last_run_status || "").slice(0, 20), runCount: Number(r.run_count) || 0,
-    }));
-    return { projects, activity, automations };
+    return { projects, activity };
   } finally {
     conn.close();
   }
@@ -317,6 +501,10 @@ function homeDatabase(envId, activityDays) {
 
 // ---------- Feed shaping and writing (formerly on T3's main thread) ----------
 const ACTIVITY_DAYS = 26 * 7;
+// What T3 is asked for. Its usage scan keeps a cache of about 92 days: asked for
+// more, it read every older transcript again on every publish (hundreds of MB for a
+// heavy user, every five minutes). Older days are kept here instead (usageKept).
+const USAGE_DAYS = 90;
 const SPEND_DAYS = 62;
 const HISTORY_DAYS = 8;
 const HOUR = 3600000;
@@ -349,34 +537,63 @@ function publishBots(ids) {
 
 // ---------- T3's API (limits, usage summary) ----------
 const run = (args) => new Promise((resolve, reject) => cp.execFile(t3Cli, args, { timeout: 30000, encoding: "utf8" }, (e, out) => (e ? reject(e) : resolve(out))));
+// One read-only session for several publishes, not one per publish: T3 keeps a row
+// for every session it ever issued (revoked ones too), so a fresh one every five
+// minutes left a trail in T3's database. It is held in this worker only, never
+// written or logged, and revoked when a new one replaces it or the worker is disposed.
+const SESSION_TTL_MIN = 15;
+let held = null; // { token, sessionId, until }
+const revoke = (id) => run(["auth", "session", "revoke", "--base-dir", t3Home, id]).catch((e) => log("session revoke failed:", e && e.message));
+async function sessionNow() {
+  if (held && held.until - Date.now() > 90 * 1000) return held;
+  if (held) revoke(held.sessionId);
+  held = null;
+  const issued = await run(["auth", "session", "issue", "--base-dir", t3Home, "--ttl", SESSION_TTL_MIN + "m", "--label", "t3plus home feed", "--json", "--scope", "orchestration:read", "--scope", "diagnostics:read"]);
+  let session;
+  try {
+    // Only the JSON object: a notice the CLI prints around it must not leave the session unrevoked.
+    session = JSON.parse(issued.slice(issued.indexOf("{"), issued.lastIndexOf("}") + 1));
+  } catch (e) {
+    const id = (/"sessionId"\s*:\s*"([^"]+)"/.exec(issued) || [])[1];
+    if (id) revoke(id);
+    else log("session revoke skipped: no session id in the CLI's answer");
+    throw e;
+  }
+  if (!session.token || !session.sessionId) throw new Error("T3 issued no session");
+  held = { token: session.token, sessionId: session.sessionId, until: Date.now() + (SESSION_TTL_MIN * 60 - 30) * 1000 };
+  return held;
+}
+function dropSession() {
+  if (held) revoke(held.sessionId);
+  held = null;
+}
+
 async function readT3() {
   // The protocol version is looked up while the CLI issues the session (the CLI takes ~0.4 s).
-  const issuing = run(["auth", "session", "issue", "--base-dir", t3Home, "--ttl", "5m", "--label", "t3plus home feed", "--json", "--scope", "orchestration:read", "--scope", "diagnostics:read"]);
+  const issuing = sessionNow();
   const looking = (async () => {
     const runtime = JSON.parse(fs.readFileSync(path.join(t3Home, "userdata", "server-runtime.json"), "utf8"));
     const base = "127.0.0.1:" + (runtime.port || 3773);
     const env = await (await fetch("http://" + base + "/.well-known/t3/environment", { signal: AbortSignal.timeout(10000) })).json();
     return { base, proto: env.orchestrationProtocolVersion || 1 };
   })();
-  looking.catch(() => {}); // a failed lookup is reported below, after the session is safely revoked
-  const issued = await issuing;
-  let session = null;
+  looking.catch(() => {}); // a failed lookup is reported below
+  const session = await issuing;
   try {
-    // Only the JSON object: a notice the CLI prints around it must not leave the session unrevoked.
-    session = JSON.parse(issued.slice(issued.indexOf("{"), issued.lastIndexOf("}") + 1));
     const { base, proto } = await looking;
     const today = new Date();
-    const since = new Date(today.getTime() - Math.max(SPEND_DAYS, ACTIVITY_DAYS) * 86400000).toLocaleDateString("en-CA");
+    const since = new Date(today.getTime() - USAGE_DAYS * 86400000).toLocaleDateString("en-CA");
     return await new Promise((resolve, reject) => {
       const ws = new WebSocket("ws://" + base + "/ws?orchestrationProtocol=" + proto, { headers: { Authorization: "Bearer " + session.token } });
       let summary = null;
+      let summaryOk = false;
       let providers = null;
       let sources = null;
       const finish = () => {
         if (summary === null || sources === null) return;
         clearTimeout(timer);
         try { ws.close(); } catch {}
-        resolve({ summary: summary || {}, providers: providers || [], sources: sources || [] });
+        resolve({ summary: summary || {}, summaryOk, providers: providers || [], sources: sources || [] });
       };
       const timer = setTimeout(() => { try { ws.close(); } catch {} reject(new Error("T3 API timed out")); }, 45000);
       ws.onerror = () => { clearTimeout(timer); reject(new Error("T3 API connection failed")); };
@@ -391,7 +608,10 @@ async function readT3() {
         // An odd frame fails this read only, never the worker.
         try {
           if (frame._tag === "Ping") ws.send('{"_tag":"Pong"}');
-          else if (frame._tag === "Exit" && String(frame.requestId) === "summary") summary = frame.exit?._tag === "Success" ? frame.exit.value : {};
+          else if (frame._tag === "Exit" && String(frame.requestId) === "summary") {
+            summaryOk = frame.exit?._tag === "Success";
+            summary = summaryOk ? frame.exit.value : {};
+          }
           else if (frame._tag === "Chunk" && String(frame.requestId) === "config") {
             ws.send(JSON.stringify({ _tag: "Ack", requestId: frame.requestId }));
             for (const item of frame.values || []) {
@@ -409,10 +629,11 @@ async function readT3() {
         }
       };
     });
-  } finally {
-    const id = session ? session.sessionId : (/"sessionId"\s*:\s*"([^"]+)"/.exec(issued) || [])[1];
-    if (id) run(["auth", "session", "revoke", "--base-dir", t3Home, id]).catch((e) => log("session revoke failed:", e && e.message));
-    else log("session revoke skipped: no session id in the CLI's answer");
+  } catch (e) {
+    // A failed read may be the session (expired early, revoked by the user): the next
+    // publish starts with a new one.
+    dropSession();
+    throw e;
   }
 }
 
@@ -433,42 +654,89 @@ function limits(providers, sources) {
   const claude = [];
   for (const p of providers) {
     const driver = p.driver || p.provider || "";
-    if (driver !== "claudeAgent" || !p.usageLimits) continue;
+    if (driver !== "claudeAgent" || !p.usageLimits || p.enabled === false) continue;
     const windows = (p.usageLimits.windows || []).map(cleanWindow).filter(Boolean);
     if (!windows.length) continue;
     claude.push({ id: p.instanceId, label: safeLabel(p.displayName || p.label || p.instanceId, "Claude"), plan: String(p.auth?.type || "").slice(0, 40), windows, checkedAt: p.usageLimits.checkedAt });
   }
-  let codex = null;
+  // Usage-limit hubs (Settings -> Providers; T3 names them "cliproxy-<host>", older
+  // setups "codex_gateway"): every Codex account in any of them. A hub holds other
+  // providers' accounts too (Claude, Grok, ...), which are no part of the Codex pool.
+  const seen = new Set();
+  const hubAccounts = [];
+  let hub = null;
   for (const s of sources) {
-    if (s.id !== "codex_gateway") continue;
-    const accounts = (s.accounts || []).map((a, i) => ({ label: safeLabel(a.email, "Account " + (i + 1)), plan: String(a.plan || "").slice(0, 40), windows: (a.usageLimits?.windows || []).map(cleanWindow).filter(Boolean) }));
-    codex = { label: safeLabel(s.label, "Codex"), checkedAt: s.checkedAt, accounts };
+    for (const a of s.accounts || []) {
+      if ((a.driver || "codex") !== "codex") continue;
+      const id = a.workspaceId || a.email || s.id + ":" + a.id;
+      if (seen.has(id)) continue;
+      seen.add(id);
+      hubAccounts.push({ label: safeLabel(a.email, "Account " + (hubAccounts.length + 1)), plan: String(a.plan || "").slice(0, 40), windows: (a.usageLimits?.windows || []).map(cleanWindow).filter(Boolean) });
+      hub ||= s;
+    }
+  }
+  let codex = hubAccounts.length ? { label: safeLabel(hub.label, "Codex"), checkedAt: hub.checkedAt, accounts: hubAccounts } : null;
+  // Claude accounts a hub holds, when T3's own Claude reports no limits (the same
+  // account in both would be counted twice).
+  if (!claude.length) {
+    for (const s of sources) {
+      for (const a of s.accounts || []) {
+        if (a.driver !== "claudeAgent") continue;
+        const windows = (a.usageLimits?.windows || []).map(cleanWindow).filter(Boolean);
+        if (windows.length) claude.push({ id: String(s.id + ":" + a.id).slice(0, 80), label: safeLabel(a.email, "Claude " + (claude.length + 1)), plan: String(a.plan || "").slice(0, 40), windows, checkedAt: a.usageLimits.checkedAt });
+      }
+    }
   }
   if (!codex) {
-    // No Codex Gateway: the Codex account T3 itself is signed in to.
+    // No hub: the Codex accounts T3 itself is signed in to (every instance, not the last one).
+    const accounts = [];
+    let checkedAt = null;
     for (const p of providers) {
-      if ((p.driver || p.provider) !== "codex" || !p.usageLimits) continue;
+      if ((p.driver || p.provider) !== "codex" || !p.usageLimits || p.enabled === false) continue;
       const windows = (p.usageLimits.windows || []).map(cleanWindow).filter(Boolean);
-      if (windows.length) codex = { label: "Codex", checkedAt: p.usageLimits.checkedAt, accounts: [{ label: "Codex", plan: String(p.auth?.label || "").slice(0, 40), windows }] };
+      if (!windows.length) continue;
+      accounts.push({ label: safeLabel(p.displayName, "Codex"), plan: String(p.auth?.label || "").slice(0, 40), windows });
+      checkedAt ||= p.usageLimits.checkedAt;
     }
+    if (accounts.length) codex = { label: "Codex", checkedAt, accounts };
   }
   return { claude, codex };
 }
-const planWeight = (plan) => (/pro/i.test(plan || "") ? 10 : 1);
-const claudeWeight = (plan) => (/max/i.test(plan || "") ? 5 : 1);
+// The same rules as the page (extension/src/homeData.js) and T3's own usage view:
+// a window is what T3 calls it (kind; a monthly window is no week), its length only
+// when it has no kind. Different rules here and there made the recorded line and the
+// current value disagree.
+const isWeekly = (w) => (w.kind ? w.kind === "weekly" : (w.durationMins || 0) >= 6 * 1440 && (w.durationMins || 0) <= 8 * 1440);
+const isFiveHour = (w) => (w.kind ? w.kind === "session" : (w.durationMins || 0) > 0 && (w.durationMins || 0) < 1440);
+// T3's weights: Codex Plus 1x, Pro 100 5x, Pro 200 20x; all equal when a plan is unknown.
+const CODEX_PLAN_WEIGHTS = { "ChatGPT Plus Subscription": 1, "ChatGPT Pro 100 Subscription": 5, "ChatGPT Pro 200 Subscription": 20 };
+const poolWeights = (plans, table) => {
+  const weights = plans.map((plan) => table[plan]);
+  return weights.every((w) => typeof w === "number") ? weights : plans.map(() => 1);
+};
 function codexPool(codex) {
   if (!codex) return null;
+  // Only accounts that report a week: one whose limits failed to load counted as 100% left.
+  const accounts = codex.accounts.filter((a) => a.windows.some(isWeekly));
+  if (!accounts.length) return null;
   let cap = 0, weekLeft = 0, fiveLeft = 0, fiveCap = 0;
-  const single = codex.accounts.length === 1;
-  for (const a of codex.accounts) {
-    const weight = single ? 100 : planWeight(a.plan) * 100;
-    const weekly = a.windows.find((w) => (w.durationMins || 0) >= 1440);
-    const five = a.windows.find((w) => (w.durationMins || 0) > 0 && (w.durationMins || 0) < 1440);
+  const weights = accounts.length === 1 ? [1] : poolWeights(accounts.map((a) => a.plan), CODEX_PLAN_WEIGHTS);
+  for (const [i, a] of accounts.entries()) {
+    const weight = weights[i] * 100;
+    const weekly = a.windows.find(isWeekly);
+    const five = a.windows.find(isFiveHour);
     cap += weight;
     weekLeft += weight * (1 - (weekly ? weekly.usedPercent : 0) / 100);
     if (five) { fiveCap += weight; fiveLeft += weight * (1 - five.usedPercent / 100); }
   }
   return { weekLeft: Math.round(weekLeft), weekCap: Math.round(cap), fiveLeft: Math.round(fiveLeft), fiveCap: Math.round(fiveCap) };
+}
+// A usage bucket's token count, as T3's Usage page totals it: input (uncached, cache
+// reads, cache writes) plus output. Reasoning tokens are part of output already
+// (T3's schema says so), so adding them counted them twice.
+function bucketTokens(totals) {
+  const t = totals || {};
+  return ["uncachedInputTokens", "cachedInputTokens", "cacheCreationTokens", "outputTokens"].reduce((n, k) => n + (Number(t[k]) || 0), 0);
 }
 function spend(summary) {
   const first = new Date(Date.now() - SPEND_DAYS * 86400000).toLocaleDateString("en-CA");
@@ -477,7 +745,7 @@ function spend(summary) {
     if (!b.day || !b.provider || b.day < first) continue;
     const cell = ((byDay[b.day] ||= {})[b.provider] ||= [0, 0]);
     cell[0] += Number(b.costUsd) || 0;
-    cell[1] += Object.values(b.totals || {}).reduce((n, v) => n + (Number(v) || 0), 0);
+    cell[1] += bucketTokens(b.totals);
   }
   const out = {};
   for (const day of Object.keys(byDay).sort()) out[day] = Object.fromEntries(Object.entries(byDay[day]).map(([p, [c, t]]) => [p, [Math.round(c * 1e4) / 1e4, t]]));
@@ -488,7 +756,7 @@ function usageActivity(summary) {
   for (const b of summary.buckets || []) {
     if (!b.day || !b.provider) continue;
     const p = ((days[b.day] ||= {})[String(b.provider).slice(0, 24)] ||= 0);
-    days[b.day][String(b.provider).slice(0, 24)] = p + Object.values(b.totals || {}).reduce((n, v) => n + (Number(v) || 0), 0);
+    days[b.day][String(b.provider).slice(0, 24)] = p + bucketTokens(b.totals);
   }
   const out = {};
   for (const day of Object.keys(days).sort()) {
@@ -504,7 +772,7 @@ function updateHistory(pool, claude, at) {
   const cutoff = new Date(Date.now() - HISTORY_DAYS * 86400000).toISOString();
   const entry = { t: at, ...(pool || {}) };
   for (const c of claude) {
-    const weekly = c.windows.find((w) => (w.durationMins || 0) >= 1440);
+    const weekly = c.windows.find(isWeekly);
     if (weekly) (entry.claudeWeekUsed ||= {})[c.id] = weekly.usedPercent;
   }
   history = [...history.filter((h) => (h.t || "") >= cutoff), entry];
@@ -518,18 +786,40 @@ function updateHistory(pool, claude, at) {
   }
   return thinned;
 }
-function claudeSeries(history, claude) {
-  const weights = Object.fromEntries(claude.map((c) => [c.id, claude.length === 1 ? 100 : claudeWeight(c.plan) * 100]));
+function claudeSeries(history) {
+  // Each account's week counts the same (T3 weighs Claude plans only in the five-hour window).
   const points = [];
   for (const h of history) {
     if (!h.claudeWeekUsed || !Object.keys(h.claudeWeekUsed).length) continue;
     let cap = 0, left = 0;
-    for (const [k, v] of Object.entries(h.claudeWeekUsed)) { const w = weights[k] ?? 100; cap += w; left += w * (1 - v / 100); }
+    for (const v of Object.values(h.claudeWeekUsed)) { cap += 100; left += 100 * (1 - v / 100); }
     points.push([Math.floor(Date.parse(h.t) / 1000), Math.round(left), cap]);
   }
   return points;
 }
 const codexSeries = (history) => history.filter((h) => h.weekCap).map((h) => [Math.floor(Date.parse(h.t) / 1000), h.weekLeft || 0, h.weekCap]);
+
+/**
+ * Usage per day (spend, tokens) as published, with the days T3 is no longer asked
+ * for kept from before (state/usage-kept.json). A failed usage read publishes what
+ * there was, not nothing ("No usage recorded" for a cycle, the Activity card
+ * switching from tokens to turns).
+ */
+function usageKept(summary, ok) {
+  const file = path.join(stateDir, "usage-kept.json");
+  let kept = {};
+  try { kept = JSON.parse(fs.readFileSync(file, "utf8")) || {}; } catch {}
+  const before = { activity: kept.activity && typeof kept.activity === "object" ? kept.activity : {}, spend: kept.spend && typeof kept.spend === "object" ? kept.spend : {} };
+  if (!ok) return before;
+  const asked = new Date(Date.now() - USAGE_DAYS * 86400000).toLocaleDateString("en-CA");
+  const oldest = new Date(Date.now() - ACTIVITY_DAYS * 86400000).toLocaleDateString("en-CA");
+  const activity = {};
+  for (const day of Object.keys(before.activity).sort()) if (day >= oldest && day < asked) activity[day] = before.activity[day];
+  Object.assign(activity, usageActivity(summary));
+  const next = { activity, spend: spend(summary) };
+  try { writeAtomic(file, JSON.stringify(next)); } catch (e) { log("usage copy not kept:", e && e.message); }
+  return next;
+}
 
 async function publishHome() {
   const envId = environmentId();
@@ -541,19 +831,30 @@ async function publishHome() {
   const pool = codexPool(lim.codex);
   const at = new Date().toISOString().replace(/\.\d{3}Z$/, "+00:00");
   const history = updateHistory(pool, lim.claude, at);
+  const usage = usageKept(t3.summary, t3.summaryOk);
+  // The transcript folders T3's usage scan reads, for finding a thread's logs (logRoots).
+  if (t3.summaryOk) {
+    const homes = { claude: [], codex: [] };
+    for (const src of t3.summary.sources || []) {
+      const f = src && src.fingerprint;
+      if (f && homes[f.provider] && typeof f.resolvedHomePath === "string" && !homes[f.provider].includes(f.resolvedHomePath)) homes[f.provider].push(f.resolvedHomePath);
+    }
+    try { writeAtomic(HOMES_FILE, JSON.stringify(homes)); } catch {}
+  }
+  // Only what the page shows. Project folders (paths with the user's name), titles,
+  // automations and the raw limit history went into the feed and its browser-storage
+  // copy unused; the activity cells only need each project's place in the list.
   const data = {
     version: 1,
     generatedAt: nowIso(),
     timeZone,
     projects: dbPart.projects,
     activity: dbPart.activity,
-    spend: spend(t3.summary),
+    spend: usage.spend,
     limits: { ...lim, pool },
-    limitHistory: history,
     codexSeries: codexSeries(history),
-    claudeSeries: claudeSeries(history, lim.claude),
-    aiActivity: usageActivity(t3.summary),
-    automations: dbPart.automations,
+    claudeSeries: claudeSeries(history),
+    aiActivity: usage.activity,
   };
   writeAtomic(path.join(feedDir, "t3plus-home.json"), JSON.stringify(data));
   return true;
@@ -562,6 +863,6 @@ async function publishHome() {
 parentPort.on("message", ({ id, op, args }) => {
   // Calls run one at a time per kind (the loader queues them); a bot refresh may run while the home feed waits on T3's API.
   Promise.resolve()
-    .then(() => (op === "bots" ? publishBots(args.ids) : op === "home" ? publishHome() : null))
+    .then(() => (op === "bots" ? publishBots(args.ids) : op === "home" ? publishHome() : op === "dispose" ? (dropSession(), null) : null))
     .then((result) => parentPort.postMessage({ id, result }), (error) => parentPort.postMessage({ id, error: String((error && error.message) || error) }));
 });

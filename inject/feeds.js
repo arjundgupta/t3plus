@@ -18,19 +18,27 @@ module.exports = function createFeeds({ home, log }) {
   for (const file of ["config.json", "server/config.local.json"]) {
     try { config = { ...JSON.parse(fs.readFileSync(path.join(home, file), "utf8")), ...config }; } catch {}
   }
-  const t3Home = config.t3Home || path.join(os.homedir(), ".t3");
-  const t3Cli = [config.t3Cli, "/opt/homebrew/bin/t3", "/usr/local/bin/t3", path.join(os.homedir(), ".local/bin/t3")].find((p) => p && fs.existsSync(p)) || "t3";
+  // T3's home as T3 itself finds it (T3CODE_HOME, else ~/.t3), and the launcher the
+  // packaged app always writes there (<home>/bin/t3); the links it may add on the PATH after.
+  const t3Home = config.t3Home || (process.env.T3CODE_HOME || "").trim() || path.join(os.homedir(), ".t3");
+  const launcher = path.join(t3Home, "bin", process.platform === "win32" ? "t3.cmd" : "t3");
+  const t3Cli = [config.t3Cli, launcher, "/opt/homebrew/bin/t3", "/usr/local/bin/t3", path.join(os.homedir(), ".local/bin/t3"), path.join(os.homedir(), "bin/t3")].find((p) => p && fs.existsSync(p)) || "t3";
   const timeZone = config.timeZone || Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
   const source = path.join(__dirname, "feeds-worker.js");
 
   let worker = null;
   let seq = 0;
+  // After dispose() (t3+ turned off or replaced) no call may start a new worker:
+  // a publish queued behind the one dispose() cut short used to start one that
+  // nothing would ever stop.
+  let disposed = false;
   const waiting = new Map();
   function failAll(error) {
     for (const w of waiting.values()) w.reject(error);
     waiting.clear();
   }
   function call(op, args) {
+    if (disposed) return Promise.reject(new Error("feeds disposed"));
     if (!worker) {
       const w = new Worker(source, { workerData: { t3Home, home, t3Cli, timeZone } });
       worker = w;
@@ -61,9 +69,14 @@ module.exports = function createFeeds({ home, log }) {
     publishHome: () => call("home", {}),
     config: { t3Home, t3Cli, timeZone },
     dispose() {
+      disposed = true;
       const w = worker;
       worker = null;
-      if (w) w.terminate().catch(() => {});
+      if (!w) return;
+      // Its T3 session revoked first (the worker keeps one between publishes), then stopped.
+      try { w.postMessage({ id: 0, op: "dispose", args: {} }); } catch {}
+      const stop = setTimeout(() => w.terminate().catch(() => {}), 3000);
+      if (stop.unref) stop.unref();
     },
   };
 };

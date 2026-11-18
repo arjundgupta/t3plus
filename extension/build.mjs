@@ -19,7 +19,11 @@ const watch = process.argv.includes("--watch");
 export async function resolveFeedBase() {
   // --public: the release build, which never carries anyone's feed folder.
   if (process.argv.includes("--public")) return DEFAULT_FEED_BASE;
-  if (process.env.T3PLUS_FEED_BASE) return process.env.T3PLUS_FEED_BASE;
+  if (process.env.T3PLUS_FEED_BASE) {
+    // Checked like the local file's: a malformed value made a manifest Chrome refuses to load.
+    if (!/^https:\/\/[^/*]+\//.test(process.env.T3PLUS_FEED_BASE)) throw new Error("T3PLUS_FEED_BASE must be an https:// folder URL ending in /, e.g. https://files.example.net/feeds/");
+    return process.env.T3PLUS_FEED_BASE;
+  }
   try {
     const local = JSON.parse(await readFile(join(root, "t3plus.local.json"), "utf8"));
     if (typeof local.feedBase === "string" && /^https:\/\/[^/*]+\//.test(local.feedBase)) return local.feedBase;

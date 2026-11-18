@@ -68,6 +68,9 @@ export async function publishRelease({ cwd = root, publicBuild = false, reposito
   };
   const endpoint = `https://api.github.com/repos/${repository}/releases`;
   let release = await request(`${endpoint}/tags/${info.tag}`, { allowMissing: true });
+  // GitHub never returns a draft by its tag: an unfinished release from an earlier run
+  // is found in the list, and resumed instead of a second draft being made.
+  if (!release) release = (await request(`${endpoint}?per_page=100`, { allowMissing: true }))?.find?.((r) => r && r.draft && r.tag_name === info.tag) ?? null;
   if (release && !release.draft) {
     log(`Release ${info.tag} already exists; bump the version for the next release.`);
     return { skipped: true, url: release.html_url };

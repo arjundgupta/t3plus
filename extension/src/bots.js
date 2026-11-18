@@ -7,6 +7,8 @@ import {
   DEFAULT_BOT_MARKER,
   SIDEBAR_ROW_PREFIX,
   STORAGE_KEYS,
+  T3_CLASSES,
+  T3_SELECTORS,
   T3PLUS,
 } from "./config.js";
 import { subscribeKey } from "./settings.js";
@@ -52,6 +54,14 @@ export function parseRowStatus(ariaLabel, title) {
   if (!rest.startsWith(", ")) return "idle";
   const next = rest.slice(2).split(", ")[0];
   return STATUS_BY_LABEL.get(next) ?? "idle";
+}
+
+/** The project named at the end of a row's aria-label ("<title>, <status>, <project>"), or "". */
+export function parseRowProject(ariaLabel, title) {
+  if (typeof ariaLabel !== "string" || !title || !ariaLabel.startsWith(`${title}, `)) return "";
+  const parts = ariaLabel.slice(title.length + 2).split(", ");
+  if (STATUS_BY_LABEL.has(parts[0])) parts.shift();
+  return parts.join(", ");
 }
 
 /** T3's own status word for the row ("Input", "Approval", "Working", ...), or "" when it shows none. */
@@ -149,19 +159,44 @@ export function normalizeBotPrefsMap(raw) {
   return out;
 }
 
+/**
+ * A title as the remembered-bots list keeps it (cut to a bounded length). What is
+ * saved and what is compared against must both go through this: comparing the full
+ * title with the stored, shortened one rewrote the list on every check.
+ */
+export const knownBotTitle = (title) => String(title ?? "").slice(0, 120);
+
+/** Bots seen in the sidebar, as stored: { key: { title, seenAt, projectColor? } }, anything else dropped. */
+export function normalizeKnownBots(raw) {
+  const out = {};
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return out;
+  // A sanity bound only: rememberBots keeps every bot on screen (there can be more
+  // than the list's cap); trimming here to the cap restarted its write loop.
+  for (const [k, v] of Object.entries(raw).slice(0, 1000)) {
+    if (v && typeof v === "object" && typeof v.title === "string") {
+      out[k] = { title: knownBotTitle(v.title), seenAt: Number(v.seenAt) || 0 };
+      if (typeof v.projectColor === "string" && /^#[0-9a-f]{6}$/i.test(v.projectColor)) out[k].projectColor = v.projectColor;
+    }
+  }
+  return out;
+}
+
 /** Stores bot presentation keyed by "<environmentId>:<threadId>". Never sent anywhere. */
+/** Threads turned into bots (or out of them) by hand, as stored: { "<env>:<thread>": boolean }. */
+export function normalizeManualBots(raw) {
+  const out = {};
+  if (raw && typeof raw === "object" && !Array.isArray(raw)) {
+    // true: a bot; false: turned off while bots are on by default.
+    for (const k of Object.keys(raw).slice(0, MANUAL_LIMIT)) if (BOT_KEY.test(k) && typeof raw[k] === "boolean") out[k] = raw[k];
+  }
+  return out;
+}
+
 export function createBotStore(area, changedEvent) {
   const key = STORAGE_KEYS.bots;
   const knownKey = STORAGE_KEYS.knownBots;
   const manualKey = STORAGE_KEYS.manualBots;
-  const normalizeManual = (raw) => {
-    const out = {};
-    if (raw && typeof raw === "object") {
-      // true: a bot; false: turned off while bots are on by default.
-      for (const k of Object.keys(raw).slice(0, MANUAL_LIMIT)) if (BOT_KEY.test(k) && typeof raw[k] === "boolean") out[k] = raw[k];
-    }
-    return out;
-  };
+  const normalizeManual = normalizeManualBots;
   async function loadManual() {
     return normalizeManual((await area.get(manualKey))?.[manualKey]);
   }
@@ -204,17 +239,7 @@ export function createBotStore(area, changedEvent) {
     },
     /** Bots seen in the sidebar: { key: { title, seenAt } }. Lets Settings list them. */
     async loadKnown() {
-      const raw = (await area.get(knownKey))?.[knownKey];
-      const out = {};
-      if (raw && typeof raw === "object") {
-        for (const [k, v] of Object.entries(raw).slice(0, BOT_LIMITS.maxBots * 2)) {
-          if (v && typeof v.title === "string") {
-            out[k] = { title: v.title.slice(0, 120), seenAt: Number(v.seenAt) || 0 };
-            if (typeof v.projectColor === "string" && /^#[0-9a-f]{6}$/i.test(v.projectColor)) out[k].projectColor = v.projectColor;
-          }
-        }
-      }
-      return out;
+      return normalizeKnownBots((await area.get(knownKey))?.[knownKey]);
     },
     async saveKnown(known) {
       await area.set({ [knownKey]: known });
@@ -236,7 +261,8 @@ export function createBotStore(area, changedEvent) {
       return subscribeKey(changedEvent, manualKey, (value) => listener(normalizeManual(value)));
     },
     subscribeKnown(listener) {
-      return subscribeKey(changedEvent, knownKey, (value) => listener(value && typeof value === "object" ? value : {}));
+      // Normalized like loadKnown: an imported or hand-edited entry (null, say) broke the settings panel.
+      return subscribeKey(changedEvent, knownKey, (value) => listener(normalizeKnownBots(value)));
     },
   };
 }
@@ -301,6 +327,15 @@ export function applyAvatarVars(el, view) {
   setSprite(el, animated ? { frames: view.frames, duration: view.duration } : null, badge && badge.frames > 1 ? badge : null);
 }
 
+const AVATAR_VARS = ["--t3plus-bot-fill", "--t3plus-bot-clip", "--t3plus-bot-edge", "--t3plus-bot-frames", "--t3plus-bot-badge", "--t3plus-badge-frames"];
+/** Removes everything applyAvatarVars set on an element of T3's (its sprite clock too). */
+export function clearAvatarVars(el) {
+  setSprite(el, null, null);
+  for (const name of AVATAR_VARS) el.style.removeProperty(name);
+  for (const name of ["data-t3plus-shape", "data-t3plus-mood", "data-animated", "data-badge"]) el.removeAttribute(name);
+  if (el.getAttribute("style") === "") el.removeAttribute("style");
+}
+
 const LAYOUT_ATTRS = [
   "data-t3plus-bot-body",
   "data-t3plus-bot-top",
@@ -335,8 +370,12 @@ function markBotLayout(row, titleEl, label) {
     setAttr(top, "data-t3plus-bot-top", "");
     setAttr(top, "data-t3plus-bot-name", label);
     for (const child of [...top.children]) {
-      if (child.classList?.contains("group/sidebar-status-slot")) setAttr(child, "data-t3plus-bot-status", "");
-      else setAttr(child, "data-t3plus-bot-hide", "");
+      if (child.hasAttribute(T3PLUS.ownedAttr)) continue;
+      // Both ways: while a row is dragged, T3 renders its drop label in the status
+      // slot's element, and a hide mark left from then hid the status for good.
+      const status = child.classList?.contains(T3_CLASSES.statusSlot);
+      setAttr(child, status ? "data-t3plus-bot-status" : "data-t3plus-bot-hide", "");
+      setAttr(child, status ? "data-t3plus-bot-hide" : "data-t3plus-bot-status", null);
     }
   }
   if (titleLine) {
@@ -367,7 +406,7 @@ function markSlimBotLayout(row, titleEl, label) {
   const own = [...top.children].filter((child) => !child.hasAttribute(T3PLUS.ownedAttr));
   for (const child of own) {
     if (child === titleEl) continue;
-    const status = child.classList?.contains("group/sidebar-status-slot") || (child.classList?.contains("ml-auto") && child === own.at(-1));
+    const status = child.classList?.contains(T3_CLASSES.statusSlot) || (child.classList?.contains("ml-auto") && child === own.at(-1));
     setAttr(child, status ? "data-t3plus-bot-status" : "data-t3plus-bot-hide", "");
     setAttr(child, status ? "data-t3plus-bot-hide" : "data-t3plus-bot-status", null);
   }
@@ -427,8 +466,12 @@ const MAX_MINIS = 6;
  * done. Hover shows their titles. Gone when none is working any more.
  */
 function syncSubagents(doc, row, subagents, view) {
-  const top = row.querySelector("[data-t3plus-bot-top]") ?? row;
-  let strip = top.querySelector(":scope > .t3plus-bot-subs");
+  // A card row's body stacks its lines, so the strip is a line of its own there; in
+  // a slim row it is the third row of the top line's grid (content.css). In a card's
+  // one-line top row it squeezed the bot's name.
+  const card = row.getAttribute("data-t3plus-bot-body") === "slim" ? null : row.querySelector(":scope > [data-t3plus-bot-body]");
+  const host = card ?? row.querySelector("[data-t3plus-bot-top]") ?? row;
+  let strip = row.querySelector(".t3plus-bot-subs");
   if (!subagents.length) {
     if (strip) {
       for (const el of strip.children) setSprite(el, null, null);
@@ -436,13 +479,14 @@ function syncSubagents(doc, row, subagents, view) {
     }
     return;
   }
+  if (strip && strip.parentElement !== host) host.append(strip);
   const signature = JSON.stringify([view.paint, subagents]);
   if (strip?.dataset.signature === signature) return;
   if (!strip) {
     strip = doc.createElement("span");
     strip.className = "t3plus-bot-subs";
     strip.setAttribute(T3PLUS.ownedAttr, "");
-    top.append(strip);
+    host.append(strip);
   }
   for (const el of strip.children) setSprite(el, null, null);
   strip.replaceChildren();
@@ -483,32 +527,66 @@ export function undecorateBotRow(row) {
 /** Removes all bot decoration under `root` (feature off, or stop). */
 export function clearBotDecoration(root) {
   for (const row of root.querySelectorAll(`[${T3PLUS.botAttr}]`)) undecorateBotRow(row);
-  for (const el of root.querySelectorAll(`[${T3PLUS.ownedAttr}]`)) el.remove();
+  // Profiles (profiles.js) live in the same sidebar and stay when bots are off.
+  for (const el of root.querySelectorAll(`[${T3PLUS.ownedAttr}]`)) if (!el.closest(".t3plus-profiles")) el.remove();
 }
 
-const BREADCRUMB_VARS = ["--t3plus-bot-fill", "--t3plus-bot-clip", "--t3plus-bot-edge"];
-
 /** Decorates the active thread breadcrumb without changing T3's route/header structure. */
+const ACTIONS_PREFIX = "Thread actions for ";
+/** The heading's actions button: T3 labels it with the raw title, marker and all. */
+const actionsButton = (heading) => heading.closest?.(`button[aria-label^="${ACTIONS_PREFIX}"]`) ?? null;
+
 export function decorateBotBreadcrumb(doc, bot) {
-  const heading = bot ? doc.querySelector('[aria-label="Thread breadcrumb"] h2') : null;
-  for (const old of doc.querySelectorAll('[aria-label="Thread breadcrumb"] h2[data-t3plus-bot-breadcrumb]')) {
+  const heading = bot ? doc.querySelector(T3_SELECTORS.breadcrumbHeading) : null;
+  for (const old of doc.querySelectorAll(`${T3_SELECTORS.breadcrumbHeading}[data-t3plus-bot-breadcrumb]`)) {
     if (old === heading) continue;
     old.removeAttribute("data-t3plus-bot-breadcrumb");
     old.removeAttribute("data-t3plus-bot-breadcrumb-label");
-    old.removeAttribute("data-t3plus-shape");
-    setSprite(old, null, null);
-    for (const name of BREADCRUMB_VARS) old.style.removeProperty(name);
+    // All of it: the mood, animation and badge stayed on T3's heading after leaving a bot.
+    clearAvatarVars(old);
+  }
+  // T3's label back where t3+ set the bot's name (unless T3 has set its own since).
+  for (const button of doc.querySelectorAll("button[data-t3plus-raw-label]")) {
+    if (heading && actionsButton(heading) === button) continue;
+    if (button.getAttribute("aria-label") === button.getAttribute("data-t3plus-set-label")) button.setAttribute("aria-label", button.getAttribute("data-t3plus-raw-label"));
+    button.removeAttribute("data-t3plus-raw-label");
+    button.removeAttribute("data-t3plus-set-label");
   }
   if (!heading) return;
   const view = resolveBotPresentation(bot, bot.prefs);
   setAttr(heading, "data-t3plus-bot-breadcrumb", "");
   setAttr(heading, "data-t3plus-bot-breadcrumb-label", view.label);
   applyAvatarVars(heading, view);
+  // "Thread actions for [[t3plus:bot:v1]] Orchestrator" read out the marker: the bot's name instead.
+  const button = actionsButton(heading);
+  const label = button?.getAttribute("aria-label") ?? "";
+  const wanted = `${ACTIONS_PREFIX}${view.label}`;
+  if (button && label !== wanted) {
+    if (label !== button.getAttribute("data-t3plus-set-label")) button.setAttribute("data-t3plus-raw-label", label);
+    button.setAttribute("data-t3plus-set-label", wanted);
+    button.setAttribute("aria-label", wanted);
+  }
+}
+
+/**
+ * Tooltips that show a bot's raw title (marker and all, as over the breadcrumb)
+ * show its name instead. Only whole text equal to a marked title is changed, and
+ * not the hover card's title (decorateBotHoverCards reads that one).
+ */
+export function relabelBotTooltips(root, botsByTitle) {
+  for (const popup of root.querySelectorAll(T3_SELECTORS.tooltipPopup)) {
+    const walker = popup.ownerDocument.createTreeWalker(popup, 4 /* NodeFilter.SHOW_TEXT */);
+    for (let n = walker.nextNode(); n; n = walker.nextNode()) {
+      const bot = botsByTitle.get((n.nodeValue ?? "").trim());
+      if (!bot?.titleLabel || bot.titleLabel === bot.thread?.title?.trim() || n.parentElement?.closest(HOVER_CARD_TITLE)) continue;
+      n.nodeValue = bot.titleLabel;
+    }
+  }
 }
 
 /** The thread hover card's title line (ThreadHoverCard.tsx): first line of T3's tooltip popup. */
 // T3 main uses font-medium; the open redesign stack (#28839-#28845) switches it to font-semibold.
-export const HOVER_CARD_TITLE = '[data-slot="tooltip-popup"] div.truncate:is(.font-medium, .font-semibold)';
+export const HOVER_CARD_TITLE = T3_SELECTORS.hoverCardTitle;
 
 /**
  * T3's thread hover card shows the raw title, marker included. Like the
@@ -517,18 +595,25 @@ export const HOVER_CARD_TITLE = '[data-slot="tooltip-popup"] div.truncate:is(.fo
  * T3 reuses for another thread is re-checked by its text.
  * @param {Map<string, object>} botsByTitle raw title -> bot (from classifyBots)
  */
-export function decorateBotHoverCards(root, botsByTitle, prefsByKey) {
+export function decorateBotHoverCards(root, botsByTitle, prefsByKey, textOf = null) {
   for (const el of root.querySelectorAll(HOVER_CARD_TITLE)) {
-    const raw = el.textContent ?? "";
-    if (el.getAttribute("data-t3plus-hover-raw") === raw && (el.hasAttribute("data-t3plus-bot-hover") || !botsByTitle.has(raw.trim()))) continue;
-    el.setAttribute("data-t3plus-hover-raw", raw);
+    // The title as T3 wrote it (screenshot mode's stand-in read through), like the sidebar's.
+    const raw = (textOf ? textOf(el) : el.textContent) ?? "";
     const bot = botsByTitle.get(raw.trim());
     if (!bot) {
+      if (el.getAttribute("data-t3plus-hover-raw") === raw && !el.hasAttribute("data-t3plus-bot-hover")) continue;
+      el.setAttribute("data-t3plus-hover-raw", raw);
+      if (el.hasAttribute("data-t3plus-bot-hover")) clearAvatarVars(el);
       el.removeAttribute("data-t3plus-bot-hover");
       el.removeAttribute("data-t3plus-bot-hover-label");
       continue;
     }
+    // Re-drawn whenever what it shows changes, not only its title: an open card
+    // follows screenshot mode (the label), and the bot's shape, color and status.
     const view = resolveBotPresentation(bot, prefsByKey[bot.key]);
+    const signature = `${raw}\u0000${view.label}\u0000${view.shape}\u0000${view.paint}\u0000${view.mood}\u0000${bot.status ?? ""}`;
+    if (el.getAttribute("data-t3plus-hover-raw") === signature && el.hasAttribute("data-t3plus-bot-hover")) continue;
+    el.setAttribute("data-t3plus-hover-raw", signature);
     el.setAttribute("data-t3plus-bot-hover", "");
     el.setAttribute("data-t3plus-bot-hover-label", view.label);
     applyAvatarVars(el, view);

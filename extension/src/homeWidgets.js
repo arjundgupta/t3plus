@@ -1,8 +1,8 @@
 import { T3PLUS } from "./config.js";
-import { createTooltip } from "./homeTooltip.js";
+import { createTooltip, TOOLTIP_ID } from "./homeTooltip.js";
 import { createBuilder } from "./dom.js";
 import { createDitherCanvas } from "./ditherChart.js";
-import { dailyActivity, formatPercent, formatTokens, formatUsd, heatmap, poolModel, projectSet, tokenDaily, tokenSeries } from "./homeData.js";
+import { dailyActivity, formatPercent, formatTokens, formatUsd, formatUsdExact, heatmap, poolModel, projectSet, tokenDaily, tokenSeries } from "./homeData.js";
 
 // Home widgets under T3's new-thread composer: four compact cards in a 2x2
 // grid, exactly as wide as T3's composer.
@@ -58,12 +58,24 @@ const fmtWhen = (ms, now) => {
 };
 
 const LONG_DAYS = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
-/** "Thursday 12:00 PM", or "Today 12:00 PM" on the day itself. */
+/**
+ * "Today 12:00 PM", "Tomorrow 9:00 AM", "Thursday 12:00 PM" within the week, and a
+ * date beyond it ("Nov 25, 3:00 PM"): a weekday alone said "Tuesday" on a Tuesday
+ * afternoon for next week's reset.
+ */
 const fmtReset = (ms, now) => {
   // Providers report a reset a fraction of a second early (11:59:59.6): show the minute it means.
   const d = new Date(Math.round(ms / 60000) * 60000);
   const time = d.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" });
-  return `${new Date(now).toDateString() === d.toDateString() ? "Today" : LONG_DAYS[d.getDay()]} ${time}`;
+  const today = new Date(now);
+  today.setHours(0, 0, 0, 0);
+  const day = new Date(d);
+  day.setHours(0, 0, 0, 0);
+  const days = Math.round((day - today) / 86400000);
+  if (days === 0) return `Today ${time}`;
+  if (days === 1) return `Tomorrow ${time}`;
+  if (days > 1 && days < 7) return `${LONG_DAYS[d.getDay()]} ${time}`;
+  return `${MONTHS[d.getMonth()]} ${d.getDate()}, ${time}`;
 };
 
 /**
@@ -98,7 +110,7 @@ export function createHomeView(doc, { variant = "home" } = {}) {
   // ---------------- Hover: T3-style tooltip + a crosshair on the charts ----------------
   // Cards register what to show; one delegated pointer handler on t3+'s own
   // grid drives everything (no listeners on T3's DOM).
-  const tip = createTooltip(doc);
+  const tip = createTooltip(doc, variant === "pool" ? `${TOOLTIP_ID}-pool` : TOOLTIP_ID);
   const cellTips = new WeakMap(); // heatmap cell -> tooltip content
   const plotHovers = new WeakMap(); // chart plot -> (fraction 0..1) => { frac, content, dots: [{ y, color }] }
   let marked = null;
@@ -201,9 +213,12 @@ export function createHomeView(doc, { variant = "home" } = {}) {
     const first = new Date(pool.from);
     if (tickStep === DAY) first.setHours(24, 0, 0, 0);
     else first.setHours(Math.ceil((first.getHours() + first.getMinutes() / 60 + 0.001) / (tickStep / HOUR)) * (tickStep / HOUR), 0, 0, 0);
-    for (let t = first.getTime(); t < pool.now; t += tickStep) {
+    // Stepped on the local calendar (next midnight, next 6 PM), not by fixed
+    // milliseconds: across a daylight-saving change a 24 h step lands on 11 PM or
+    // 1 AM and the day names came out wrong ("Sun, Sun, Mon").
+    for (const d = first; d.getTime() < pool.now; tickStep === DAY ? d.setDate(d.getDate() + 1) : d.setHours(d.getHours() + tickStep / HOUR)) {
+      const t = d.getTime();
       if (x(t) < 14 || x(t) > W - 14) continue;
-      const d = new Date(t);
       const text = tickStep === DAY ? DAYS[d.getDay()] : d.toLocaleTimeString("en-US", { hour: "numeric" }).replace(":00", "");
       ticks.push(h("span", { style: `left:${pct(t)}`, text }));
     }
@@ -228,12 +243,17 @@ export function createHomeView(doc, { variant = "home" } = {}) {
     const status = null;
     // A pool of several accounts is larger than 100%: say what it is out of.
     const remaining = Math.round(pool.cap) === 100 ? "remaining" : `remaining of ${formatPercent(pool.cap)}`;
+    // Old data says so: when the feed stops updating (T3's CLI or API broke), the
+    // percentage would otherwise read as current for days.
+    const age = feed.generatedAt ? nowMs - Date.parse(feed.generatedAt) : 0;
+    const stale = age > HOUR ? h("div", { class: "t3plus-w-stale", text: `Updated ${age >= 2 * DAY ? `${Math.floor(age / DAY)} days` : age >= DAY ? "1 day" : `${Math.floor(age / HOUR)} h`} ago` }) : null;
     return card(`pool t3plus-w-${kind}`, title, "gauge", status, [
       h("div", { class: "t3plus-w-pool-head" }, [
         h("span", { class: "t3plus-w-big-num", text: formatPercent(pool.left) }),
         h("span", { class: "t3plus-w-muted", text: remaining }),
       ]),
       pool.nextRefill ? h("div", { class: "t3plus-w-reset", text: `Reset - ${fmtReset(pool.nextRefill.at, pool.now)}` }) : null,
+      stale,
       poolPlot,
       h("div", { class: "t3plus-w-axis" }, ticks),
     ]);
@@ -337,12 +357,20 @@ export function createHomeView(doc, { variant = "home" } = {}) {
         },
       };
     });
+    // The middle date sits over its own day, not halfway: with an even number of days
+    // no day is at the middle, and the halfway label named the day after it.
+    const midLabel = (list) => {
+      const mid = Math.floor(list.length / 2);
+      const el = h("span", { class: "t3plus-w-axis-mid", text: label(list[mid]) });
+      el.style.left = `${((mid / Math.max(1, list.length - 1)) * 100).toFixed(2)}%`;
+      return el;
+    };
     return card("usage", "Usage", "chart", [h("span", { class: "t3plus-w-muted", text: `${formatUsd(totalCost)} this month` })], [
       h("div", { class: "t3plus-w-usage-plot" }, [
         h("div", { class: "t3plus-w-yaxis" }, [h("span", { text: formatTokens(max) }), h("span", { text: "0" })]),
         usagePlot,
       ]),
-      h("div", { class: "t3plus-w-axis t3plus-w-axis-spread" }, [h("span", { text: label(days[0]) }), h("span", { text: label(days[Math.floor(days.length / 2)]) }), h("span", { text: label(days.at(-1)) })]),
+      h("div", { class: "t3plus-w-axis t3plus-w-axis-spread" }, [h("span", { text: label(days[0]) }), midLabel(days), h("span", { text: label(days.at(-1)) })]),
       h("div", { class: "t3plus-w-legend" }, legend),
     ]);
   }
@@ -370,7 +398,7 @@ export function createHomeView(doc, { variant = "home" } = {}) {
         element.replaceChildren(poolCard(model.feed, model.kind === "codex" ? "codex" : "claude", now));
         // What this thread has cost so far, in the style of T3's Context row below.
         if (model.spend) {
-          const usd = model.spend.usd >= 1000 ? `$${(model.spend.usd / 1000).toFixed(2)}k` : `$${model.spend.usd.toFixed(2)}`;
+          const usd = formatUsdExact(model.spend.usd);
           element.append(
             h("div", { class: "t3plus-w-spend", title: `${model.spend.tokens.toLocaleString("en-US")} tokens, priced like T3's Usage page` }, [
               h("span", { class: "t3plus-w-spend-label", text: "Spend" }),
@@ -387,6 +415,15 @@ export function createHomeView(doc, { variant = "home" } = {}) {
       if (pools.length === 1) pools[0].classList.add("t3plus-w-wide");
       element.replaceChildren(...pools, activityCard(model.feed, projects, now), usageCard(model.feed, now));
       return true;
+    },
+    /**
+     * Hides the tooltip and the chart crosshair. For when the cards leave the
+     * page under a still pointer (a keyboard shortcut or a thread switch): no
+     * pointerleave comes then, and the tooltip on <body> would stay up.
+     */
+    hide() {
+      clearMarker();
+      tip.hide();
     },
     /** Removes the tooltip from <body> (t3+ stopped). */
     destroy() {

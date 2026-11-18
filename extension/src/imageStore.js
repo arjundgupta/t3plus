@@ -35,6 +35,18 @@ export function dataUrlToBlob(dataUrl) {
   return new Blob([bytes], { type });
 }
 
+/** A stored image record as the store keeps it, or null when it is not one (for imports). */
+export function normalizeImageRecord(record) {
+  if (!isValidRecord(record)) return null;
+  return {
+    dataUrl: record.dataUrl,
+    name: String(record.name ?? "image").slice(0, 120),
+    width: Number(record.width) || 0,
+    height: Number(record.height) || 0,
+    savedAt: Number(record.savedAt) || Date.now(),
+  };
+}
+
 function isValidRecord(record) {
   return Boolean(
     record &&

@@ -14,9 +14,10 @@ export const TOOLTIP_ID = "t3plus-tip";
 const GAP = 6;
 const EDGE = 8;
 
-export function createTooltip(doc) {
+/** `id`: each view gets its own tooltip element, so ids stay unique (the home cards and the details pool can both exist). */
+export function createTooltip(doc, id = TOOLTIP_ID) {
   const h = createBuilder(doc);
-  const el = h("div", { id: TOOLTIP_ID, class: "t3plus-tip", "aria-hidden": "true", "data-t3plus-owned": "" });
+  const el = h("div", { id, class: "t3plus-tip", "aria-hidden": "true", "data-t3plus-owned": "" });
   let open = false;
 
   function place(anchor) {

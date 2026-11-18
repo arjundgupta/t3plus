@@ -13,10 +13,12 @@ import { createBotFeed } from "../botFeed.js";
 import { createHomeFeed } from "../homeData.js";
 import { createBotStore } from "../bots.js";
 import { setBotArtEncoder } from "../botArt.js";
-import { createImageStore } from "../imageStore.js";
+import { createImageStore, normalizeImageRecord } from "../imageStore.js";
 import { createRuntimeFetcher } from "../runtimeFetch.js";
-import { createSettingsStore } from "../settings.js";
-import { createProfiles } from "../profiles.js";
+import { createSettingsStore, normalizeSettings } from "../settings.js";
+import { createProfiles, normalizeProfiles } from "../profiles.js";
+import { normalizeBotPrefsMap, normalizeKnownBots, normalizeManualBots } from "../bots.js";
+import { DESKTOP_IMAGE_LIMITS, STORAGE_KEYS } from "../config.js";
 
 const area = chrome.storage.local;
 const sync = chrome.storage.sync;
@@ -52,9 +54,18 @@ let appRef = null;
 const app = createT3Plus({
   win: window,
   doc: document,
-  profiles: createProfiles({ win: window, doc: document, area, changedEvent: changed, isEnabled: () => appRef?.state.settings.sidebar.profiles ?? true }),
+  profiles: createProfiles({
+    win: window,
+    doc: document,
+    area,
+    changedEvent: changed,
+    isEnabled: () => appRef?.state.settings.sidebar.profiles ?? true,
+    isDemo: () => appRef?.state.settings.demo.enabled ?? false,
+  }),
   settingsStore: createSettingsStore(area, changed),
   imageStore: createImageStore(area, changed),
+  // The desktop build stores into T3's own localStorage (inject/page-stub.js).
+  ...(chrome.runtime?.id === "t3plus-desktop" ? { desktop: true, imageLimits: DESKTOP_IMAGE_LIMITS } : {}),
   botStore: createBotStore(area, changed),
   botFeed: createBotFeed({ area, fetchRemote }),
   homeFeed: createHomeFeed({ area, fetchRemote }),
@@ -63,7 +74,15 @@ const app = createT3Plus({
   isAlive: () => Boolean(chrome.runtime?.id),
   backup: {
     export: () => exportAll(area, chrome.runtime.getManifest().version),
-    import: (data) => importAll(area, data),
+    import: (data) =>
+      importAll(area, data, {
+        [STORAGE_KEYS.settings]: normalizeSettings,
+        [STORAGE_KEYS.bots]: normalizeBotPrefsMap,
+        [STORAGE_KEYS.profiles]: normalizeProfiles,
+        [STORAGE_KEYS.knownBots]: normalizeKnownBots,
+        [STORAGE_KEYS.manualBots]: normalizeManualBots,
+        [STORAGE_KEYS.image]: normalizeImageRecord,
+      }),
   },
 });
 

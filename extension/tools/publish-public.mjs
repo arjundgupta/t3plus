@@ -7,7 +7,8 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { isPublicPath, needsVisualReview, parseDenyPatterns, privateDetailLocations } from "./publish-policy.mjs";
 
-const root = dirname(dirname(fileURLToPath(import.meta.url)));
+// The repository root (the desktop layout keeps the extension in extension/).
+const root = dirname(dirname(dirname(fileURLToPath(import.meta.url))));
 
 function git(cwd, args, { input, env, raw = false } = {}) {
   const result = spawnSync("git", args, { cwd, input, env: { ...process.env, ...env }, encoding: raw ? "buffer" : "utf8", maxBuffer: 64 << 20 });
@@ -46,10 +47,12 @@ export async function publishPublic({ cwd = root, ref, push = false, imagesCheck
   if (!ref) git(cwd, ["fetch", "-q", "origin"]);
   const src = git(cwd, ["rev-parse", "--verify", `${ref ?? "origin/main"}^{commit}`]);
   const { tree, entries } = await publicSnapshot(cwd, src);
-  const version = JSON.parse(git(cwd, ["show", `${src}:package.json`])).version;
+  const version = JSON.parse(git(cwd, ["show", `${src}:extension/package.json`])).version;
   const commitMessage = message ?? `t3+ ${version}`;
   const deny = parseDenyPatterns(denyText ?? process.env.PUBLISH_DENY ?? await readFile(join(cwd, ".publish-deny"), "utf8"));
   const problems = privateDetailLocations("(commit message)", commitMessage, deny);
+  // The mirror commit carries this machine's git identity: it must pass the same check.
+  for (const ident of ["GIT_AUTHOR_IDENT", "GIT_COMMITTER_IDENT"]) problems.push(...privateDetailLocations(`(${ident.toLowerCase()})`, git(cwd, ["var", ident]).replace(/\s+\d+\s+[+-]\d{4}$/, ""), deny));
   const blobs = new Map();
   for (const entry of entries) {
     const pathProblems = privateDetailLocations("(path)", entry.path, deny);

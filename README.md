@@ -17,28 +17,31 @@ Copy this to your coding agent (Claude Code, Codex, T3 Code itself):
 ```text
 Install t3+ for T3 Code on this Mac:
 1. git clone https://github.com/arjundgupta/t3plus ~/.t3plus
-2. sh ~/.t3plus/build.sh   (needs Node 22 or newer)
+2. sh ~/.t3plus/build.sh   (needs Node 22.2 or newer)
 3. With T3 Code open: node ~/.t3plus/t3plus.mjs on
 4. Load it every time T3 Code starts:
-   sed "s#__HOME__#$HOME#g" ~/.t3plus/launchd/com.t3plus.autostart.plist > ~/Library/LaunchAgents/com.t3plus.autostart.plist && launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.t3plus.autostart.plist
+   mkdir -p ~/Library/LaunchAgents && sed "s#__HOME__#$HOME#g" ~/.t3plus/launchd/com.t3plus.autostart.plist > ~/Library/LaunchAgents/com.t3plus.autostart.plist && (launchctl bootout gui/$(id -u)/com.t3plus.autostart 2>/dev/null; launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.t3plus.autostart.plist)
 ```
 
-That's it. Settings live in T3 Code under **Settings → t3+**. To turn it off: `node ~/.t3plus/t3plus.mjs off`.
+That's it. Settings live in T3 Code under **Settings → t3+**.
 
-You need macOS, the T3 Code desktop app and Node 22+.
+- **Update:** `git -C ~/.t3plus pull && sh ~/.t3plus/build.sh && node ~/.t3plus/t3plus.mjs on`
+- **Turn it off for now:** `node ~/.t3plus/t3plus.mjs off` (it loads again the next time T3 Code starts)
+- **Uninstall:** `launchctl bootout gui/$(id -u)/com.t3plus.autostart; rm ~/Library/LaunchAgents/com.t3plus.autostart.plist; node ~/.t3plus/t3plus.mjs off; rm -rf ~/.t3plus`
+
+You need macOS, the T3 Code desktop app and Node 22.2+.
 
 ## Bots
 
 <table>
 <tr>
-<td width="300"><img src="media/bots.gif" alt="Option-click turns a thread's bot off and on" width="300"></td>
+<td width="300"><img src="media/bots.gif" alt="Bots in the sidebar: faces, latest messages and a subagent strip" width="300"></td>
 <td>
 
 Every thread becomes a little pixel-art bot with a face, its name and its latest message.
 
 - **Moods**: eyes closed when idle, animated while the thread works, with a status badge on the corner.
 - **Subagents**: mini robots line up under a bot while it runs subagents, and finished ones go dark.
-- **Option-click** a thread to turn its bot off or on.
 - Pick a shape and color per bot in Settings, or let each one take its project's color.
 
 </td>
@@ -105,7 +108,7 @@ Dots at the bottom of the sidebar, like Dia's profiles. Each profile shows its o
 
 ## Screenshot mode
 
-Press **Alt+Shift+D** to swap thread titles, projects, branches and messages for believable stand-ins, so you can share your screen without personal details. Every image on this page was taken with it on, and the usage numbers are sample data.
+Turn it on in Settings → t3+ to swap thread titles, projects, branches and messages for believable stand-ins, so you can share your screen without personal details. It's off by default. Every image on this page was taken with it on, and the usage numbers are sample data.
 
 ## Settings
 

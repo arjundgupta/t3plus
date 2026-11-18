@@ -1,4 +1,4 @@
-import { T3PLUS } from "./config.js";
+import { T3PLUS, T3_SELECTORS } from "./config.js";
 
 // t3+ gets its own entry in T3's Settings sidebar, right after Appearance.
 // T3's settings router knows nothing about it, so "opening" t3+ is a view mode:
@@ -9,11 +9,20 @@ import { T3PLUS } from "./config.js";
 /** Any T3 settings page. */
 export const SETTINGS_ROUTE = /\/settings(\/|$)/;
 
-const NAV_ANCHOR = '[data-settings-section="/settings/appearance"]';
-const PAGE = "[data-settings-page-scroll] > div";
+const NAV_ANCHOR = T3_SELECTORS.settingsAppearanceLink;
+const PAGE = T3_SELECTORS.settingsPage;
 
 // lucide "square-plus", in T3's icon style.
 const ICON = '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect width="18" height="18" x="3" y="3" rx="4"/><path d="M8 12h8"/><path d="M12 8v8"/></svg>';
+
+/** Copies `names` from `source` to `target`, removing those `source` does not have. */
+function mirror(target, source, names) {
+  for (const name of names) {
+    const value = source.getAttribute(name);
+    if (value === null) target.removeAttribute(name);
+    else if (target.getAttribute(name) !== value) target.setAttribute(name, value);
+  }
+}
 
 /** T3's Appearance nav button, the anchor for the t3+ entry. */
 export function findSettingsNavAnchor(doc) {
@@ -33,25 +42,26 @@ export function findSettingsPage(doc) {
 export function createSettingsNavItem(doc, onOpen) {
   const li = doc.createElement("li");
   li.setAttribute(T3PLUS.ownedAttr, "");
-  li.setAttribute("role", "presentation");
   li.setAttribute("data-slot", "sidebar-menu-item");
   li.setAttribute("data-sidebar", "menu-item");
   li.className = "group/menu-item relative";
   const button = doc.createElement("button");
   button.type = "button";
   button.setAttribute(T3PLUS.ownedAttr, "");
-  button.setAttribute("role", "treeitem");
   button.setAttribute("data-sidebar", "menu-button");
   button.setAttribute("data-slot", "sidebar-menu-button");
   button.setAttribute("data-size", "default");
   button.setAttribute("data-t3plus-settings-nav", "");
-  button.setAttribute("tabindex", "-1");
+  // T3's arrow keys move focus between [data-settings-section] entries (focus only:
+  // its clicks route by handler, not by this value), so t3+'s entry is one of them.
+  button.setAttribute("data-settings-section", "t3plus");
   button.innerHTML = `${ICON}<span class="truncate max-md:sr-only">t3+</span>`;
   button.addEventListener("click", (event) => {
     event.preventDefault();
     onOpen();
   });
   li.appendChild(button);
+  let anchorButton = null;
 
   return {
     element: li,
@@ -60,7 +70,12 @@ export function createSettingsNavItem(doc, onOpen) {
     mount(anchor) {
       const anchorItem = anchor.closest("li");
       if (!anchorItem?.parentElement) return false;
+      anchorButton = anchor;
       if (button.className !== anchor.className) button.className = anchor.className;
+      // Reachable and announced like T3's own entries: the same role and tab stop
+      // as the Appearance button (and its <li>), whatever this T3 version uses.
+      mirror(button, anchor, ["role", "tabindex"]);
+      mirror(li, anchorItem, ["role"]);
       if (anchorItem.nextElementSibling === li) return false;
       anchorItem.after(li);
       return true;
@@ -69,9 +84,22 @@ export function createSettingsNavItem(doc, onOpen) {
       const value = on ? "true" : "false";
       if (button.getAttribute("data-active") !== value) {
         button.setAttribute("data-active", value);
-        button.setAttribute("aria-selected", value);
+        // aria-selected only means something on a tab/treeitem/option role.
+        if (button.hasAttribute("role")) button.setAttribute("aria-selected", value);
+        else button.removeAttribute("aria-selected");
         if (on) button.setAttribute("aria-current", "page");
         else button.removeAttribute("aria-current");
+      }
+      // One current page: Appearance (the route t3+ shows over) is not it while t3+ is
+      // open, and is again after, if T3 still has it active.
+      const appearance = anchorButton?.isConnected ? anchorButton : null;
+      if (!appearance) return;
+      if (on && appearance.getAttribute("aria-current") === "page") {
+        appearance.removeAttribute("aria-current");
+        appearance.setAttribute("data-t3plus-current-moved", "");
+      } else if (!on && appearance.hasAttribute("data-t3plus-current-moved")) {
+        appearance.removeAttribute("data-t3plus-current-moved");
+        if (appearance.getAttribute("data-active") === "true") appearance.setAttribute("aria-current", "page");
       }
     },
   };

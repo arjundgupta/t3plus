@@ -1,7 +1,16 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { T3PLUS } from "../src/config.js";
-import { providerKind } from "../src/homeData.js";
+import { parseHomeFeedText, providerKind } from "../src/homeData.js";
+
+// A feed with a weekly pool for both providers (resets in the future, so the pools are live).
+const soon = new Date(Date.now() + 2 * 86400000).toISOString();
+const week = (usedPercent) => ({ label: "Weekly", kind: "weekly", durationMins: 10080, usedPercent, resetsAt: soon });
+const FEED = parseHomeFeedText(JSON.stringify({
+  version: 1,
+  generatedAt: new Date().toISOString(),
+  limits: { claude: [{ id: "c1", label: "Claude", plan: "Claude Pro", windows: [week(40)] }], codex: { accounts: [{ label: "A", plan: "ChatGPT Plus", windows: [week(20)] }] } },
+}));
 import { createApp, createDom } from "./helpers.js";
 
 test("providerKind reads the composer's model picker label", () => {
@@ -22,13 +31,17 @@ const detailsHtml = (model) => `
   </div></aside>
   <div data-chat-composer-footer="true"><button data-chat-provider-model-picker="true" aria-label="${model}">${model}</button></div>`;
 
-test("thread details: the current provider's pool replaces T3's usage rows; other providers keep T3's", async () => {
+test("thread details: the current provider's pool replaces T3's usage rows; other providers, or no feed, keep T3's", async () => {
   const dom = createDom("/env1/a1", detailsHtml("Claude Opus 5.5, High"));
   const doc = dom.window.document;
   const { app } = createApp(dom);
   await app.start();
   app.watcher.flush();
   const section = doc.querySelector('section[aria-label="Usage limits"]');
+  assert.ok(!section.hasAttribute(T3PLUS.detailsPoolAttr), "no feed yet: T3's own rows stay");
+  assert.equal(section.querySelector(".t3plus-details-pool"), null);
+  app.state.homeFeed = FEED;
+  app.watcher.flush();
   assert.equal(section.getAttribute(T3PLUS.detailsPoolAttr), "claude");
   const pool = section.querySelector(".t3plus-details-pool");
   assert.ok(pool, "pool inserted into T3's section");
@@ -55,6 +68,7 @@ test("thread details pool follows the Home widgets setting and is cleaned up on 
   const doc = dom.window.document;
   const { app } = createApp(dom);
   await app.start();
+  app.state.homeFeed = FEED;
   app.watcher.flush();
   assert.ok(doc.querySelector(".t3plus-details-pool"));
   app.actions.setHomeWidgets(false);

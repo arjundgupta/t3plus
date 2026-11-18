@@ -65,6 +65,27 @@ test("export and import round-trip every preference, and reject other files", as
   assert.ok(EXPORTED_KEYS.includes(STORAGE_KEYS.knownBots));
 });
 
+test("profiles are part of every backup, and imports store normalised values", async () => {
+  assert.ok(EXPORTED_KEYS.includes(STORAGE_KEYS.profiles), "Export keeps your profiles");
+  assert.ok(SYNCED_KEYS.includes(STORAGE_KEYS.profiles), "and so do Sync and the page copy");
+  const a = createFakeChromeStorage();
+  const profiles = { active: "p1", list: [{ id: "main", name: "Main", color: "default" }, { id: "p1", name: "Work", color: "blue" }], projects: { "env:/code/app": "p1" } };
+  a.area.data.set(STORAGE_KEYS.profiles, profiles);
+  const file = JSON.parse(JSON.stringify(await exportAll(a.area, "0.18.2")));
+  assert.deepEqual(file.data[STORAGE_KEYS.profiles], profiles);
+  const b = createFakeChromeStorage();
+  const seen = [];
+  const keys = await importAll(
+    b.area,
+    { app: "t3plus", data: { ...file.data, [STORAGE_KEYS.settings]: { composerGradient: { intensity: "lots" } }, [STORAGE_KEYS.bots]: [1, 2] } },
+    { [STORAGE_KEYS.settings]: (v) => (seen.push(v), { normalised: true }) },
+  );
+  assert.deepEqual(b.area.data.get(STORAGE_KEYS.profiles), profiles);
+  assert.deepEqual(b.area.data.get(STORAGE_KEYS.settings), { normalised: true }, "settings went through the normaliser");
+  assert.equal(seen.length, 1);
+  assert.ok(!keys.includes(STORAGE_KEYS.bots), "a value of the wrong type is skipped, not stored");
+});
+
 const fakePage = () => {
   const items = new Map();
   return { items, getItem: (k) => (items.has(k) ? items.get(k) : null), setItem: (k, v) => items.set(k, String(v)) };

@@ -246,11 +246,12 @@ test("bot feed: parses t3plus-bots.json by thread id and builds the preview line
     },
   });
   const feed = parseBotFeedText(text);
-  assert.deepEqual([...feed.entries.keys()], ["thread:mcp:abc:1", "bot1"]);
+  assert.deepEqual([...feed.entries.keys()], ["thread:mcp:abc:1", "bot1", "empty"]);
   assert.equal(threadIdFromKey("env-9:thread:mcp:abc:1"), "thread:mcp:abc:1", "thread ids may contain colons");
   assert.equal(botPreviewText(feed, "env-9:thread:mcp:abc:1"), "Ran the nightly sync. All green.");
   assert.equal(botPreviewText(feed, "env1:bot1"), "You: check the deploy");
-  assert.equal(botPreviewText(feed, "env1:other"), "No messages yet");
+  assert.equal(botPreviewText(feed, "env1:empty"), "No messages yet", "in the feed, without a message");
+  assert.equal(botPreviewText(feed, "env1:other"), "", "not in the feed at all: no claim about its messages");
   assert.equal(botPreviewText(null, "env1:bot1"), "", "no feed yet: no text rather than a wrong claim");
   for (const bad of ["", "nope", "{}", JSON.stringify({ version: 2, bots: {} })]) assert.equal(parseBotFeedText(bad), null);
 
@@ -258,10 +259,10 @@ test("bot feed: parses t3plus-bots.json by thread id and builds the preview line
   const storage = createFakeChromeStorage();
   const remote = createFakeRemote({ ok: true, status: 200, text });
   const loader = createBotFeed({ area: storage.area, fetchRemote: remote });
-  assert.equal((await loader.load()).entries.size, 2);
+  assert.equal((await loader.load()).entries.size, 3);
   assert.deepEqual(remote.calls, [BOT_FEED_ENDPOINT]);
   remote.response = { ok: false, status: 0, error: "offline" };
-  assert.equal((await loader.load()).entries.size, 2, "cached copy");
+  assert.equal((await loader.load()).entries.size, 3, "cached copy");
 });
 
 test("decorateBotRows lays out name, preview and avatar on T3's row in place; idempotent and reversible", () => {
@@ -669,4 +670,81 @@ test("bot styles: every style's shapes exist and draw, and unpicked bots take th
     if (style.shapes) assert.ok(style.shapes.includes(picked), `${name} picks from its set (${picked})`);
   }
   setBotStyle("classic");
+});
+
+test("project color: T3's monogram badge (an svg colored by a class, no filled rect) gives its computed color", async () => {
+  const { threadProjectColor, cssColorToHex } = await import("../src/projectColor.js");
+  const { JSDOM } = await import("jsdom");
+  const dom = new JSDOM(`<div id="row"><span data-slot="project-monogram"><svg style="color: rgb(101, 163, 13)" viewBox="0 0 16 16"><text>AP</text></svg></span></div>`);
+  const doc = dom.window.document;
+  const scan = { folders: new Map([["k", { row: doc.getElementById("row") }]]) };
+  assert.equal(threadProjectColor(scan, { folderKey: "k" }), "#65a30d");
+  assert.equal(cssColorToHex(doc, "#ABC"), "#aabbcc");
+  assert.equal(cssColorToHex(doc, "rgba(1, 2, 3, 0.5)"), "#010203");
+});
+
+test("remembered bots from another window or an import are normalized: a null entry cannot break Settings", async () => {
+  const { createBotStore, normalizeKnownBots } = await import("../src/bots.js");
+  const { STORAGE_KEYS } = await import("../src/config.js");
+  const { createFakeChromeStorage } = await import("./helpers.js");
+  assert.deepEqual(normalizeKnownBots({ "env:a": null, "env:b": { title: "B", seenAt: "5", projectColor: "red" }, "env:c": 3 }), { "env:b": { title: "B", seenAt: 5 } });
+  assert.deepEqual(normalizeKnownBots([1, 2]), {});
+  const storage = createFakeChromeStorage();
+  const store = createBotStore(storage.area, storage.onChanged);
+  const seen = [];
+  store.subscribeKnown((v) => seen.push(v));
+  await storage.area.set({ [STORAGE_KEYS.knownBots]: { "env:a": null, "env:b": { title: "B", seenAt: 1 } } });
+  assert.deepEqual(seen.at(-1), { "env:b": { title: "B", seenAt: 1 } });
+});
+
+test("project color: a transparent computed color is no color (not black)", async () => {
+  const { cssColorToHex } = await import("../src/projectColor.js");
+  const { JSDOM } = await import("jsdom");
+  const doc = new JSDOM("").window.document;
+  assert.equal(cssColorToHex(doc, "rgba(0, 0, 0, 0)"), null);
+  assert.equal(cssColorToHex(doc, "rgb(0 0 0 / 0%)"), null);
+  assert.equal(cssColorToHex(doc, "rgb(10 20 30 / 50%)"), "#0a141e");
+});
+
+test("a title with no letters (T3 leaves dir off it) is still read, so such a thread can be a bot", () => {
+  const row = (key, title, dir) => `<li data-thread-item="${key}"><div role="button" data-sidebar-row="${key}" aria-label="${title}, Done">
+    <div class="contents"><span class="min-w-0 flex-1 truncate"${dir ? ` dir="${dir}"` : ""}>${title}</span><span class="relative ml-auto flex h-6">1h</span></div></div></li>`;
+  const dom = createDom("/", `<div data-slot="sidebar-inner"><ul>${row("e:a", "Fix login", "ltr")}${row("e:b", "2025", null)}${row("e:c", "🚀🚀", null)}</ul></div>`);
+  const scan = scanSidebar(findSidebarInner(dom.window.document));
+  assert.deepEqual(scan.threads.map((t) => t.title), ["Fix login", "2025", "🚀🚀"]);
+  assert.ok(scan.threads.every((t) => t.titleEl?.classList.contains("truncate")));
+  assert.deepEqual(classifyBots(scan, DEFAULT_BOT_MARKER, { "e:b": true }, false).map((b) => b.key), ["e:b"]);
+});
+
+test("breadcrumb: T3's actions button and tooltip read the bot's name instead of its marked title, and get T3's text back after", async () => {
+  const { decorateBotBreadcrumb, relabelBotTooltips } = await import("../src/bots.js");
+  const { stopSprites } = await import("../src/spriteClock.js");
+  const title = "[[t3plus:bot:v1]] Orchestrator";
+  const dom = createDom("/", `<nav aria-label="Thread breadcrumb"><button type="button" aria-label="Thread actions for ${title}"><h2>${title}</h2></button></nav>
+    <div data-slot="tooltip-popup"><span>${title}</span></div>`);
+  const doc = dom.window.document;
+  const button = doc.querySelector("button");
+  const bot = { key: "env1:bot1", titleLabel: "Orchestrator", status: "idle", thread: { title } };
+  decorateBotBreadcrumb(doc, { ...bot, prefs: {} });
+  assert.equal(button.getAttribute("aria-label"), "Thread actions for Orchestrator");
+  relabelBotTooltips(doc, new Map([[title, bot]]));
+  assert.equal(doc.querySelector('[data-slot="tooltip-popup"] span').textContent, "Orchestrator");
+  decorateBotBreadcrumb(doc, null);
+  assert.equal(button.getAttribute("aria-label"), `Thread actions for ${title}`, "T3's label is back");
+  assert.equal(button.hasAttribute("data-t3plus-raw-label"), false);
+  stopSprites();
+});
+
+test("glow tones: a white, grey or black accent stays grey (not red); a light page runs pale at the edge to the accent at the core", () => {
+  for (const neutral of [[255, 255, 255], [128, 128, 128], [0, 0, 0]]) {
+    for (const style of ["bayer", "grain", "spectrum"]) {
+      for (const [c] of glowTones(neutral, style).slice(1)) assert.ok(Math.max(...c) - Math.min(...c) <= 2, `${neutral} ${style}: ${c}`);
+    }
+  }
+  const lum = ([r, g, b]) => 0.2126 * r + 0.7152 * g + 0.0722 * b;
+  const blue = [59, 130, 246];
+  const dark = glowTones(blue, "bayer").slice(1).map(([c]) => lum(c));
+  const light = glowTones(blue, "bayer", true).slice(1).map(([c]) => lum(c));
+  assert.ok(dark[0] < dark[3], "dark page: deep edge, bright core");
+  assert.ok(light[0] > light[2] && light[0] > 200, "light page: the edge is a pale tint, near the page");
 });

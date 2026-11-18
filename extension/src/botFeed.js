@@ -33,7 +33,8 @@ export function parseBotFeedText(text) {
     const spendUsd = Number(entry.spend?.usd);
     const spendTokens = Number(entry.spend?.tokens);
     const spend = Number.isFinite(spendUsd) && Number.isFinite(spendTokens) && spendTokens > 0 ? { usd: Math.max(0, spendUsd), tokens: Math.max(0, Math.round(spendTokens)) } : null;
-    if (!clean && !model && !computer && !subagents.length && !spend) continue;
+    // Kept even when empty: an entry says the feed covers the thread (it has no
+    // messages yet); a thread with none is one the feed does not cover.
     entries.set(threadId, {
       text: clean,
       role: entry.role === "user" ? "user" : "assistant",
@@ -53,10 +54,15 @@ export const threadIdFromKey = (key) => {
   return i < 0 ? String(key) : String(key).slice(i + 1);
 };
 
-/** Preview line for a bot row: "You: …" for the user's own last message. */
+/**
+ * Preview line for a bot row: "You: …" for the user's own last message. Empty for a
+ * thread the feed does not cover (a publisher that only covers marked threads, a
+ * remote environment, beyond its cap): "No messages yet" only when it says so.
+ */
 export function botPreviewText(feed, key) {
   const entry = feed?.entries.get(threadIdFromKey(key));
-  if (!entry?.text) return feed ? "No messages yet" : "";
+  if (!entry) return "";
+  if (!entry.text) return "No messages yet";
   return entry.role === "user" ? `You: ${entry.text}` : entry.text;
 }
 
@@ -81,6 +87,7 @@ export function botMetaText(feed, key) {
  * copy. load() resolves to the parsed feed or null.
  */
 export function createBotFeed({ area, fetchRemote, endpoint = BOT_FEED_ENDPOINT }) {
+  let cachedText = null; // what this copy last wrote to the cache
   async function readCache() {
     const value = (await area.get(STORAGE_KEYS.botFeedCache))?.[STORAGE_KEYS.botFeedCache];
     return typeof value?.text === "string" ? parseBotFeedText(value.text) : null;
@@ -97,7 +104,14 @@ export function createBotFeed({ area, fetchRemote, endpoint = BOT_FEED_ENDPOINT 
       }
       const parsed = response?.ok ? parseBotFeedText(response.text) : null;
       if (parsed) {
-        await area.set({ [STORAGE_KEYS.botFeedCache]: { text: response.text } });
+        // The cache is a convenience: a failed write (storage full) must not throw
+        // away the fresh feed it was copying. Written only when the text changed: on
+        // the desktop it is T3's own localStorage, read and written on its main thread.
+        if (response.text !== cachedText) {
+          await Promise.resolve(area.set({ [STORAGE_KEYS.botFeedCache]: { text: response.text } }))
+            .then(() => (cachedText = response.text))
+            .catch(() => {});
+        }
         return parsed;
       }
       return readCache();

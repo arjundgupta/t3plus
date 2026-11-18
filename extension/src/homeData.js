@@ -172,13 +172,23 @@ export function heatmap(daily, now, weeks = 26) {
   return { columns, threads, runs, activeDays, start, end };
 }
 
-/** Claude Max ($100 plan) is 5x Claude Pro ($20). */
-export const claudeWeight = (plan) => (/max/i.test(plan) ? 5 : 1);
-
-/** Pro is 10x Plus, the scale T3 and the Limits page use. */
-export const planWeight = (plan) => (/pro/i.test(plan) ? 10 : 1);
-const isWeekly = (w) => (w.durationMins ?? 0) >= 1440 || w.kind === "weekly";
-const isFiveHour = (w) => !isWeekly(w) && ((w.durationMins ?? 0) > 0 || w.kind === "session");
+// T3's pool rules (its usage limits view): one provider's accounts are pooled with a
+// weight per plan, every plan known or all of them equal. Codex: Plus 1x, Pro 100 5x,
+// Pro 200 20x, for its five-hour and weekly windows. Claude: Pro 1x, Max 5x, Ultra
+// 20x for the five-hour window only; its week is unweighted. (inject/feeds-worker.js
+// records the pool line by the same rules.)
+export const CODEX_PLAN_WEIGHTS = Object.freeze({ "ChatGPT Plus Subscription": 1, "ChatGPT Pro 100 Subscription": 5, "ChatGPT Pro 200 Subscription": 20 });
+export const CLAUDE_SESSION_WEIGHTS = Object.freeze({ Pro: 1, Max: 5, Ultra: 20 });
+/** "Claude Max 20x" / "max" / "Claude Pro" -> T3's tier name, or the plan as it is. */
+export const claudeTier = (plan) => (/ultra|max\s*20/i.test(plan ?? "") ? "Ultra" : /max/i.test(plan ?? "") ? "Max" : /pro/i.test(plan ?? "") ? "Pro" : (plan ?? ""));
+/** Weights for `accounts`, T3's way: from `table` by plan when every plan is in it, else all equal. */
+export function poolWeights(plans, table) {
+  const weights = plans.map((plan) => table[plan]);
+  return weights.every((w) => typeof w === "number") ? weights : plans.map(() => 1);
+}
+/** What a window is, as T3 says (kind); a feed without kinds tells by its length. Monthly windows are no week. */
+export const isWeekly = (w) => (w.kind ? w.kind === "weekly" : (w.durationMins ?? 0) >= 6 * 1440 && (w.durationMins ?? 0) <= 8 * 1440);
+export const isFiveHour = (w) => (w.kind ? w.kind === "session" : (w.durationMins ?? 0) > 0 && (w.durationMins ?? 0) < 1440);
 
 // ---------- Pools (weekly pool charts, compact) ----------
 
@@ -214,32 +224,37 @@ export function projectPool({ recorded, left, cap, refills, now, until }) {
 const weeklyRefills = (accounts, weightOf) =>
   accounts.flatMap((a) => {
     const weekly = a.windows.find(isWeekly);
-    if (!weekly?.resetsAt || !weekly.usedPercent) return [];
-    return [{ at: Date.parse(weekly.resetsAt), amount: Math.round(weightOf(a) * (weekly.usedPercent / 100)) }];
+    // At 0% used the reset still marks the week (the chart and "Reset - …" say when it ends).
+    if (!weekly?.resetsAt || !Number.isFinite(Date.parse(weekly.resetsAt))) return [];
+    return [{ at: Date.parse(weekly.resetsAt), amount: Math.round(weightOf(a) * ((weekly.usedPercent ?? 0) / 100)) }];
   });
 
 /**
  * One pool for the chart: current left/cap, recorded line, projection, refills.
- * Codex: every Codex Gateway account's week in Plus weeks (Pro = 10x).
+ * Codex: every Codex account's week, weighted by plan (T3's weights; in Plus weeks).
  * Claude: every Claude account's weekly window, 100% each.
  */
 export function poolModel(feed, kind, now = Date.now(), { back = 3, ahead = 3 } = {}) {
   if (!feed) return null;
   let accounts;
   let weightOf;
+  let fiveWeightOf;
   let recorded;
+  // Only accounts that report a week: one whose limits failed to load counted as 100% left.
   if (kind === "codex") {
-    if (!feed.codex?.accounts.length) return null;
-    accounts = feed.codex.accounts;
-    // One account is simply 100%; several are summed in Plus weeks (Pro = 10x).
-    weightOf = (a) => (accounts.length === 1 ? 100 : planWeight(a.plan) * 100);
+    accounts = (feed.codex?.accounts ?? []).filter((a) => a.windows.some(isWeekly));
+    if (!accounts.length) return null;
+    // One account is simply 100%; several are summed in Plus weeks.
+    const weights = accounts.length === 1 ? [1] : poolWeights(accounts.map((a) => a.plan), CODEX_PLAN_WEIGHTS);
+    weightOf = (a) => weights[accounts.indexOf(a)] * 100;
+    fiveWeightOf = weightOf;
     recorded = feed.codexSeries;
   } else {
-    accounts = feed.claude.map((c) => ({ label: c.label, plan: c.plan, windows: c.windows }));
-    if (!accounts.some((a) => a.windows.some(isWeekly))) return null;
-    accounts = accounts.filter((a) => a.windows.some(isWeekly));
-    // Claude Max ($100) is 5x Claude Pro ($20). T3 reports both Max tiers as "Claude Max".
-    weightOf = (a) => (accounts.length === 1 ? 100 : claudeWeight(a.plan) * 100);
+    accounts = feed.claude.map((c) => ({ label: c.label, plan: c.plan, windows: c.windows })).filter((a) => a.windows.some(isWeekly));
+    if (!accounts.length) return null;
+    weightOf = () => 100;
+    const five = accounts.length === 1 ? [1] : poolWeights(accounts.map((a) => claudeTier(a.plan)), CLAUDE_SESSION_WEIGHTS);
+    fiveWeightOf = (a) => five[accounts.indexOf(a)] * 100;
     recorded = feed.claudeSeries;
   }
   let cap = 0;
@@ -253,10 +268,14 @@ export function poolModel(feed, kind, now = Date.now(), { back = 3, ahead = 3 } 
     cap += w;
     left += w * (1 - (weekly?.usedPercent ?? 0) / 100);
     if (five) {
-      fiveCap += w;
-      fiveLeft += w * (1 - five.usedPercent / 100);
+      const fw = fiveWeightOf(a);
+      fiveCap += fw;
+      fiveLeft += fw * (1 - five.usedPercent / 100);
     }
   }
+  // Each recorded point in today's pool size: one taken while an account was missing
+  // (its limits failed to load) had a smaller cap, and plotted as a sudden dip.
+  recorded = recorded.map((p) => (p.cap > 0 && p.cap !== cap ? { ...p, left: (p.left * cap) / p.cap, cap } : p));
   const from = now - back * 24 * HOUR;
   const until = now + ahead * 24 * HOUR;
   const refills = weeklyRefills(accounts, weightOf).filter((r) => r.at > now);
@@ -331,13 +350,31 @@ export function tokenSeries(feed, now, days = 14) {
 }
 
 export const formatPercent = (v) => `${Math.round(v).toLocaleString("en-US")}%`;
-export const formatUsd = (v) => (v >= 1000 ? `$${(v / 1000).toFixed(1)}k` : `$${v.toFixed(v >= 100 ? 0 : 2)}`);
+/**
+ * "$12.34", "$123", "$1.2k", "$12k". Like formatTokens, each form starts where the
+ * one below would round up into it: no "$1000", "$100.00" or "$10.0k".
+ */
+export function formatUsd(value) {
+  const v = Number(value) || 0;
+  if (v >= 9950) return `$${Math.round(v / 1000)}k`;
+  if (v >= 999.5) return `$${(v / 1000).toFixed(1)}k`;
+  if (v >= 99.995) return `$${Math.round(v)}`;
+  return `$${v.toFixed(2)}`;
+}
+/** Cents always ("$12.34", "$1.23k"), for one thread's spend; never "$1000.00". */
+export const formatUsdExact = (value) => {
+  const v = Number(value) || 0;
+  return v >= 999.995 ? `$${(v / 1000).toFixed(2)}k` : `$${v.toFixed(2)}`;
+};
 
 export function formatTokens(v) {
-  if (v >= 1e9) return `${(v / 1e9).toFixed(v >= 1e10 ? 0 : 1)}B`;
-  if (v >= 1e6) return `${(v / 1e6).toFixed(v >= 1e7 ? 0 : 1)}M`;
-  if (v >= 1e3) return `${Math.round(v / 1e3)}K`;
-  return String(Math.round(v));
+  const n = Number(v) || 0;
+  // Each unit starts where the one below would round up to 1000 of itself, and the
+  // decimal goes where it would round to 10: no "1000K", "10.0M" or "1000M".
+  if (n >= 999.5e6) return `${(n / 1e9).toFixed(n >= 9.95e9 ? 0 : 1)}B`;
+  if (n >= 999.5e3) return `${(n / 1e6).toFixed(n >= 9.95e6 ? 0 : 1)}M`;
+  if (n >= 1e3) return `${Math.round(n / 1e3)}K`;
+  return String(Math.round(n));
 }
 
 /** Loads the feed through the background worker; falls back to the cached copy. */
@@ -354,6 +391,7 @@ export function providerKind(label) {
 
 export function createHomeFeed({ area, fetchRemote, endpoint = HOME_FEED_ENDPOINT }) {
   const key = STORAGE_KEYS.homeFeedCache;
+  let cachedText = null; // what this copy last wrote to the cache
   async function readCache() {
     const value = (await area.get(key))?.[key];
     return typeof value?.text === "string" ? parseHomeFeedText(value.text) : null;
@@ -370,7 +408,13 @@ export function createHomeFeed({ area, fetchRemote, endpoint = HOME_FEED_ENDPOIN
       }
       const parsed = response?.ok ? parseHomeFeedText(response.text) : null;
       if (parsed) {
-        await area.set({ [key]: { text: response.text } });
+        // The cache is a convenience: a failed write (storage full) must not throw
+        // away the fresh feed it was copying. Written only when the text changed.
+        if (response.text !== cachedText) {
+          await Promise.resolve(area.set({ [key]: { text: response.text } }))
+            .then(() => (cachedText = response.text))
+            .catch(() => {});
+        }
         return parsed;
       }
       return readCache();

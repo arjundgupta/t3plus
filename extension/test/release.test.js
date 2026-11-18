@@ -56,20 +56,22 @@ test("release upload publishes a draft only after the ZIP arrives; a published v
         calls.push({ url, method: options.method ?? "GET", body: options.body });
         if (options.method === "PATCH") published = true;
         const missing = calls.length === 1;
+        // The release list (drafts are only found there): none yet.
+        if (/\/releases\?per_page=/.test(url)) return { status: 200, ok: true, json: async () => [] };
         return { status: missing ? 404 : 200, ok: !missing, json: async () => ({ id: 5, draft: !published, html_url: "https://example.test/release" }) };
       }, publicBuild: true };
     await publishRelease(options);
-    assert.deepEqual(calls.map((call) => call.method), ["GET", "POST", "POST", "PATCH"]);
-    const draft = JSON.parse(calls[1].body);
+    assert.deepEqual(calls.map((call) => call.method), ["GET", "GET", "POST", "POST", "PATCH"]);
+    const draft = JSON.parse(calls[2].body);
     assert.equal(draft.draft, true);
     assert.equal(draft.target_commitish, options.target);
-    assert.match(calls[2].url, /^https:\/\/uploads.github.com\//);
-    assert.equal(calls[2].body.toString(), "zip bytes");
-    assert.equal(JSON.parse(calls[3].body).draft, false);
+    assert.match(calls[3].url, /^https:\/\/uploads.github.com\//);
+    assert.equal(calls[3].body.toString(), "zip bytes");
+    assert.equal(JSON.parse(calls[4].body).draft, false);
     const result = await publishRelease(options);
     assert.equal(result.skipped, true);
     assert.equal(builds, 1);
-    assert.equal(calls.length, 5, "rerun only reads the existing release");
+    assert.equal(calls.length, 6, "rerun only reads the existing release");
   } finally { await f.clean(); }
 });
 
@@ -104,5 +106,25 @@ test("an interrupted draft is resumed, but a failed upload never publishes it", 
       fetchImpl: async () => ({ status: 200, ok: true, json: async () => ({ draft: true, target_commitish: "b".repeat(40) }) }),
       pack: async () => assert.fail("must not overwrite another commit's draft"), log() {},
     }), /another commit/);
+  } finally { await f.clean(); }
+});
+
+test("a draft left by an earlier run is found and finished, not duplicated", async () => {
+  const f = await fixture();
+  try {
+    const path = join(f.cwd, "fixture.zip");
+    await writeFile(path, "zip bytes");
+    const calls = [];
+    const target = "a".repeat(40);
+    await publishRelease({ cwd: f.cwd, repository: "example/extension", token: "fixture-token", target, log() {}, publicBuild: true,
+      pack: async () => ({ name: "extension.zip", path, notes: "Release notes" }),
+      fetchImpl: async (url, options) => {
+        calls.push({ url, method: options.method ?? "GET" });
+        if (/\/releases\/tags\//.test(url)) return { status: 404, ok: false };
+        if (/\/releases\?per_page=/.test(url)) return { status: 200, ok: true, json: async () => [{ id: 9, draft: true, tag_name: "v1.2.3", target_commitish: target, assets: [] }] };
+        return { status: 200, ok: true, json: async () => ({ id: 9, draft: false, html_url: "https://example.test/release" }) };
+      } });
+    assert.ok(!calls.some((c) => c.method === "POST" && /\/releases$/.test(c.url)), "no second draft is created");
+    assert.ok(calls.some((c) => c.method === "PATCH" && /\/releases\/9$/.test(c.url)), "the earlier draft is published");
   } finally { await f.clean(); }
 });
