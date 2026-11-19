@@ -492,8 +492,19 @@ export function botClipPath(shape) {
   return BOT_SHAPES[shape] ?? BOT_SHAPES.circle;
 }
 
-/** Ring/edge color for an avatar: the color's mid stop (a ball shape's own mid stop). */
+const skyCache = new Map();
+/** True for a shape with see-through pixels around it (Saturn's sky around its ring). */
+export function botShapeHasSky(shape) {
+  if (!skyCache.has(shape)) skyCache.set(shape, [...skinMarks(shape).values()].includes("t"));
+  return skyCache.get(shape);
+}
+
+/**
+ * The color painted behind an avatar's sprite: the color's mid stop (a ball shape's
+ * own mid stop). Transparent behind a shape with sky, or its sky would be a square.
+ */
 export function botEdgeColor(color, shape) {
+  if (botShapeHasSky(shape)) return "transparent";
   if (botShapeHasOwnColors(shape)) return BOT_SKINS[shape].stops[1];
   return botStops(color)[1];
 }

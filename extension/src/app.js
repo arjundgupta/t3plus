@@ -120,11 +120,13 @@ export function createT3Plus(deps) {
       .map(([key]) => key);
     const prefsKeys = Object.keys(state.botPrefs).filter((k) => state.manualBots[k] !== false);
     const keys = new Set([...state.bots.map((b) => b.key), ...recent, ...prefsKeys, ...Object.keys(state.manualBots).filter((k) => state.manualBots[k] === true)]);
+    const live = new Map(state.bots.map((b) => [b.key, b]));
     return [...keys].sort().map((key) => {
-      const title = state.knownBots[key]?.title ?? "";
+      // A bot in the sidebar keeps its name after Forget (which clears what was stored).
+      const title = state.knownBots[key]?.title ?? (live.has(key) ? knownBotTitle(live.get(key).thread.title) : "");
       const titleLabel = parseBotTitle(title, marker)?.label ?? ((state.manualBots[key] ?? state.settings.sidebar.botsDefault) ? title : "");
       const prefs = normalizeBotPrefs(state.botPrefs[key]);
-      const projectColor = state.knownBots[key]?.projectColor ?? null;
+      const projectColor = state.knownBots[key]?.projectColor ?? live.get(key)?.projectColor ?? null;
       if (demoOn()) {
         // Screenshot mode covers Settings too: the bot list and the live preview show stand-ins.
         const label = demo.label("bot", titleLabel || "Bot");
@@ -139,7 +141,7 @@ export function createT3Plus(deps) {
     });
   }
 
-  // The Settings panel (one editor per bot) is brought up to date only while it is
+  // The Settings panel (a chip per bot) is brought up to date only while it is
   // on screen, and once when it is put there: with many bots, every render (a slider
   // step, a feed read, a storage echo) restyled thousands of detached swatches.
   let panelStale = true;
@@ -737,7 +739,11 @@ export function createT3Plus(deps) {
     settingsNav.setActive(open);
     doc.documentElement.toggleAttribute(T3PLUS.settingsAttr, open);
     if (container) ensurePanelMounted(container, panel.element);
-    else if (panel.element.isConnected) panel.element.remove();
+    else {
+      // Leaving Settings (T3 may have taken the page down with the panel in it).
+      if (panel.element.isConnected) panel.element.remove();
+      panel.closeBotEditor();
+    }
     if (panelStale && panel.element.isConnected) updatePanel();
   }
 

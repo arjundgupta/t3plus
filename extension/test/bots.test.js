@@ -118,6 +118,16 @@ test("every color is a fixed three-stop ordered-dither gradient with white pixel
   assert.equal(botFillUrl("nope", "nope"), botFillUrl("blue", "circle"));
 });
 
+test("Saturn's sky stays see-through: nothing is painted behind it, so it is no square", () => {
+  assert.equal(botEdgeColor("blue", "saturn"), "transparent");
+  assert.equal(resolveBotPresentation({ key: "k:1", titleLabel: "Ring" }, { shape: "saturn" }).edge, "transparent");
+  const shapesWithSky = Object.keys(BOT_SHAPES).filter((shape) => [...skinMarks(shape).values()].includes("t"));
+  assert.deepEqual(shapesWithSky, ["saturn"]);
+  for (const shape of Object.keys(BOT_SHAPES).filter((s) => s !== "saturn")) assert.notEqual(botEdgeColor("blue", shape), "transparent", shape);
+  // Its square clip is what lets the ring reach the tile's edges.
+  assert.equal(BOT_SHAPES.saturn, "inset(0)");
+});
+
 test("ball shapes: football and basketball bring their own ramp and markings in every mood", () => {
   const svgOf = (art) => decodeURIComponent(art.url.slice('url("data:image/svg+xml,'.length, -2));
   const moods = ["awake", "idle", "waiting", "done", "failed", "working", "attention"];
@@ -335,19 +345,28 @@ test("app: bot rows show the feed preview, and Settings edits shape and color", 
   const settingsApp = createApp(settings, storage, { remote: createFakeRemote({ ok: false, status: 404 }), botFeed }).app;
   await settingsApp.start();
   await settle();
-  const editor = settings.window.document.querySelector('.t3plus-bot-editor[data-bot-key="env1:bot1"]');
+  const sdocSettings = settings.window.document;
+  const chip = sdocSettings.querySelector('.t3plus-bot-pick[data-bot-key="env1:bot1"]');
+  assert.ok(chip, "a chip per bot");
+  assert.equal(sdocSettings.querySelector(".t3plus-bot-editor"), null, "pickers stay closed until a bot is opened");
+  chip.click();
+  assert.equal(chip.getAttribute("aria-expanded"), "true");
+  const editor = sdocSettings.querySelector('.t3plus-bot-editor[data-bot-key="env1:bot1"]');
   assert.ok(editor);
+  assert.equal(chip.textContent, "Orchestrator");
   assert.equal(editor.querySelectorAll("input, select").length, 0, "no free text, color picker or upload");
-  const shapeButtons = editor.querySelectorAll('[aria-label="Shape for env1:bot1"] button');
-  const colorButtons = editor.querySelectorAll('[aria-label="Color for env1:bot1"] button');
+  assert.equal(editor.querySelector('[data-field="shape"]').getAttribute("aria-label"), "Shape for Orchestrator", "named for the bot, not its thread id");
+  assert.equal(editor.querySelector(".t3plus-bot-message").textContent, "Nightly run done.", "its latest message tells same-named bots apart");
+  assert.equal(sdocSettings.activeElement, editor.querySelector('[data-field="shape"] [aria-pressed="true"]'), "opening moves focus to the bot's shape");
+  const shapeButtons = editor.querySelectorAll('[data-field="shape"] button');
+  const colorButtons = editor.querySelectorAll('[data-field="color"] button');
   assert.equal(shapeButtons.length, Object.keys(BOT_SHAPES).length);
   assert.equal(colorButtons.length, Object.keys(BOT_COLORS).length + 1, "the named colors plus Project");
-  assert.equal(editor.querySelector('[aria-label="Color for env1:bot1"] button[data-value="project"]').getAttribute("aria-pressed"), "true", "a new bot follows its project");
-  assert.equal(editor.querySelector(".t3plus-bot-preview").textContent, "Nightly run done.");
+  assert.equal(editor.querySelector('[data-field="color"] button[data-value="project"]').getAttribute("aria-pressed"), "true", "a new bot follows its project");
 
-  editor.querySelector('[aria-label="Shape for env1:bot1"] button[data-value="diamond"]').click();
+  editor.querySelector('[data-field="shape"] button[data-value="diamond"]').click();
   await settle();
-  editor.querySelector('[aria-label="Color for env1:bot1"] button[data-value="purple"]').click();
+  editor.querySelector('[data-field="color"] button[data-value="purple"]').click();
   await settle();
   await settle();
   assert.deepEqual(storage.area.data.get(STORAGE_KEYS.bots)["env1:bot1"], { shape: "diamond", color: "purple" });
@@ -361,9 +380,9 @@ test("app: bot rows show the feed preview, and Settings edits shape and color", 
   assert.equal(avatar.style.getPropertyValue("--t3plus-bot-edge"), BOT_COLORS.purple.stops[1]);
 
   // A ball shape brings its own colors: the Color picker hides, the saved color stays.
-  const colorField = editor.querySelector('[aria-label="Color for env1:bot1"]').parentElement;
+  const colorField = editor.querySelector('[data-field="color"]').parentElement;
   assert.equal(colorField.style.display, "");
-  editor.querySelector('[aria-label="Shape for env1:bot1"] button[data-value="football"]').click();
+  editor.querySelector('[data-field="shape"] button[data-value="football"]').click();
   await settle();
   await settle();
   assert.deepEqual(storage.area.data.get(STORAGE_KEYS.bots)["env1:bot1"], { shape: "football", color: "purple" });
@@ -371,9 +390,49 @@ test("app: bot rows show the feed preview, and Settings edits shape and color", 
   sideApp.watcher.flush();
   assert.equal(avatar.style.getPropertyValue("--t3plus-bot-edge"), BOT_SKINS.football.stops[1]);
 
+  // Escape closes the picker and gives focus back to the chip.
+  editor.querySelector("button").dispatchEvent(new settings.window.KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+  assert.equal(sdocSettings.querySelector(".t3plus-bot-editor"), null);
+  assert.equal(chip.getAttribute("aria-expanded"), "false");
+  assert.equal(sdocSettings.activeElement, chip);
+
+  // Leaving Settings with the picker open: it is closed when Settings is opened again.
+  chip.click();
+  assert.equal(chip.getAttribute("aria-expanded"), "true");
+  const slot = sdocSettings.querySelector(".t3plus-bot-slot");
+  sdocSettings.getElementById(T3PLUS.panelId).parentElement.remove(); // T3 takes the page down
+  settings.window.history.pushState({}, "", "/env1/a1");
+  settingsApp.watcher.flush();
+  assert.equal(slot.children.length, 0);
+  assert.equal(chip.getAttribute("aria-expanded"), "false");
+
   await settingsApp.actions.forgetBot("env1:bot1");
   assert.equal(storage.area.data.get(STORAGE_KEYS.bots)["env1:bot1"], undefined);
   for (const app of [sideApp, settingsApp]) app.stop();
+});
+
+test("Forget on a bot in the sidebar resets its look and keeps its name and place in Settings", async () => {
+  const storage = createFakeChromeStorage();
+  await storage.area.set({ [STORAGE_KEYS.bots]: { "env1:bot1": { shape: "diamond", color: "purple" } } });
+  // Settings opened over a thread page: the sidebar is still there.
+  const dom = createDom("/settings/appearance", sidebarHtml() + T3_APPEARANCE_HTML);
+  const doc = dom.window.document;
+  const { app } = createApp(dom, storage);
+  await app.start();
+  await settle();
+  app.watcher.flush();
+  const chip = () => doc.querySelector('.t3plus-bot-pick[data-bot-key="env1:bot1"]');
+  assert.equal(chip().textContent, "Orchestrator");
+  const before = [...doc.querySelectorAll(".t3plus-bot-pick")].map((c) => c.dataset.botKey);
+  await app.actions.forgetBot("env1:bot1");
+  // At once, not only after the next sidebar scan stores the title again.
+  assert.equal(chip().textContent, "Orchestrator", "not renamed \"Bot\"");
+  assert.deepEqual([...doc.querySelectorAll(".t3plus-bot-pick")].map((c) => c.dataset.botKey), before, "no jump");
+  await settle();
+  app.watcher.flush();
+  assert.equal(chip().textContent, "Orchestrator");
+  assert.equal(storage.area.data.get(STORAGE_KEYS.bots)?.["env1:bot1"], undefined, "its look was reset");
+  app.stop();
 });
 
 test("bots feature off removes every bot decoration", async () => {
@@ -441,7 +500,7 @@ test("decorated bot rows: animated avatar while working, static closed eyes when
   assert.equal(avatar.style.getPropertyValue("--t3plus-bot-frames"), "");
 });
 
-test("bot feed carries model and computer (shown in Settings)", async () => {
+test("bot feed carries model and computer (in the bot's tooltip in Settings)", async () => {
   const { botMetaText } = await import("../src/botFeed.js");
   const feed = parseBotFeedText(JSON.stringify({ version: 1, bots: { b1: { text: "", model: "GPT-6.1 Sol", computer: "Studio" }, b2: { text: "hi" } } }));
   assert.equal(botMetaText(feed, "env:b1"), "GPT-6.1 Sol · Studio");

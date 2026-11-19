@@ -304,25 +304,26 @@ export function createAppearancePanel(doc, actions, { desktop = false } = {}) {
   ]);
 
   // ---------- Bots ----------
+  // A chip per bot (its face and name), A to Z; clicking one opens its shape and
+  // color picker under the chips, one bot at a time.
   const botsList = h("div", { class: "t3plus-bots" });
+  const botSlot = h("div", { class: "t3plus-bot-slot", id: id("bot-editor") });
   const botsEmpty = h("p", { class: "t3plus-row-desc t3plus-bots-empty" });
   const botStatus = h("p", { class: "t3plus-status", role: "status", "aria-live": "polite" });
   const botsCard = h("div", { class: "t3plus-card" }, [
-    row({ title: "Bots", description: "A shape and a color for each bot. Unpicked, each bot gets a shape from the bot style and takes its project's color.", extra: h("div", {}, [botsEmpty, botsList, botStatus]) }),
+    row({ title: "Bots", description: "Click one to change its shape or color.", extra: h("div", { class: "t3plus-bots-body" }, [botsEmpty, botsList, botSlot, botStatus]) }),
   ]);
 
-  const botEditors = new Map();
-  let botSignature = "";
+  const botEntries = new Map(); // key -> { chip, avatar, name, editor, bot }
+  let botOrder = []; // keys, as the chips are laid out
+  let openBot = null;
 
   function createBotEditor(bot) {
-    const avatar = h("span", { class: "t3plus-bot-swatch", "aria-hidden": "true" });
-    const name = h("strong", { class: "t3plus-bot-name" });
-    const subtitle = h("span", { class: "t3plus-bot-key" });
     const forget = button("Forget", () => actions.forgetBot(bot.key), "t3plus-button-ghost");
 
     const swatchGroup = (label, entries, field, paint) => {
       const buttons = new Map();
-      const group = h("div", { class: "t3plus-swatches", role: "group", "aria-label": `${label} for ${bot.key}` },
+      const group = h("div", { class: "t3plus-swatches", role: "group", "aria-label": label, "data-field": field },
         entries.map(([value, text]) => {
           const mark = h("span", { class: "t3plus-swatch-mark", "aria-hidden": "true" });
           paint(mark, value);
@@ -333,6 +334,9 @@ export function createAppearancePanel(doc, actions, { desktop = false } = {}) {
         }));
       return {
         group,
+        name(botName) {
+          group.setAttribute("aria-label", `${label} for ${botName}`);
+        },
         set(value) {
           for (const [v, el] of buttons) el.setAttribute("aria-pressed", String(v === value));
         },
@@ -346,25 +350,28 @@ export function createAppearancePanel(doc, actions, { desktop = false } = {}) {
     const colors = swatchGroup("Color", [[PROJECT_COLOR, "Project color"], ...Object.entries(BOT_COLORS).map(([k, v]) => [k, v.label])], "color", (mark, color) => {
       mark.style.setProperty("--t3plus-bot-edge", botEdgeColor(color));
     });
-    const preview = h("p", { class: "t3plus-bot-preview" });
     const colorField = h("div", { class: "t3plus-field" }, [h("span", { text: "Color" }), colors.group]);
+    // Its latest message: tells two bots with the same name apart.
+    const message = h("p", { class: "t3plus-bot-message" });
 
     const element = h("div", { class: "t3plus-bot-editor", "data-bot-key": bot.key }, [
-      h("div", { class: "t3plus-bot-editor-head" }, [avatar, h("div", { class: "t3plus-bot-editor-names" }, [name, subtitle]), forget]),
-      preview,
-      h("div", { class: "t3plus-bot-editor-grid" }, [
-        h("div", { class: "t3plus-field" }, [h("span", { text: "Shape" }), shapes.group]),
-        colorField,
-      ]),
+      message,
+      h("div", { class: "t3plus-field" }, [h("span", { text: "Shape" }), shapes.group]),
+      h("div", { class: "t3plus-bot-editor-foot" }, [colorField, forget]),
     ]);
+    element.addEventListener("keydown", (event) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      setOpenBot(null, { focus: true });
+    });
     return {
       element,
       update(next) {
         const current = next.prefs;
-        setText(name, next.view.label);
-        setText(subtitle, next.meta ? `${next.meta} · ${next.key}` : next.key);
-        setText(preview, next.preview);
-        preview.hidden = !next.preview;
+        setText(message, next.preview);
+        message.hidden = !next.preview;
+        shapes.name(next.view.label);
+        colors.name(next.view.label);
         const shape = next.view.shape; // the bot's own pick, or the one it was given
         shapes.set(shape);
         colors.set(current.color);
@@ -386,24 +393,73 @@ export function createAppearancePanel(doc, actions, { desktop = false } = {}) {
           mark.style.setProperty("--t3plus-bot-edge", botEdgeColor(shown, shape));
           mark.style.setProperty("--t3plus-bot-clip", next.view.clip);
         }
-        applyAvatarVars(avatar, next.view);
       },
     };
   }
 
-  function updateBots(bots) {
-    const signature = bots.map((b) => b.key).join("|");
-    if (signature !== botSignature) {
-      botSignature = signature;
-      for (const key of [...botEditors.keys()]) if (!bots.some((b) => b.key === key)) botEditors.delete(key);
+  function createBotEntry(bot) {
+    const avatar = h("span", { class: "t3plus-bot-swatch", "aria-hidden": "true" });
+    const name = h("span", { class: "t3plus-bot-name" });
+    const chip = h("button", { type: "button", class: "t3plus-bot-pick", "data-bot-key": bot.key, "aria-expanded": "false", "aria-controls": botSlot.id }, [avatar, name]);
+    const entry = { chip, avatar, name, editor: null, bot };
+    // Opening moves focus into the picker (from the keyboard it would otherwise
+    // be every chip after this one away); Escape brings it back.
+    chip.addEventListener("click", () => setOpenBot(openBot === bot.key ? null : bot.key, { focus: true }));
+    return entry;
+  }
+
+  const focusQuietly = (el) => el?.focus({ preventScroll: true });
+
+  function setOpenBot(key, { focus = false } = {}) {
+    const entry = key ? botEntries.get(key) : null;
+    const closing = openBot ? botEntries.get(openBot) : null;
+    openBot = entry ? key : null;
+    for (const [k, e] of botEntries) e.chip.setAttribute("aria-expanded", String(k === openBot));
+    if (!entry) {
+      botSlot.replaceChildren();
+      if (focus) focusQuietly(closing?.chip);
+      return;
+    }
+    entry.editor ??= createBotEditor(entry.bot);
+    entry.editor.update(entry.bot);
+    botSlot.replaceChildren(entry.editor.element);
+    entry.editor.element.scrollIntoView?.({ block: "nearest" });
+    if (focus) focusQuietly(entry.editor.element.querySelector('.t3plus-swatch[aria-pressed="true"]') ?? entry.editor.element.querySelector(".t3plus-swatch"));
+  }
+
+  function updateBots(list) {
+    const bots = [...list].sort((a, b) => a.view.label.localeCompare(b.view.label, undefined, { sensitivity: "base" }) || a.key.localeCompare(b.key));
+    const order = bots.map((b) => b.key);
+    if (order.join("\n") !== botOrder.join("\n")) {
+      // Moving a chip (a rename re-sorts them) would drop its focus: put it back.
+      const focused = botsList.contains(doc.activeElement) ? doc.activeElement : null;
+      const openIndex = botOrder.indexOf(openBot);
+      botOrder = order;
+      for (const key of [...botEntries.keys()]) if (!order.includes(key)) botEntries.delete(key);
       botsList.replaceChildren(
         ...bots.map((bot) => {
-          if (!botEditors.has(bot.key)) botEditors.set(bot.key, createBotEditor(bot));
-          return botEditors.get(bot.key).element;
+          if (!botEntries.has(bot.key)) botEntries.set(bot.key, createBotEntry(bot));
+          return botEntries.get(bot.key).chip;
         }),
       );
+      if (focused?.isConnected && doc.activeElement !== focused) focusQuietly(focused);
+      if (openBot && !botEntries.has(openBot)) {
+        // Forgotten (or gone) while open: focus goes to the chip now in its place.
+        const hadFocus = botSlot.contains(doc.activeElement);
+        setOpenBot(null);
+        if (hadFocus) focusQuietly(botEntries.get(order[Math.min(openIndex, order.length - 1)])?.chip);
+      }
     }
-    for (const bot of bots) botEditors.get(bot.key).update(bot);
+    for (const bot of bots) {
+      const entry = botEntries.get(bot.key);
+      entry.bot = bot;
+      setText(entry.name, bot.view.label);
+      // Hover: the name in full, its latest message, and its model and computer.
+      const tip = [bot.view.label, bot.preview, bot.meta].filter(Boolean).join("\n");
+      if (entry.chip.title !== tip) entry.chip.title = tip;
+      applyAvatarVars(entry.avatar, bot.view);
+      if (bot.key === openBot) entry.editor?.update(bot);
+    }
   }
 
   const titleId = id("title");
@@ -479,5 +535,10 @@ export function createAppearancePanel(doc, actions, { desktop = false } = {}) {
     setText(botStatus, state.botMessage);
   }
 
-  return { element: section, update };
+  return {
+    element: section,
+    update,
+    /** Closes the open bot's picker (leaving Settings: it opens closed next time). */
+    closeBotEditor: () => openBot !== null && setOpenBot(null),
+  };
 }

@@ -1,5 +1,5 @@
 import { STORAGE_KEYS, T3PLUS, T3_SELECTORS } from "./config.js";
-import { findSidebarInner } from "./sidebar.js";
+import { findSidebarInner, threadKeyFromPath } from "./sidebar.js";
 
 // Profiles, like Dia's (or Arc's spaces): each one shows a set of the sidebar's
 // project folders. A row of small dots at the bottom of the sidebar says which
@@ -11,11 +11,19 @@ import { findSidebarInner } from "./sidebar.js";
 //
 // Ctrl+Shift+1..9 opens profile 1..9. Each profile has a color, shown on its dot only.
 //
-// Stored (STORAGE_KEYS.profiles): { active, list: [{ id, name, color }], projects: { projectKey: profileId }, adopted? }.
+// Each profile keeps its own open thread: switching to a profile opens the thread
+// last open in it (else its most recent one), and opening a thread that belongs to
+// another profile (⌘K, a link, search) switches to that profile.
+//
+// Stored (STORAGE_KEYS.profiles): { active, list: [{ id, name, color }], projects: { projectKey: profileId },
+// last?: { profileId: threadKey }, adopted? }.
 // The projects there when profiles started keeping track belong to the first
 // profile; one added later joins the profile that was open (placeNew).
 
 const FOLDER_PREFIX = "folder:";
+const THREAD_KEY = /^[^:\s]+:\S{1,300}$/;
+// Statuses that mean a thread is active right now: the most recent of a profile's threads.
+const ACTIVE_STATUS = /^(Working|Setting up|Goal|Waiting|Approval|Input|Request|Woke)$/;
 const MAX_PROFILES = 9;
 const MAX_PROJECTS = 1000;
 // When profiles first keep track, the projects T3 shows in this long (it may render
@@ -54,12 +62,29 @@ export function normalizeProfiles(raw) {
   for (const [key, id] of Object.entries(value.projects && typeof value.projects === "object" ? value.projects : {}).slice(0, MAX_PROJECTS)) {
     if (typeof key === "string" && key.length <= 400 && ids.has(id)) projects[key] = id;
   }
-  return { active: ids.has(value.active) ? value.active : list[0].id, list, projects, ...(value.adopted === true ? { adopted: true } : {}) };
+  const last = {};
+  for (const [id, thread] of Object.entries(value.last && typeof value.last === "object" ? value.last : {})) {
+    if (ids.has(id) && typeof thread === "string" && THREAD_KEY.test(thread)) last[id] = thread;
+  }
+  return {
+    active: ids.has(value.active) ? value.active : list[0].id,
+    list,
+    projects,
+    ...(Object.keys(last).length ? { last } : {}),
+    ...(value.adopted === true ? { adopted: true } : {}),
+  };
 }
 
 /** The profile a project folder belongs to. */
 export function profileOf(state, projectKey) {
   return state.projects[projectKey] ?? state.list[0].id;
+}
+
+/** "17h" / "3d" / "2w" -> minutes; null for anything else. */
+function ageMinutes(text) {
+  const m = /^(\d+)\s*(s|m|h|d|w|mo|y)$/.exec(String(text).trim());
+  if (!m) return null;
+  return Number(m[1]) * { s: 1 / 60, m: 1, h: 60, d: 1440, w: 10080, mo: 43200, y: 525600 }[m[2]];
 }
 
 export function createProfiles({ win, doc, area, changedEvent, isEnabled = () => true, isDemo = () => false }) {
@@ -89,7 +114,10 @@ export function createProfiles({ win, doc, area, changedEvent, isEnabled = () =>
   const onChanged = (changes, areaName) => {
     if (!running || (areaName && areaName !== "local")) return;
     if (!changes?.[key]) return;
-    state = normalizeProfiles(changes[key].newValue);
+    const next = normalizeProfiles(changes[key].newValue);
+    // This window's own save coming back: nothing to redo.
+    if (JSON.stringify(next) === JSON.stringify(state)) return;
+    state = next;
     sync();
   };
 
@@ -114,8 +142,16 @@ export function createProfiles({ win, doc, area, changedEvent, isEnabled = () =>
   let dotsSignature = "";
 
   function renderDots() {
-    const signature = JSON.stringify([state.list, state.active, dragging ? 1 : 0, isDemo()]);
-    if (signature === dotsSignature) return;
+    const signature = JSON.stringify([state.list, dragging ? 1 : 0, isDemo()]);
+    if (signature === dotsSignature) {
+      // Only the open profile changed: the dots stay (a rebuild dropped keyboard focus).
+      for (const dot of dots.querySelectorAll(".t3plus-profile-dot:not(.t3plus-profile-add)")) {
+        const on = dot.dataset.profile === state.active;
+        if (dot.getAttribute("aria-pressed") !== String(on)) dot.setAttribute("aria-pressed", String(on));
+        if (dot.tabIndex !== (on ? 0 : -1)) dot.tabIndex = on ? 0 : -1;
+      }
+      return;
+    }
     dotsSignature = signature;
     dots.replaceChildren();
     for (const [i, p] of state.list.entries()) {
@@ -183,14 +219,148 @@ export function createProfiles({ win, doc, area, changedEvent, isEnabled = () =>
     return id;
   }
 
-  function switchTo(id, direction = 0) {
+  /**
+   * Opens profile `id`. With `open` (a switch you made: a dot, the keys, a swipe), the
+   * thread last open in that profile opens too, else its most recent thread; one
+   * that switched because you opened a thread (follow) leaves that thread open.
+   */
+  function switchTo(id, direction = 0, { open = true } = {}) {
     if (id === state.active || !state.list.some((p) => p.id === id)) return;
     const from = state.list.findIndex((p) => p.id === state.active);
     const to = state.list.findIndex((p) => p.id === id);
+    const leaving = state.active;
+    // The thread open now is the one to come back to in the profile being left
+    // (a pinned or settled thread too: they show in every profile).
+    const current = currentThread();
+    const last = { ...(state.last ?? {}) };
+    if (current && (threadProfile(current) ?? leaving) === leaving) last[leaving] = current;
+    state = { ...state, last };
+    // Asked for right away: T3 renders the thread while the sidebar fades, instead of
+    // after it (a hidden row is opened by its address).
+    if (open) openThreadOf(id);
     transition(direction || Math.sign(to - from), () => {
       save({ ...state, active: id });
       flashName();
     });
+  }
+
+  // ---------- The profile's own thread ----------
+  const routeThread = () => {
+    const hash = win.location.hash ?? "";
+    return threadKeyFromPath(hash.startsWith("#/") ? hash.slice(1).split(/[?#]/)[0] : win.location.pathname);
+  };
+  const currentThread = () => routeThread();
+  // On a page that is not a thread (Settings, a draft, Usage), switching profiles
+  // leaves it open; on a thread or the start page, the profile's thread opens.
+  const onThreadPage = () => {
+    const hash = win.location.hash ?? "";
+    const path = hash.startsWith("#/") ? hash.slice(1).split(/[?#]/)[0] : win.location.pathname;
+    return path === "/" || path === "" || routeThread() !== null;
+  };
+  // What this window last asked T3 to open, until the address shows it. A switch made
+  // while T3 is still opening the previous one compares against it, and the late
+  // arrival of that previous one is not taken for a thread opened from elsewhere.
+  let opening = null; // { thread, at }
+  // thread key -> project key, for threads seen in a folder (their rows go when a
+  // folder is collapsed; the profile of a thread opened from there is still known).
+  const threadProjects = new Map();
+  const cssEscape = (v) => (win.CSS?.escape ? win.CSS.escape(v) : String(v).replace(/["\\]/g, "\\$&"));
+  const rowOf = (inner, thread) => inner?.querySelector(`${T3_SELECTORS.threadItem}[data-thread-item="${cssEscape(thread)}"] ${T3_SELECTORS.sidebarRow}`) ?? null;
+  /** The profile a thread belongs to, or null for one in no folder (pinned, settled, the flat sidebar). */
+  function threadProfile(thread) {
+    const parent = rowOf(sidebarInner(), thread)?.getAttribute("data-sidebar-parent") ?? "";
+    const project = parent.startsWith(FOLDER_PREFIX) ? parent.slice(FOLDER_PREFIX.length) : threadProjects.get(thread);
+    return project === undefined ? null : profileOf(state, project);
+  }
+  /** Most recent first: a thread at work or waiting on you, then by the age T3 shows ("17h"), then list order. */
+  function recentThreadOf(id) {
+    const inner = sidebarInner();
+    let best = null;
+    for (const item of inner?.querySelectorAll(T3_SELECTORS.threadItem) ?? []) {
+      const row = item.querySelector(T3_SELECTORS.sidebarRow);
+      const parent = row?.getAttribute("data-sidebar-parent") ?? "";
+      if (!parent.startsWith(FOLDER_PREFIX) || profileOf(state, parent.slice(FOLDER_PREFIX.length)) !== id) continue;
+      const status = (row.getAttribute("aria-label") ?? "").split(", ")[1] ?? "";
+      let age = ACTIVE_STATUS.test(status) ? 0 : Infinity;
+      if (age) for (const el of row.querySelectorAll("span")) {
+        if (el.childElementCount) continue;
+        const minutes = ageMinutes(el.textContent);
+        if (minutes !== null) {
+          age = minutes;
+          break;
+        }
+      }
+      if (!best || age < best.age) best = { thread: item.getAttribute("data-thread-item"), age };
+    }
+    return best?.thread ?? null;
+  }
+  /** Opens the thread profile `id` should show, if it is not open already. */
+  function openThreadOf(id) {
+    const inner = sidebarInner();
+    let target = state.last?.[id] ?? null;
+    if (target) {
+      const owner = threadProfile(target);
+      // Moved to another profile since, or gone: its folder is open, yet its row is not there.
+      const project = threadProjects.get(target);
+      const folderOpen = project !== undefined && inner?.querySelector(`[data-sidebar-row="${cssEscape(FOLDER_PREFIX + project)}"][aria-expanded="true"]`);
+      if ((owner !== null && owner !== id) || (!rowOf(inner, target) && folderOpen)) target = null;
+    }
+    target ??= recentThreadOf(id);
+    if (!target || !onThreadPage()) return;
+    const pending = opening && Date.now() - opening.at < 1500 ? opening.thread : null;
+    if (target === (pending ?? currentThread())) return;
+    navigate(target);
+  }
+  function navigate(thread) {
+    opening = { thread, at: Date.now() };
+    const row = rowOf(sidebarInner(), thread);
+    if (row && !row.closest("[inert]")) {
+      row.click(); // T3's own navigation, as if clicked
+      return;
+    }
+    // Not in the list (its folder is collapsed): by its address.
+    const i = thread.indexOf(":");
+    const path = `/${encodeURIComponent(thread.slice(0, i))}/${encodeURIComponent(thread.slice(i + 1))}`;
+    if ((win.location.hash ?? "").startsWith("#/")) win.location.hash = `#${path}`;
+    else {
+      win.history.pushState(win.history.state, "", path);
+      win.dispatchEvent(new win.PopStateEvent("popstate", { state: win.history.state }));
+    }
+  }
+  // A thread opened from anywhere (⌘K, a link, search, the sidebar): remembered for
+  // its profile, and when it belongs to another profile, that profile opens.
+  let routeSeen = null;
+  let routeSettled = false;
+  function followRoute() {
+    const thread = currentThread();
+    if (thread !== routeSeen) {
+      routeSeen = thread;
+      routeSettled = false;
+    }
+    if (!thread || routeSettled || swapping) return;
+    const owner = threadProfile(thread);
+    if (owner === null) return; // pinned, settled, not rendered yet: decided when known
+    routeSettled = true;
+    // One this window opened for a switch: not a thread opened from elsewhere. Only the
+    // newest such request counts as current; an older one landing late is overtaken.
+    const own = opening && Date.now() - opening.at < 1500;
+    if (own && opening.thread !== thread) return;
+    if (own) opening = null;
+    if (state.last?.[owner] !== thread) {
+      state = { ...state, last: { ...(state.last ?? {}), [owner]: thread } };
+      persistSoon();
+    }
+    if (owner !== state.active) switchTo(owner, 0, { open: false });
+  }
+  // The open thread is written down a moment later, not on every navigation.
+  let persistTimer = null;
+  function persistSoon() {
+    win.clearTimeout(persistTimer);
+    persistTimer = win.setTimeout(() => {
+      persistTimer = null;
+      if (!running) return;
+      saving = saving.catch(() => {}).then(() => area.set({ [key]: state }));
+    }, 400);
   }
 
   function step(delta) {
@@ -218,7 +388,7 @@ export function createProfiles({ win, doc, area, changedEvent, isEnabled = () =>
         { transform: "none", opacity: 1 },
         { transform: `translateX(${-direction * shift}px)`, opacity: 0 },
       ],
-      { duration: 110, easing: "cubic-bezier(0.4, 0, 1, 1)", fill: "forwards" },
+      { duration: 80, easing: "cubic-bezier(0.4, 0, 1, 1)", fill: "forwards" },
     );
     let timer = null;
     const current = {
@@ -242,7 +412,7 @@ export function createProfiles({ win, doc, area, changedEvent, isEnabled = () =>
               { transform: `translateX(${direction * shift}px)`, opacity: 0 },
               { transform: "none", opacity: 1 },
             ],
-            { duration: 200, easing: "cubic-bezier(0.22, 1, 0.36, 1)" },
+            { duration: 160, easing: "cubic-bezier(0.22, 1, 0.36, 1)" },
           );
         }
       },
@@ -250,7 +420,7 @@ export function createProfiles({ win, doc, area, changedEvent, isEnabled = () =>
     swapping = current;
     out.onfinish = () => current.done();
     // The finish event needs the page to be painting; the switch must happen regardless.
-    timer = win.setTimeout(() => current.done(), 160);
+    timer = win.setTimeout(() => current.done(), 120);
   }
 
   // ---------- Rename / delete (right-click or double-click a dot) ----------
@@ -310,8 +480,12 @@ export function createProfiles({ win, doc, area, changedEvent, isEnabled = () =>
       const list = state.list.filter((p) => p.id !== id);
       // Its projects go back to the first profile (still placed: they are not new).
       const projects = Object.fromEntries(Object.entries(state.projects).map(([k, pid]) => [k, pid === id ? list[0].id : pid]));
-      save({ ...state, list, projects, active: state.active === id ? list[0].id : state.active });
+      const wasActive = state.active === id;
+      const last = { ...(state.last ?? {}) };
+      delete last[id];
+      save({ ...state, list, projects, last, active: wasActive ? list[0].id : state.active });
       closeEditor();
+      if (wasActive) openThreadOf(list[0].id);
     });
     const swatches = doc.createElement("div");
     swatches.className = "t3plus-profile-colors";
@@ -590,8 +764,18 @@ export function createProfiles({ win, doc, area, changedEvent, isEnabled = () =>
     // its folder in data-sidebar-parent. Pinned and settled threads stay everywhere.
     for (const item of inner.querySelectorAll(T3_SELECTORS.threadItem)) {
       const parent = item.querySelector("[data-sidebar-parent]")?.getAttribute("data-sidebar-parent") ?? "";
-      hide(item, parent.startsWith(FOLDER_PREFIX) && profileOf(state, parent.slice(FOLDER_PREFIX.length)) !== state.active);
+      const inFolder = parent.startsWith(FOLDER_PREFIX);
+      if (inFolder) {
+        const thread = item.getAttribute("data-thread-item");
+        if (thread && threadProjects.get(thread) !== parent.slice(FOLDER_PREFIX.length)) {
+          threadProjects.delete(thread); // most recent last, for the bound below
+          threadProjects.set(thread, parent.slice(FOLDER_PREFIX.length));
+          if (threadProjects.size > 3000) threadProjects.delete(threadProjects.keys().next().value);
+        }
+      }
+      hide(item, inFolder && profileOf(state, parent.slice(FOLDER_PREFIX.length)) !== state.active);
     }
+    followRoute();
   }
 
   return {
@@ -621,6 +805,11 @@ export function createProfiles({ win, doc, area, changedEvent, isEnabled = () =>
       running = false;
       win.clearTimeout(nameTimer);
       win.clearTimeout(swipeTimer);
+      if (persistTimer !== null) {
+        win.clearTimeout(persistTimer);
+        persistTimer = null;
+        area.set({ [key]: state }).catch?.(() => {});
+      }
       swapping?.cancel();
       dragging?.ghost.remove();
       dragging = null;
