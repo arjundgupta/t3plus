@@ -9,6 +9,13 @@ import { STORAGE_KEYS, T3PLUS } from "./config.js";
 
 export const WHATS_NEW = Object.freeze([
   {
+    version: "0.22.2",
+    date: "2026-11-20",
+    notes: [
+      ["Bots in Settings", "a list of your bots (face, name, latest message, with a search) beside the one you pick, shown big with its shapes in their sets (Classic, Sports, Space, Fruit) and its colors. Arrow keys move through the list."],
+    ],
+  },
+  {
     version: "0.22.1",
     date: "2026-11-20",
     notes: [

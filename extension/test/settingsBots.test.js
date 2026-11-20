@@ -25,79 +25,113 @@ function setup() {
   return { dom, doc, panel, calls, bot, show, chip, editor, key };
 }
 
-test("bots show as chips, A to Z; one picker opens at a time and the open chip closes it", () => {
+const names = (t) => [...t.doc.querySelectorAll(".t3plus-bot-pick:not([hidden]) .t3plus-bot-name")].map((n) => n.textContent);
+const picked = (t) => t.doc.querySelector('.t3plus-bot-pick[aria-selected="true"]')?.dataset.botKey ?? null;
+
+test("bots in a list, A to Z; the first is picked and shown on the right; one at a time", () => {
   const t = setup();
   t.show([t.bot("e:3", "zeta"), t.bot("e:1", "Alpha"), t.bot("e:2", "beta")]);
-  assert.deepEqual([...t.doc.querySelectorAll(".t3plus-bot-pick")].map((c) => c.textContent), ["Alpha", "beta", "zeta"]);
-  assert.equal(t.editor(), null);
-  t.chip("e:1").click();
-  t.chip("e:2").click();
+  assert.deepEqual(names(t), ["Alpha", "beta", "zeta"]);
+  assert.equal(picked(t), "e:1");
+  assert.equal(t.editor().dataset.botKey, "e:1");
+  t.chip("e:3").click();
   assert.equal(t.doc.querySelectorAll(".t3plus-bot-editor").length, 1);
-  assert.equal(t.editor().dataset.botKey, "e:2");
-  assert.deepEqual([...t.doc.querySelectorAll('.t3plus-bot-pick[aria-expanded="true"]')].map((c) => c.dataset.botKey), ["e:2"]);
-  t.chip("e:2").click();
-  assert.equal(t.editor(), null);
-  assert.equal(t.chip("e:2").getAttribute("aria-expanded"), "false");
+  assert.equal(t.editor().dataset.botKey, "e:3");
+  assert.equal(picked(t), "e:3");
+  t.chip("e:3").click(); // the one picked again: stays
+  assert.equal(t.editor().dataset.botKey, "e:3");
+  assert.deepEqual([...t.doc.querySelectorAll(".t3plus-bot-pick")].filter((c) => c.tabIndex === 0).map((c) => c.dataset.botKey), ["e:3"], "one Tab stop: the one picked");
 });
 
-test("Escape closes the picker, returns focus to its chip, and is marked handled for T3", () => {
+test("search narrows the list; Escape clears it (marked handled for T3); ArrowDown goes into the list, arrows pick as they move", () => {
   const t = setup();
-  t.show([t.bot("e:1", "One"), t.bot("e:2", "Two")]);
-  t.chip("e:2").click();
+  t.show([t.bot("e:1", "Alpha"), t.bot("e:2", "Beta"), t.bot("e:3", "Gamma"), t.bot("e:4", "Alphabet")]);
+  const search = t.doc.querySelector(".t3plus-bots-search");
+  search.value = "alp";
+  search.dispatchEvent(new t.dom.window.Event("input", { bubbles: true }));
+  assert.deepEqual(names(t), ["Alpha", "Alphabet"]);
+  search.value = "nothing";
+  search.dispatchEvent(new t.dom.window.Event("input", { bubbles: true }));
+  assert.equal(t.doc.querySelector(".t3plus-bots-none").hidden, false, "says none match");
   let reached = false;
   t.doc.addEventListener("keydown", (e) => (reached = !e.defaultPrevented));
-  t.key(t.doc.activeElement, "Escape");
-  assert.equal(t.editor(), null);
-  assert.equal(t.doc.activeElement, t.chip("e:2"));
+  t.key(search, "Escape");
+  assert.equal(search.value, "");
+  assert.equal(names(t).length, 4);
   assert.equal(reached, false, "defaultPrevented: T3 leaves Settings open");
+  t.key(search, "ArrowDown");
+  assert.equal(t.doc.activeElement, t.chip("e:1"));
+  t.key(t.doc.activeElement, "ArrowDown");
+  assert.equal(t.doc.activeElement, t.chip("e:4"), "Alphabet: second A to Z");
+  assert.equal(picked(t), "e:4");
+  t.key(t.doc.activeElement, "End");
+  assert.equal(picked(t), "e:3");
 });
 
-test("updates keep the picker open and the chips in place; a rename re-sorts without losing focus", () => {
+test("updates keep the bot picked and the list in place; a rename re-sorts without losing focus; tooltips carry message and model", () => {
   const t = setup();
   const bots = [t.bot("e:1", "Alpha", "hi"), t.bot("e:2", "Beta"), t.bot("e:3", "Gamma")];
   t.show(bots);
   t.chip("e:2").click();
   const chipEl = t.chip("e:2");
-  for (let i = 0; i < 3; i += 1) t.show(bots);
-  assert.equal(t.chip("e:2"), chipEl, "same node");
-  assert.equal(t.editor().dataset.botKey, "e:2");
-  t.chip("e:3").focus();
-  t.show([bots[0], bots[1], t.bot("e:3", "Aardvark")]);
-  assert.deepEqual([...t.doc.querySelectorAll(".t3plus-bot-pick")].map((c) => c.textContent), ["Aardvark", "Alpha", "Beta"]);
-  assert.equal(t.doc.activeElement, t.chip("e:3"), "focus followed the chip");
-  assert.equal(t.chip("e:1").title, "Alpha\nhi", "the tooltip has the latest message");
-  t.show([{ ...bots[0], meta: "Opus 5.5 · Studio" }, bots[1], t.bot("e:3", "Aardvark")]);
-  assert.equal(t.chip("e:1").title, "Alpha\nhi\nOpus 5.5 · Studio", "and its model and computer");
-});
-
-test("forgetting the open bot closes its picker and focuses the chip now in its place", () => {
-  const t = setup();
-  const bots = [t.bot("e:1", "A"), t.bot("e:2", "B"), t.bot("e:3", "C")];
+  const editorEl = t.editor();
   t.show(bots);
-  t.chip("e:2").click();
-  const forget = [...t.editor().querySelectorAll("button")].find((b) => b.textContent === "Forget");
-  forget.focus();
-  forget.click();
-  assert.deepEqual(t.calls.at(-1), ["forgetBot", "e:2"]);
-  t.show([bots[0], bots[2]]);
-  assert.equal(t.editor(), null);
-  assert.equal(t.doc.activeElement, t.chip("e:3"));
-  // The last one: focus goes to the one before it.
-  t.chip("e:3").click();
-  t.show([bots[0]]);
-  assert.equal(t.doc.activeElement, t.chip("e:1"));
+  assert.equal(t.chip("e:2"), chipEl, "the same element");
+  assert.equal(t.editor(), editorEl);
+  assert.equal(t.chip("e:1").title, "Alpha\nhi");
+  assert.equal(t.chip("e:1").querySelector(".t3plus-bot-line").textContent, "hi");
+  chipEl.focus();
+  t.show([bots[0], { ...t.bot("e:2", "Zulu"), meta: "Opus 5.5 · Studio" }, bots[2]]);
+  assert.deepEqual(names(t), ["Alpha", "Gamma", "Zulu"]);
+  assert.equal(t.doc.activeElement, chipEl, "focus kept through the re-sort");
+  assert.equal(t.chip("e:2").title, "Zulu\nOpus 5.5 · Studio");
+  assert.equal(t.editor().querySelector(".t3plus-bot-meta").textContent, "Opus 5.5 · Studio");
 });
 
-test("leaving Settings closes the picker; same-named bots read apart by their latest message", () => {
+test("forgetting the bot picked picks the one now in its place (focus too); the last picks the one before", () => {
   const t = setup();
-  t.show([t.bot("e:1", "Review", "Fixed the parser."), t.bot("e:2", "Review", "Shipped 0.19.")]);
+  const [a, b, c] = [t.bot("e:1", "A"), t.bot("e:2", "B"), t.bot("e:3", "C")];
+  t.show([a, b, c]);
   t.chip("e:2").click();
-  assert.equal(t.editor().querySelector(".t3plus-bot-message").textContent, "Shipped 0.19.");
+  t.editor().querySelector("button").focus();
+  t.show([a, c]);
+  assert.equal(picked(t), "e:3");
+  assert.equal(t.doc.activeElement, t.chip("e:3"));
+  t.chip("e:3").click();
+  t.editor().querySelector("button").focus();
+  t.show([a]);
+  assert.equal(picked(t), "e:1");
+  assert.equal(t.doc.activeElement, t.chip("e:1"));
+  t.show([]);
+  assert.equal(t.doc.querySelector(".t3plus-bots-both").hidden, true, "no bots: no list");
+});
+
+test("leaving Settings clears the search; same-named bots read apart by their latest message", () => {
+  const t = setup();
+  t.show([t.bot("e:1", "Review", "Looks good"), t.bot("e:2", "Review", "Two issues found")]);
+  assert.deepEqual([...t.doc.querySelectorAll(".t3plus-bot-line")].map((l) => l.textContent), ["Looks good", "Two issues found"]);
+  const search = t.doc.querySelector(".t3plus-bots-search");
+  search.value = "x";
+  search.dispatchEvent(new t.dom.window.Event("input", { bubbles: true }));
   t.panel.closeBotEditor();
-  assert.equal(t.editor(), null);
-  assert.equal(t.chip("e:2").getAttribute("aria-expanded"), "false");
-  t.chip("e:1").click();
-  assert.equal(t.editor().querySelector(".t3plus-bot-message").textContent, "Fixed the parser.");
-  t.show([t.bot("e:1", "Review"), t.bot("e:2", "Review")]);
-  assert.equal(t.editor().querySelector(".t3plus-bot-message").hidden, true, "no message: no empty line");
+  assert.equal(search.value, "");
+  assert.equal(names(t).length, 2);
+  t.show([t.bot("e:1", "Quiet")]);
+  assert.equal(t.editor().querySelector(".t3plus-bot-message").textContent, "No messages yet");
+});
+
+test("a search hiding the bot picked leaves a Tab stop on one shown; the focused bot leaving keeps the focus in the list; not a live region", () => {
+  const t = setup();
+  t.show([t.bot("e:1", "Alpha"), t.bot("e:2", "Beta"), t.bot("e:3", "Gamma")]);
+  const search = t.doc.querySelector(".t3plus-bots-search");
+  search.value = "bet";
+  search.dispatchEvent(new t.dom.window.Event("input", { bubbles: true }));
+  assert.deepEqual([...t.doc.querySelectorAll(".t3plus-bot-pick")].filter((c) => c.tabIndex === 0).map((c) => c.dataset.botKey), ["e:2"], "Alpha is searched out: Beta is the stop");
+  search.value = "";
+  search.dispatchEvent(new t.dom.window.Event("input", { bubbles: true }));
+  t.chip("e:2").click();
+  t.chip("e:2").focus();
+  t.show([t.bot("e:1", "Alpha"), t.bot("e:3", "Gamma")]); // Beta leaves while focused
+  assert.equal(t.doc.activeElement, t.chip("e:3"), "the one in its place");
+  assert.equal(t.doc.querySelector(".t3plus-bot-slot").hasAttribute("aria-live"), false);
 });

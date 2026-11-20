@@ -322,22 +322,37 @@ export function createAppearancePanel(doc, actions, { desktop = false, version =
   ]);
 
   // ---------- Bots ----------
-  // A chip per bot (its face and name), A to Z; clicking one opens its shape and
-  // color picker under the chips, one bot at a time.
-  const botsList = h("div", { class: "t3plus-bots" });
-  const botSlot = h("div", { class: "t3plus-bot-slot", id: id("bot-editor") });
+  // A list and the one picked: the bots on the left (face, name, latest message, A to Z,
+  // with a search), and on the right the one picked, big, with its shapes in their sets
+  // (Classic, Sports, Space, Fruit) and its colors. The card keeps its height however
+  // many bots there are.
+  const botsSearch = h("input", { type: "search", class: "t3plus-bots-search", placeholder: "Search bots", "aria-label": "Search bots" });
+  const botsList = h("div", { class: "t3plus-bots", role: "listbox", "aria-label": "Bots" });
+  const botsNone = h("p", { class: "t3plus-bots-none", text: "No bot matches." });
+  // Not a live region: the picked bot is announced as its option is, and a working bot's
+  // streaming message would be read out again and again.
+  const botSlot = h("div", { class: "t3plus-bot-slot", id: id("bot-editor"), role: "region", "aria-label": "Bot picked" });
   const botsEmpty = h("p", { class: "t3plus-row-desc t3plus-bots-empty" });
   const botStatus = h("p", { class: "t3plus-status", role: "status", "aria-live": "polite" });
+  const botsBoth = h("div", { class: "t3plus-bots-both" }, [h("div", { class: "t3plus-bots-side" }, [botsSearch, botsList, botsNone]), botSlot]);
   const botsCard = h("div", { class: "t3plus-card" }, [
-    row({ title: "Bots", description: "Click one to change its shape or color.", extra: h("div", { class: "t3plus-bots-body" }, [botsEmpty, botsList, botSlot, botStatus]) }),
+    row({ title: "Bots", description: "Pick one to change its shape or color.", extra: h("div", { class: "t3plus-bots-body" }, [botsEmpty, botsBoth, botStatus]) }),
   ]);
 
-  const botEntries = new Map(); // key -> { chip, avatar, name, editor, bot }
-  let botOrder = []; // keys, as the chips are laid out
-  let openBot = null;
+  const botEntries = new Map(); // key -> { chip, avatar, name, line, editor, bot }
+  let botOrder = []; // keys, A to Z
+  let openBot = null; // the bot picked (shown on the right)
+
+  // Shapes in their sets: Sports, Space and Fruit as Bot style has them, Classic the rest.
+  const SHAPE_SETS = (() => {
+    const themed = Object.entries(BOT_STYLES).filter(([, s]) => s.shapes);
+    const inSet = new Set(themed.flatMap(([, s]) => s.shapes));
+    return [["Classic", Object.keys(BOT_SHAPES).filter((k) => !inSet.has(k))], ...themed.map(([, s]) => [s.label, s.shapes.filter((k) => Object.hasOwn(BOT_SHAPES, k))])];
+  })();
 
   function createBotEditor(bot) {
     const forget = button("Forget", () => actions.forgetBot(bot.key), "t3plus-button-ghost");
+    forget.title = "Forget this bot's shape and color";
 
     const swatchGroup = (label, entries, field, paint) => {
       const buttons = new Map();
@@ -352,6 +367,7 @@ export function createAppearancePanel(doc, actions, { desktop = false, version =
         }));
       return {
         group,
+        buttons,
         name(botName) {
           group.setAttribute("aria-label", `${label} for ${botName}`);
         },
@@ -361,47 +377,52 @@ export function createAppearancePanel(doc, actions, { desktop = false, version =
       };
     };
     const cap = (w) => w[0].toUpperCase() + w.slice(1);
-    const shapes = swatchGroup("Shape", Object.keys(BOT_SHAPES).map((k) => [k, cap(k)]), "shape", (mark, shape) => {
-      mark.style.setProperty("--t3plus-bot-clip", botClipPath(shape));
-    });
+    const shapeSets = SHAPE_SETS.map(([label, keys]) => ({
+      label,
+      group: swatchGroup(`${label} shapes`, keys.map((k) => [k, cap(k)]), "shape", (mark, shape) => mark.style.setProperty("--t3plus-bot-clip", botClipPath(shape))),
+    }));
     // "Project" first: the bot follows its project's badge color.
     const colors = swatchGroup("Color", [[PROJECT_COLOR, "Project color"], ...Object.entries(BOT_COLORS).map(([k, v]) => [k, v.label])], "color", (mark, color) => {
       mark.style.setProperty("--t3plus-bot-edge", botEdgeColor(color));
     });
-    const colorField = h("div", { class: "t3plus-field" }, [h("span", { text: "Color" }), colors.group]);
+    const colorField = h("div", { class: "t3plus-bot-set", "data-set": "color" }, [h("span", { class: "t3plus-bot-set-label", text: "Color" }), colors.group]);
+    const face = h("span", { class: "t3plus-bot-swatch t3plus-bot-hero-face", "aria-hidden": "true" });
+    const title = h("h4", { class: "t3plus-bot-hero-name" });
     // Its latest message: tells two bots with the same name apart.
     const message = h("p", { class: "t3plus-bot-message" });
+    const meta = h("p", { class: "t3plus-bot-meta" });
 
     const element = h("div", { class: "t3plus-bot-editor", "data-bot-key": bot.key }, [
-      message,
-      h("div", { class: "t3plus-field" }, [h("span", { text: "Shape" }), shapes.group]),
-      h("div", { class: "t3plus-bot-editor-foot" }, [colorField, forget]),
+      h("div", { class: "t3plus-bot-hero" }, [face, h("div", { class: "t3plus-bot-hero-text" }, [title, message, meta]), forget]),
+      ...shapeSets.map((s) => h("div", { class: "t3plus-bot-set", "data-set": s.label }, [h("span", { class: "t3plus-bot-set-label", text: s.label }), s.group.group])),
+      colorField,
     ]);
-    element.addEventListener("keydown", (event) => {
-      if (event.key !== "Escape") return;
-      event.preventDefault();
-      setOpenBot(null, { focus: true });
-    });
     return {
       element,
       update(next) {
         const current = next.prefs;
-        setText(message, next.preview);
-        message.hidden = !next.preview;
-        shapes.name(next.view.label);
+        setText(title, next.view.label);
+        setText(message, next.preview || "No messages yet");
+        message.classList.toggle("is-empty", !next.preview);
+        setText(meta, next.meta ?? "");
+        meta.hidden = !next.meta;
+        applyAvatarVars(face, next.view);
+        for (const s of shapeSets) s.group.name(next.view.label);
         colors.name(next.view.label);
         const shape = next.view.shape; // the bot's own pick, or the one it was given
-        shapes.set(shape);
+        for (const s of shapeSets) s.group.set(shape);
         colors.set(current.color);
         // Ball shapes (football, basketball) bring their own colors: no color to pick.
         colorField.style.display = botShapeHasOwnColors(shape) ? "none" : "";
         // Each swatch is the bot's face as it would look: shape buttons in the
         // bot's color, color buttons in the bot's shape (eyes follow the shape).
         const paint = next.view.paint;
-        for (const button of shapes.group.querySelectorAll(".t3plus-swatch")) {
-          const mark = button.firstElementChild;
-          mark.style.setProperty("--t3plus-bot-fill", botFillUrl(paint, button.dataset.value));
-          mark.style.setProperty("--t3plus-bot-edge", botEdgeColor(paint, button.dataset.value));
+        for (const s of shapeSets) {
+          for (const button of s.group.group.querySelectorAll(".t3plus-swatch")) {
+            const mark = button.firstElementChild;
+            mark.style.setProperty("--t3plus-bot-fill", botFillUrl(paint, button.dataset.value));
+            mark.style.setProperty("--t3plus-bot-edge", botEdgeColor(paint, button.dataset.value));
+          }
         }
         for (const button of colors.group.querySelectorAll(".t3plus-swatch")) {
           const mark = button.firstElementChild;
@@ -418,39 +439,89 @@ export function createAppearancePanel(doc, actions, { desktop = false, version =
   function createBotEntry(bot) {
     const avatar = h("span", { class: "t3plus-bot-swatch", "aria-hidden": "true" });
     const name = h("span", { class: "t3plus-bot-name" });
-    const chip = h("button", { type: "button", class: "t3plus-bot-pick", "data-bot-key": bot.key, "aria-expanded": "false", "aria-controls": botSlot.id }, [avatar, name]);
-    const entry = { chip, avatar, name, editor: null, bot };
-    // Opening moves focus into the picker (from the keyboard it would otherwise
-    // be every chip after this one away); Escape brings it back.
-    chip.addEventListener("click", () => setOpenBot(openBot === bot.key ? null : bot.key, { focus: true }));
+    const line = h("span", { class: "t3plus-bot-line" });
+    const chip = h("button", { type: "button", class: "t3plus-bot-pick", role: "option", "data-bot-key": bot.key, "aria-selected": "false", "aria-controls": botSlot.id, tabindex: "-1" }, [
+      avatar,
+      h("span", { class: "t3plus-bot-pick-text" }, [name, line]),
+    ]);
+    const entry = { chip, avatar, name, line, editor: null, bot };
+    chip.addEventListener("click", () => setOpenBot(bot.key));
     return entry;
   }
 
   const focusQuietly = (el) => el?.focus({ preventScroll: true });
+  // Up and down the list (the ones the search shows), Home and End: picks as it moves.
+  botsList.addEventListener("keydown", (e) => {
+    if (e.altKey || e.ctrlKey || e.metaKey) return; // T3's (and the system's) with a modifier
+    const shown = [...botsList.querySelectorAll(".t3plus-bot-pick:not([hidden])")];
+    const at = shown.indexOf(doc.activeElement);
+    const to = { ArrowDown: at + 1, ArrowUp: at - 1, Home: 0, End: shown.length - 1 }[e.key];
+    if (to === undefined || !shown.length) return;
+    e.preventDefault();
+    const next = shown[Math.max(0, Math.min(shown.length - 1, to))];
+    setOpenBot(next.dataset.botKey);
+    focusQuietly(next);
+    next.scrollIntoView?.({ block: "nearest" });
+  });
+  botsSearch.addEventListener("input", () => filterBots());
+  botsSearch.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && botsSearch.value) {
+      e.preventDefault(); // clears the search, Settings stays open
+      botsSearch.value = "";
+      filterBots();
+    } else if (e.key === "ArrowDown") {
+      e.preventDefault();
+      // Into the list: the bot picked, when it shows; else the first that does.
+      const first = botsList.querySelector('.t3plus-bot-pick[aria-selected="true"]:not([hidden])') ?? botsList.querySelector(".t3plus-bot-pick:not([hidden])");
+      if (first) {
+        setOpenBot(first.dataset.botKey);
+        focusQuietly(first);
+      }
+    }
+  });
+  function filterBots() {
+    const q = botsSearch.value.trim().toLowerCase();
+    let any = false;
+    for (const e of botEntries.values()) {
+      const hide = Boolean(q) && !e.bot.view.label.toLowerCase().includes(q);
+      if (e.chip.hidden !== hide) e.chip.hidden = hide;
+      any ||= !hide;
+    }
+    botsNone.hidden = any || !botEntries.size;
+    // The Tab stop is the picked bot; searched out, the first one shown (else none to reach).
+    const pickedChip = openBot ? botEntries.get(openBot)?.chip : null;
+    const stop = pickedChip && !pickedChip.hidden ? pickedChip : botsList.querySelector(".t3plus-bot-pick:not([hidden])");
+    for (const e of botEntries.values()) {
+      const want = e.chip === stop ? 0 : -1;
+      if (e.chip.tabIndex !== want) e.chip.tabIndex = want;
+    }
+  }
 
-  function setOpenBot(key, { focus = false } = {}) {
+  function setOpenBot(key) {
     const entry = key ? botEntries.get(key) : null;
-    const closing = openBot ? botEntries.get(openBot) : null;
     openBot = entry ? key : null;
-    for (const [k, e] of botEntries) e.chip.setAttribute("aria-expanded", String(k === openBot));
+    for (const [k, e] of botEntries) {
+      const on = String(k === openBot);
+      if (e.chip.getAttribute("aria-selected") !== on) e.chip.setAttribute("aria-selected", on);
+    }
+    filterBots(); // the Tab stop (the one picked, unless the search hides it)
     if (!entry) {
       botSlot.replaceChildren();
-      if (focus) focusQuietly(closing?.chip);
       return;
     }
     entry.editor ??= createBotEditor(entry.bot);
     entry.editor.update(entry.bot);
-    botSlot.replaceChildren(entry.editor.element);
-    entry.editor.element.scrollIntoView?.({ block: "nearest" });
-    if (focus) focusQuietly(entry.editor.element.querySelector('.t3plus-swatch[aria-pressed="true"]') ?? entry.editor.element.querySelector(".t3plus-swatch"));
+    if (botSlot.firstElementChild !== entry.editor.element) botSlot.replaceChildren(entry.editor.element);
   }
 
   function updateBots(list) {
     const bots = [...list].sort((a, b) => a.view.label.localeCompare(b.view.label, undefined, { sensitivity: "base" }) || a.key.localeCompare(b.key));
     const order = bots.map((b) => b.key);
+    botsBoth.hidden = !bots.length;
     if (order.join("\n") !== botOrder.join("\n")) {
-      // Moving a chip (a rename re-sorts them) would drop its focus: put it back.
+      // Moving an item (a rename re-sorts them) would drop its focus: put it back.
       const focused = botsList.contains(doc.activeElement) ? doc.activeElement : null;
+      const focusedKey = focused?.dataset.botKey ?? null;
       const openIndex = botOrder.indexOf(openBot);
       botOrder = order;
       for (const key of [...botEntries.keys()]) if (!order.includes(key)) botEntries.delete(key);
@@ -462,22 +533,35 @@ export function createAppearancePanel(doc, actions, { desktop = false, version =
       );
       if (focused?.isConnected && doc.activeElement !== focused) focusQuietly(focused);
       if (openBot && !botEntries.has(openBot)) {
-        // Forgotten (or gone) while open: focus goes to the chip now in its place.
-        const hadFocus = botSlot.contains(doc.activeElement);
-        setOpenBot(null);
-        if (hadFocus) focusQuietly(botEntries.get(order[Math.min(openIndex, order.length - 1)])?.chip);
+        // Forgotten (or gone): the one now in its place is picked, among those the search
+        // shows, and focused if it (or its own item) had the focus.
+        const hadFocus = botSlot.contains(doc.activeElement) || (focusedKey !== null && !botEntries.has(focusedKey));
+        openBot = null;
+        const q = botsSearch.value.trim().toLowerCase();
+        const shown = order.filter((k) => !q || botEntries.get(k).bot.view.label.toLowerCase().includes(q));
+        const pool = shown.length ? shown : order;
+        const next = pool[Math.min(Math.max(pool.indexOf(order[Math.min(Math.max(openIndex, 0), order.length - 1)]), 0), pool.length - 1)] ?? null;
+        setOpenBot(next);
+        if (hadFocus) focusQuietly(botEntries.get(next)?.chip);
       }
     }
     for (const bot of bots) {
       const entry = botEntries.get(bot.key);
       entry.bot = bot;
       setText(entry.name, bot.view.label);
+      setText(entry.line, bot.preview || "");
       // Hover: the name in full, its latest message, and its model and computer.
       const tip = [bot.view.label, bot.preview, bot.meta].filter(Boolean).join("\n");
       if (entry.chip.title !== tip) entry.chip.title = tip;
       applyAvatarVars(entry.avatar, bot.view);
-      if (bot.key === openBot) entry.editor?.update(bot);
     }
+    // Always one picked: the first, until another is.
+    if (!openBot && order.length) setOpenBot(order[0]);
+    else if (openBot) {
+      const entry = botEntries.get(openBot);
+      entry.editor?.update(entry.bot); // the picked one's details, up to date
+      filterBots();
+    } else filterBots();
   }
 
   // ---------- Profiles: an icon and three colors each ----------
@@ -791,7 +875,11 @@ export function createAppearancePanel(doc, actions, { desktop = false, version =
       const p = profiles.list.find((q) => q.id === editing);
       return profileHex(draft.dither ?? p?.dither ?? "default");
     },
-    /** Closes the open bot's picker (leaving Settings: it opens closed next time). */
-    closeBotEditor: () => openBot !== null && setOpenBot(null),
+    /** Leaving Settings: the search is cleared (it opens on the whole list next time). */
+    closeBotEditor: () => {
+      if (!botsSearch.value) return;
+      botsSearch.value = "";
+      filterBots();
+    },
   };
 }

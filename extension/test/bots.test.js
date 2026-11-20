@@ -347,20 +347,23 @@ test("app: bot rows show the feed preview, and Settings edits shape and color", 
   await settle();
   const sdocSettings = settings.window.document;
   const chip = sdocSettings.querySelector('.t3plus-bot-pick[data-bot-key="env1:bot1"]');
-  assert.ok(chip, "a chip per bot");
-  assert.equal(sdocSettings.querySelector(".t3plus-bot-editor"), null, "pickers stay closed until a bot is opened");
-  chip.click();
-  assert.equal(chip.getAttribute("aria-expanded"), "true");
+  assert.ok(chip, "a bot in the list");
+  // The first bot (A to Z) is the one picked: shown on the right.
+  assert.equal(chip.getAttribute("aria-selected"), "true");
   const editor = sdocSettings.querySelector('.t3plus-bot-editor[data-bot-key="env1:bot1"]');
   assert.ok(editor);
-  assert.equal(chip.textContent, "Orchestrator");
+  chip.click();
+  assert.equal(sdocSettings.querySelectorAll(".t3plus-bot-editor").length, 1, "one at a time");
+  assert.equal(chip.querySelector(".t3plus-bot-name").textContent, "Orchestrator");
+  assert.equal(chip.querySelector(".t3plus-bot-line").textContent, "Nightly run done.", "its latest message, under its name");
+  assert.equal(editor.querySelector(".t3plus-bot-hero-name").textContent, "Orchestrator");
   assert.equal(editor.querySelectorAll("input, select").length, 0, "no free text, color picker or upload");
-  assert.equal(editor.querySelector('[data-field="shape"]').getAttribute("aria-label"), "Shape for Orchestrator", "named for the bot, not its thread id");
+  assert.equal(editor.querySelector('[data-field="shape"]').getAttribute("aria-label"), "Classic shapes for Orchestrator", "named for the bot, not its thread id");
   assert.equal(editor.querySelector(".t3plus-bot-message").textContent, "Nightly run done.", "its latest message tells same-named bots apart");
-  assert.equal(sdocSettings.activeElement, editor.querySelector('[data-field="shape"] [aria-pressed="true"]'), "opening moves focus to the bot's shape");
+  assert.deepEqual([...editor.querySelectorAll(".t3plus-bot-set-label")].map((l) => l.textContent), ["Classic", "Sports", "Space", "Fruit", "Color"], "shapes in their sets");
   const shapeButtons = editor.querySelectorAll('[data-field="shape"] button');
   const colorButtons = editor.querySelectorAll('[data-field="color"] button');
-  assert.equal(shapeButtons.length, Object.keys(BOT_SHAPES).length);
+  assert.equal(shapeButtons.length, Object.keys(BOT_SHAPES).length, "every shape, once");
   assert.equal(colorButtons.length, Object.keys(BOT_COLORS).length + 1, "the named colors plus Project");
   assert.equal(editor.querySelector('[data-field="color"] button[data-value="project"]').getAttribute("aria-pressed"), "true", "a new bot follows its project");
 
@@ -390,21 +393,16 @@ test("app: bot rows show the feed preview, and Settings edits shape and color", 
   sideApp.watcher.flush();
   assert.equal(avatar.style.getPropertyValue("--t3plus-bot-edge"), BOT_SKINS.football.stops[1]);
 
-  // Escape closes the picker and gives focus back to the chip.
-  editor.querySelector("button").dispatchEvent(new settings.window.KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
-  assert.equal(sdocSettings.querySelector(".t3plus-bot-editor"), null);
-  assert.equal(chip.getAttribute("aria-expanded"), "false");
-  assert.equal(sdocSettings.activeElement, chip);
-
-  // Leaving Settings with the picker open: it is closed when Settings is opened again.
-  chip.click();
-  assert.equal(chip.getAttribute("aria-expanded"), "true");
-  const slot = sdocSettings.querySelector(".t3plus-bot-slot");
+  // Leaving Settings with a search typed: the whole list again next time.
+  const search = sdocSettings.querySelector(".t3plus-bots-search");
+  search.value = "zzz";
+  search.dispatchEvent(new settings.window.Event("input", { bubbles: true }));
+  assert.equal(chip.hidden, true, "searched out");
   sdocSettings.getElementById(T3PLUS.panelId).parentElement.remove(); // T3 takes the page down
   settings.window.history.pushState({}, "", "/env1/a1");
   settingsApp.watcher.flush();
-  assert.equal(slot.children.length, 0);
-  assert.equal(chip.getAttribute("aria-expanded"), "false");
+  assert.equal(search.value, "");
+  assert.equal(chip.hidden, false);
 
   await settingsApp.actions.forgetBot("env1:bot1");
   assert.equal(storage.area.data.get(STORAGE_KEYS.bots)["env1:bot1"], undefined);
@@ -422,7 +420,7 @@ test("Forget on a bot in the sidebar resets its look and keeps its name and plac
   await settle();
   app.watcher.flush();
   const chip = () => doc.querySelector('.t3plus-bot-pick[data-bot-key="env1:bot1"]');
-  assert.equal(chip().textContent, "Orchestrator");
+  assert.equal(chip().querySelector(".t3plus-bot-name").textContent, "Orchestrator");
   const before = [...doc.querySelectorAll(".t3plus-bot-pick")].map((c) => c.dataset.botKey);
   await app.actions.forgetBot("env1:bot1");
   // At once, not only after the next sidebar scan stores the title again.
@@ -430,7 +428,7 @@ test("Forget on a bot in the sidebar resets its look and keeps its name and plac
   assert.deepEqual([...doc.querySelectorAll(".t3plus-bot-pick")].map((c) => c.dataset.botKey), before, "no jump");
   await settle();
   app.watcher.flush();
-  assert.equal(chip().textContent, "Orchestrator");
+  assert.equal(chip().querySelector(".t3plus-bot-name").textContent, "Orchestrator");
   assert.equal(storage.area.data.get(STORAGE_KEYS.bots)?.["env1:bot1"], undefined, "its look was reset");
   app.stop();
 });
