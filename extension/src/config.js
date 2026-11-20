@@ -309,6 +309,8 @@ export const BOT_SHAPES = Object.freeze({
   watermelon: "circle(50% at 50% 50%)",
   lime: "circle(46% at 50% 52%)",
   strawberry: STRAWBERRY,
+  // Blobs (blobAvatars.js): vector blobs that keep inside their own outline, unclipped.
+  ...Object.fromEntries(["drop", "pebble", "squircle", "bean", "trefoil", "cloud", "egg", "mochi", "wobble", "lean", "tilt", "pudding"].map((k) => [k, "inset(0)"])),
 });
 
 /**
@@ -354,6 +356,7 @@ export const BOT_STYLES = Object.freeze({
   sports: Object.freeze({ label: "Sports", shapes: ["football", "basketball", "soccer", "baseball", "tennis", "volleyball", "eightball", "bowling", "golf", "beachball"] }),
   space: Object.freeze({ label: "Space", shapes: ["earth", "moon", "mars", "jupiter", "saturn", "sun"] }),
   fruit: Object.freeze({ label: "Fruit", shapes: ["orange", "apple", "lemon", "watermelon", "lime", "strawberry"] }),
+  blobs: Object.freeze({ label: "Blobs", shapes: ["drop", "pebble", "squircle", "bean", "trefoil", "cloud", "egg", "mochi", "wobble", "lean", "tilt", "pudding"] }),
 });
 
 /**

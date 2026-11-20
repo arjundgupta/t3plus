@@ -1,5 +1,8 @@
 import { BOT_COLORS, BOT_SHAPES, BOT_SKINS, BOT_STYLES } from "./config.js";
 import { bayerThreshold } from "./ditherMath.js";
+import { BLOB_NAMES, blobArt } from "./blobAvatars.js";
+
+const isBlob = (shape) => BLOB_NAMES.includes(shape);
 
 // Bot avatar art: 24x24 pixel-art faces, built as SVG sprite sheets and cached
 // per (color, shape, mood). The body is an ordered-dither gradient: every
@@ -428,6 +431,14 @@ export function botShapeHasOwnColors(shape) {
  */
 export function botArt(color, shape = "circle", mood = "awake") {
   const s = Object.hasOwn(BOT_SHAPES, shape) ? shape : "circle";
+  if (isBlob(s)) {
+    // Blobs: a flat fill in the color's middle stop, black capsule eyes (blobAvatars.js).
+    const c = Object.hasOwn(BOT_COLORS, color ?? "") ? color : typeof color === "string" && HEX_COLOR.test(color) ? color.toLowerCase() : "blue";
+    const m = Object.hasOwn(MOODS, mood) ? mood : "awake";
+    const key = `blob:${c}:${s}:${m}`;
+    if (!cache.has(key)) cache.set(key, blobArt(botStops(c)[1], s, m));
+    return cache.get(key);
+  }
   const skin = Object.hasOwn(BOT_SKINS, s) ? BOT_SKINS[s] : null;
   // A ball shape has its own colors: the bot's color does not change it.
   const c = skin ? "" : Object.hasOwn(BOT_COLORS, color ?? "") ? color : typeof color === "string" && HEX_COLOR.test(color) ? color.toLowerCase() : "blue";
@@ -504,6 +515,7 @@ export function botShapeHasSky(shape) {
  * own mid stop). Transparent behind a shape with sky, or its sky would be a square.
  */
 export function botEdgeColor(color, shape) {
+  if (isBlob(shape)) return "transparent"; // a blob keeps to its own outline: nothing behind it
   if (botShapeHasSky(shape)) return "transparent";
   if (botShapeHasOwnColors(shape)) return BOT_SKINS[shape].stops[1];
   return botStops(color)[1];
@@ -635,7 +647,9 @@ export function currentBotStyle() {
   return botStyle;
 }
 
-const styleShapes = () => BOT_STYLES[botStyle]?.shapes ?? Object.keys(BOT_SHAPES).filter((n) => !Object.hasOwn(BOT_SKINS, n));
+// Classic: the shapes of no themed set (not the balls, planets, fruit or blobs).
+const themedShapes = new Set(Object.values(BOT_STYLES).flatMap((s) => s.shapes ?? []));
+const styleShapes = () => BOT_STYLES[botStyle]?.shapes ?? Object.keys(BOT_SHAPES).filter((n) => !Object.hasOwn(BOT_SKINS, n) && !themedShapes.has(n));
 const keyHash = (key) => {
   let hash = 7;
   for (const ch of String(key)) hash = (hash * 33 + ch.charCodeAt(0)) >>> 0;

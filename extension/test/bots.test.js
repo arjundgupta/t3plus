@@ -13,7 +13,7 @@ import {
   parseRowStatus,
   resolveBotPresentation,
 } from "../src/bots.js";
-import { BOT_COLORS, BOT_SHAPES, BOT_SKINS, DEFAULT_BOT_MARKER, STORAGE_KEYS, T3PLUS } from "../src/config.js";
+import { BOT_COLORS, BOT_SHAPES, BOT_SKINS, BOT_STYLES as STYLES, DEFAULT_BOT_MARKER, STORAGE_KEYS, T3PLUS } from "../src/config.js";
 import { BOT_FEED_ENDPOINT } from "../src/hosts.js";
 import { findSidebarInner, scanSidebar } from "../src/sidebar.js";
 import {
@@ -102,7 +102,7 @@ test("bot prefs are a shape and a color from fixed lists; unknown values fall ba
 
 test("every color is a fixed three-stop ordered-dither gradient with white pixel eyes", () => {
   for (const [name, color] of Object.entries(BOT_COLORS)) {
-    for (const shape of Object.keys(BOT_SHAPES).filter((s) => !Object.hasOwn(BOT_SKINS, s))) {
+    for (const shape of Object.keys(BOT_SHAPES).filter((s) => !Object.hasOwn(BOT_SKINS, s) && !STYLES.blobs.shapes.includes(s))) {
       const svg = decodeURIComponent(botFillUrl(name, shape).slice('url("data:image/svg+xml,'.length, -2));
       const fills = [...svg.matchAll(/fill="(#[0-9a-f]{6})"/g)].map((m) => m[1]);
       assert.deepEqual(fills, [...color.stops, "#ffffff"], `${name}/${shape}: three stops, then the eyes`);
@@ -123,7 +123,8 @@ test("Saturn's sky stays see-through: nothing is painted behind it, so it is no 
   assert.equal(resolveBotPresentation({ key: "k:1", titleLabel: "Ring" }, { shape: "saturn" }).edge, "transparent");
   const shapesWithSky = Object.keys(BOT_SHAPES).filter((shape) => [...skinMarks(shape).values()].includes("t"));
   assert.deepEqual(shapesWithSky, ["saturn"]);
-  for (const shape of Object.keys(BOT_SHAPES).filter((s) => s !== "saturn")) assert.notEqual(botEdgeColor("blue", shape), "transparent", shape);
+  // (and the blobs, which keep to their own outline)
+  for (const shape of Object.keys(BOT_SHAPES).filter((s) => s !== "saturn" && !STYLES.blobs.shapes.includes(s))) assert.notEqual(botEdgeColor("blue", shape), "transparent", shape);
   // Its square clip is what lets the ring reach the tile's edges.
   assert.equal(BOT_SHAPES.saturn, "inset(0)");
 });
@@ -360,7 +361,7 @@ test("app: bot rows show the feed preview, and Settings edits shape and color", 
   assert.equal(editor.querySelectorAll("input, select").length, 0, "no free text, color picker or upload");
   assert.equal(editor.querySelector('[data-field="shape"]').getAttribute("aria-label"), "Classic shapes for Orchestrator", "named for the bot, not its thread id");
   assert.equal(editor.querySelector(".t3plus-bot-message").textContent, "Nightly run done.", "its latest message tells same-named bots apart");
-  assert.deepEqual([...editor.querySelectorAll(".t3plus-bot-set-label")].map((l) => l.textContent), ["Classic", "Sports", "Space", "Fruit", "Color"], "shapes in their sets");
+  assert.deepEqual([...editor.querySelectorAll(".t3plus-bot-set-label")].map((l) => l.textContent), ["Classic", "Sports", "Space", "Fruit", "Blobs", "Color"], "shapes in their sets");
   const shapeButtons = editor.querySelectorAll('[data-field="shape"] button');
   const colorButtons = editor.querySelectorAll('[data-field="color"] button');
   assert.equal(shapeButtons.length, Object.keys(BOT_SHAPES).length, "every shape, once");
@@ -804,4 +805,32 @@ test("glow tones: a white, grey or black accent stays grey (not red); a light pa
   const light = glowTones(blue, "bayer", true).slice(1).map(([c]) => lum(c));
   assert.ok(dark[0] < dark[3], "dark page: deep edge, bright core");
   assert.ok(light[0] > light[2] && light[0] > 200, "light page: the edge is a pale tint, near the page");
+});
+
+test("blobs: a flat fill in the bot's color and black capsule eyes, a frame per mood, nothing behind them", async () => {
+  const { botArt } = await import("../src/botArt.js");
+  const svgOf = (art) => decodeURIComponent(art.url.slice('url("data:image/svg+xml,'.length, -2));
+  for (const shape of STYLES.blobs.shapes) {
+    assert.equal(BOT_SHAPES[shape], "inset(0)", `${shape}: unclipped`);
+    assert.equal(botEdgeColor("blue", shape), "transparent", `${shape}: no square behind it`);
+    const svg = svgOf(botArt("purple", shape, "awake"));
+    assert.ok(svg.includes(`fill="${BOT_COLORS.purple.stops[1]}"`), `${shape}: the color's middle stop`);
+    assert.equal((svg.match(/<rect /g) ?? []).length, 1, `${shape}: one capsule eye, drawn once`);
+    assert.equal((svg.match(/<use href="#e"/g) ?? []).length, 2 * botArt("purple", shape, "awake").frames, `${shape}: two eyes a frame`);
+    assert.ok(!svg.includes("crispEdges"), "vector, not pixels");
+    // Every mood is a loop at 12 frames a second (the eyes glance, blink, the body breathes).
+    for (const [mood, seconds] of [["awake", 6], ["idle", 7.5], ["waiting", 6], ["done", 4.8], ["failed", 6], ["working", 2], ["attention", 1.5]]) {
+      const art = botArt("purple", shape, mood);
+      assert.equal(art.duration, seconds, `${shape}/${mood}`);
+      assert.equal(art.frames, Math.round(seconds * 12), `${shape}/${mood}`);
+    }
+  }
+  // Not every frame alike: the eyes move.
+  const frameTransforms = svgOf(botArt("blue", "drop", "awake")).match(/<use href="#e" transform="[^"]+"/g);
+  assert.ok(new Set(frameTransforms).size > 20, "the eyes move between frames");
+  // Two blobs of one shape but different colors start their loops at different frames.
+  const first = (c) => svgOf(botArt(c, "drop", "awake")).match(/<use href="#e" transform="[^"]+"/)[0];
+  assert.ok(["pink", "green", "orange", "red"].some((c) => first(c) !== first("blue")), "not all in step");
+  assert.notEqual(botArt("blue", "drop", "done").url, botArt("blue", "drop", "awake").url, "the mood shows");
+  assert.notEqual(botArt("blue", "drop").url, botArt("pink", "drop").url, "the color shows");
 });

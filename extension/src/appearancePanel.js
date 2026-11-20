@@ -287,7 +287,7 @@ export function createAppearancePanel(doc, actions, { desktop = false, version =
     row({ title: "Bot rows", description: "Bots get a face, their name, their latest message, and mini robots while they run subagents.", control: botsToggle }),
     row({ title: "Every thread is a bot", description: `On: every thread is a bot. Off: only threads whose title starts with ${DEFAULT_BOT_MARKER}.`, control: botsDefaultToggle }),
     row({ title: "Profiles", description: "Dots at the bottom of the sidebar, like Dia's profiles: each shows its own projects. Swipe sideways with two fingers on the sidebar, click a dot, or press Ctrl+Shift+1–9 to switch; drag a project folder onto a profile to move it; right-click a dot to rename or delete it.", control: profilesToggle }),
-    row({ title: "Bot style", description: "What bots look like when you have not picked a shape for one: Classic shapes in the project's color, or Sports balls, Space planets, or Fruit.", control: botStyleGroup }),
+    row({ title: "Bot style", description: "What bots look like when you have not picked a shape for one: Classic shapes in the project's color, Sports balls, Space planets, Fruit, or Blobs (soft shapes with two eyes).", control: botStyleGroup }),
     row({
       title: "Screenshot mode",
       description:

@@ -9,6 +9,12 @@ import { STORAGE_KEYS, T3PLUS } from "./config.js";
 
 export const WHATS_NEW = Object.freeze([
   {
+    version: "0.22.3",
+    notes: [
+      ["Blobs", "a new bot style: soft, solid blobs in the bot's color with two black capsule eyes. They're always gently alive: the eyes glance around and blink, the body breathes, and the mood shows (quick glances while working, a hop when it needs you, a smile when done). Pick it in Bot style, or one blob per bot."],
+    ],
+  },
+  {
     version: "0.22.2",
     date: "2026-11-20",
     notes: [
