@@ -1,5 +1,6 @@
 import { STORAGE_KEYS, T3PLUS, T3_SELECTORS } from "./config.js";
 import { findSidebarInner, threadKeyFromPath } from "./sidebar.js";
+import { PROFILE_ICONS, profileIconSvg } from "./profileIcons.js";
 
 // Profiles, like Dia's (or Arc's spaces): each one shows a set of the sidebar's
 // project folders. A row of small dots at the bottom of the sidebar says which
@@ -16,7 +17,7 @@ import { findSidebarInner, threadKeyFromPath } from "./sidebar.js";
 // last open in it (else its most recent one), and opening a thread that belongs to
 // another profile (⌘K, a link, search) switches to that profile.
 //
-// Stored (STORAGE_KEYS.profiles): { active, list: [{ id, name, color }], projects: { projectKey: profileId },
+// Stored (STORAGE_KEYS.profiles): { active, list: [{ id, name, color, sky, dither, icon? }], projects: { projectKey: profileId },
 // last?: { profileId: threadKey }, adopted? }.
 // The projects there when profiles started keeping track belong to the first
 // profile; one added later joins the profile that was open (placeNew).
@@ -44,6 +45,38 @@ export const PROFILE_COLORS = Object.freeze({
   teal: "#14b8a6",
 });
 const COLOR_ORDER = ["default", "blue", "purple", "green", "orange", "pink", "teal", "yellow", "red"];
+// A profile's three colors (its dot, the sidebar's sky, the dither glow) are each one of
+// PROFILE_COLORS' names, or a custom "#rrggbb" made in Settings → t3+.
+const HEX_COLOR = /^#[0-9a-f]{6}$/i;
+const isColorValue = (v) => typeof v === "string" && (Object.hasOwn(PROFILE_COLORS, v) || HEX_COLOR.test(v));
+const colorOf = (v, fallback) => (isColorValue(v) ? v.toLowerCase() : fallback);
+export const PROFILE_COLOR_FIELDS = Object.freeze(["color", "sky", "dither"]);
+
+/** A stored color as "#rrggbb" (null for "default"). */
+export function profileHex(value) {
+  if (typeof value !== "string") return null;
+  if (Object.hasOwn(PROFILE_COLORS, value)) return PROFILE_COLORS[value];
+  return HEX_COLOR.test(value) ? value.toLowerCase() : null;
+}
+
+/** The OKLCH hue (degrees) of a "#rrggbb". */
+export function oklchHue(hex) {
+  const lin = (c) => (c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4);
+  const [r, g, b] = [1, 3, 5].map((i) => lin(Number.parseInt(hex.slice(i, i + 2), 16) / 255));
+  const l = Math.cbrt(0.4122214708 * r + 0.5363325363 * g + 0.0514459929 * b);
+  const m = Math.cbrt(0.2119034982 * r + 0.6806995451 * g + 0.1073969566 * b);
+  const s = Math.cbrt(0.0883024619 * r + 0.2817188376 * g + 0.6299787005 * b);
+  const a = 1.9779984951 * l - 2.428592205 * m + 0.4505937099 * s;
+  const bb = 0.0259040371 * l + 0.7827717662 * m - 0.808675766 * s;
+  return ((Math.atan2(bb, a) * 180) / Math.PI + 360) % 360;
+}
+
+/** The turn (degrees, the short way round) from a sky of hue `base` to the color `value`; null for default. */
+export function skyTurn(value, base) {
+  const hex = profileHex(value);
+  if (!hex) return null;
+  return ((((oklchHue(hex) - base) % 360) + 540) % 360) - 180;
+}
 
 export function normalizeProfiles(raw) {
   const value = raw && typeof raw === "object" ? raw : {};
@@ -53,9 +86,14 @@ export function normalizeProfiles(raw) {
     .map((p, i) => ({
       id: p.id,
       name: String(p.name ?? "").replace(/\s+/g, " ").trim().slice(0, 32) || "Profile",
-      color: Object.hasOwn(PROFILE_COLORS, p.color ?? "") ? p.color : COLOR_ORDER[i % COLOR_ORDER.length],
+      color: colorOf(p.color, COLOR_ORDER[i % COLOR_ORDER.length]),
+      // The sidebar's sky and the dither glow, each picked on its own (the same
+      // choices); default: T3's sky, and the glow color set in Settings → t3+.
+      sky: colorOf(p.sky, "default"),
+      dither: colorOf(p.dither, "default"),
+      ...(Object.hasOwn(PROFILE_ICONS, p.icon ?? "") ? { icon: p.icon } : {}),
     }));
-  if (!list.length) list.push({ id: "main", name: "Main", color: "default" });
+  if (!list.length) list.push({ id: "main", name: "Main", color: "default", sky: "default", dither: "default" });
   const ids = new Set(list.map((p) => p.id));
   const projects = {};
   // First-profile entries are kept too: a project in the map is one t3+ has placed,
@@ -88,7 +126,7 @@ function ageMinutes(text) {
   return Number(m[1]) * { s: 1 / 60, m: 1, h: 60, d: 1440, w: 10080, mo: 43200, y: 525600 }[m[2]];
 }
 
-export function createProfiles({ win, doc, area, changedEvent, isEnabled = () => true, isDemo = () => false }) {
+export function createProfiles({ win, doc, area, changedEvent, isEnabled = () => true, isDemo = () => false, onLook = null }) {
   // Screenshot mode: profile names are the user's own words ("Acme work"), so the
   // dots, chips and name pill say "Profile 1", "Profile 2". The rename field,
   // opened on purpose, keeps the real name.
@@ -98,26 +136,47 @@ export function createProfiles({ win, doc, area, changedEvent, isEnabled = () =>
   let running = false; // between start() and stop(): a load that lands after stop() changes nothing
   const key = STORAGE_KEYS.profiles;
 
+  // Storage changes seen so far: a load that read before one of them is stale.
+  let changes = 0;
   async function load() {
+    const seen = changes;
     const stored = (await area.get(key))?.[key];
     if (!running) return;
-    state = normalizeProfiles(stored);
+    if (changes === seen) state = normalizeProfiles(stored); // else onChanged has the newer one
     loaded = true;
     sync();
   }
   let saving = Promise.resolve();
+  // This window's writes not yet seen coming back (their JSON). Its own echo is not news
+  // from another window: taken as such, an older write's echo undid a newer save, which
+  // the queued write then lost for good.
+  const echoes = [];
+  function write() {
+    const value = state;
+    const json = JSON.stringify(value);
+    echoes.push(json);
+    if (echoes.length > 20) echoes.shift();
+    return area.set({ [key]: value });
+  }
   function save(next) {
     state = normalizeProfiles(next);
     sync();
-    saving = saving.catch(() => {}).then(() => area.set({ [key]: state }));
+    saving = saving.catch(() => {}).then(write);
     return saving;
   }
-  const onChanged = (changes, areaName) => {
+  const onChanged = (changes_, areaName) => {
     if (!running || (areaName && areaName !== "local")) return;
-    if (!changes?.[key]) return;
-    const next = normalizeProfiles(changes[key].newValue);
-    // This window's own save coming back: nothing to redo.
-    if (JSON.stringify(next) === JSON.stringify(state)) return;
+    if (!changes_?.[key]) return;
+    changes += 1;
+    const next = normalizeProfiles(changes_[key].newValue);
+    const json = JSON.stringify(next);
+    // This window's own save coming back (the latest, or an older one): nothing to redo.
+    const own = echoes.indexOf(json);
+    if (own >= 0) {
+      echoes.splice(0, own + 1);
+      return;
+    }
+    if (json === JSON.stringify(state)) return;
     // Mid-switch, the thread just noted for the profile being left is not saved yet: kept.
     state = slide ? normalizeProfiles({ ...next, last: { ...(next.last ?? {}), ...(state.last ?? {}) } }) : next;
     sync();
@@ -147,6 +206,7 @@ export function createProfiles({ win, doc, area, changedEvent, isEnabled = () =>
     const signature = JSON.stringify([state.list, dragging ? 1 : 0, isDemo()]);
     // While a switch slides in, its dot is the open one already.
     const shown = slide?.committed ? slide.id : state.active;
+    flashName(shown);
     if (signature === dotsSignature) {
       // Only the open profile changed: the dots stay (a rebuild dropped keyboard focus).
       for (const dot of dots.querySelectorAll(".t3plus-profile-dot:not(.t3plus-profile-add)")) {
@@ -171,10 +231,11 @@ export function createProfiles({ win, doc, area, changedEvent, isEnabled = () =>
       dot.setAttribute("aria-keyshortcuts", i < 9 ? `Control+Shift+${i + 1}` : "");
       dot.title = i < 9 ? `${name}  ⌃⇧${i + 1}` : name;
       dot.dataset.profile = p.id;
-      if (PROFILE_COLORS[p.color]) dot.style.setProperty("--t3plus-profile-color", PROFILE_COLORS[p.color]);
+      if (profileHex(p.color)) dot.style.setProperty("--t3plus-profile-color", profileHex(p.color));
       const label = doc.createElement("span");
       label.className = "t3plus-profile-chip";
       label.textContent = name;
+      if (p.icon) label.insertAdjacentHTML("afterbegin", profileIconSvg(p.icon, 11));
       dot.append(label);
       dots.append(dot);
     }
@@ -195,14 +256,100 @@ export function createProfiles({ win, doc, area, changedEvent, isEnabled = () =>
     }
   }
 
-  let nameTimer = null;
+  // The open profile's name, always beside the dots, in its color (announced when it
+  // changes). T3's sky at the top of the sidebar takes the profile's sky color.
   function flashName(id = state.active) {
     const i = state.list.findIndex((p) => p.id === id);
     if (i < 0) return;
-    name.textContent = shownName(state.list[i], i);
-    name.setAttribute("data-show", "");
-    win.clearTimeout(nameTimer);
-    nameTimer = win.setTimeout(() => name.removeAttribute("data-show"), 900);
+    const p = state.list[i];
+    const text = shownName(p, i);
+    const shownKey = `${p.icon ?? ""}|${text}`;
+    if (name.dataset.shown !== shownKey) {
+      name.dataset.shown = shownKey;
+      const label = doc.createElement("span");
+      label.className = "t3plus-profiles-name-text";
+      label.textContent = text;
+      name.replaceChildren(label);
+      if (p.icon) name.insertAdjacentHTML("afterbegin", profileIconSvg(p.icon, 11));
+    }
+    const color = profileHex(p.color) ?? "";
+    if (name.style.getPropertyValue("--t3plus-profile-color") !== color) {
+      if (color) name.style.setProperty("--t3plus-profile-color", color);
+      else name.style.removeProperty("--t3plus-profile-color");
+    }
+    tintSky(p.sky);
+    setLook(profileHex(p.dither));
+  }
+  // The dither glow's color, when the open profile has one (else the one in Settings).
+  let look = null;
+  function setLook(hex) {
+    if (hex === look) return;
+    look = hex;
+    onLook?.(hex);
+  }
+  /** T3's night art at the top of the sidebar, when this T3 shows it (nightly builds). */
+  const nightSky = () => doc.querySelector('.sidebar-stage-backdrop svg[data-stage-art="nightly"]');
+  /** The hue of the theme's own sky (its middle color), read from T3's CSS. */
+  // Some themes mix it (color-mix(in oklch, the art's color 38%, the sky's)): the resolved
+  // color is read from a probe, once per theme.
+  let skyProbe = null;
+  let skyBaseKey = "";
+  let skyBaseHue = 278;
+  function skyBase() {
+    const root = doc.documentElement;
+    const stamp = `${root.className}|${root.getAttribute("data-theme") ?? ""}|${root.getAttribute("data-theme-id") ?? ""}|${root.getAttribute("style") ?? ""}`;
+    if (stamp === skyBaseKey) return skyBaseHue;
+    // From the art's container: on the art itself t3+ has turned the colors already.
+    const host = nightSky()?.closest(".sidebar-stage-backdrop");
+    if (!host) return skyBaseHue;
+    if (!skyProbe) {
+      skyProbe = doc.createElement("span");
+      skyProbe.setAttribute(T3PLUS.ownedAttr, "");
+      skyProbe.setAttribute("aria-hidden", "true");
+      skyProbe.style.cssText = "position:absolute;width:0;height:0;overflow:hidden;color:var(--stage-night-mid)";
+    }
+    host.parentElement?.append(skyProbe);
+    const color = win.getComputedStyle(skyProbe).color;
+    skyProbe.remove();
+    const m = /oklch\(\s*[\d.]+%?\s+[\d.]+\s+([\d.]+)/i.exec(color);
+    const hue = m ? Number.parseFloat(m[1]) : /^#[0-9a-f]{6}$/i.test(color) ? oklchHue(color) : rgbHue(color);
+    if (Number.isFinite(hue)) {
+      skyBaseKey = stamp;
+      skyBaseHue = hue;
+    }
+    return skyBaseHue;
+  }
+  /** The OKLCH hue of "rgb(r, g, b)" (how some colors come back computed). */
+  function rgbHue(color) {
+    const m = /rgba?\(\s*([\d.]+)[,\s]+([\d.]+)[,\s]+([\d.]+)/i.exec(color ?? "");
+    if (!m) return Number.NaN;
+    return oklchHue(`#${[m[1], m[2], m[3]].map((v) => Math.round(Number(v)).toString(16).padStart(2, "0")).join("")}`);
+  }
+  let skyApplied = "";
+  const skyTint = Boolean(win.CSS?.supports?.("color", "oklch(from red l c h)"));
+  function tintSky(color) {
+    const root = doc.documentElement;
+    if (color === null || !skyTint) {
+      if (!skyApplied) return;
+      skyApplied = "";
+      root.removeAttribute("data-t3plus-sky");
+      root.removeAttribute("data-t3plus-sky-ready");
+      for (const prop of ["--t3plus-sky-turn", "--t3plus-sky-mix"]) root.style.removeProperty(prop);
+      return;
+    }
+    // The turn from the theme's sky to the profile's sky color, the short way round.
+    const t = profileHex(color) ? skyTurn(color, skyBase()) : null; // default: nothing to measure
+    const turn = t ?? 0;
+    const mix = t === null ? "0" : "1"; // default: T3's sky (a switch to it glides back too)
+    const key = `${turn.toFixed(1)}|${mix}`;
+    if (key === skyApplied) return; // checked on every DOM check: written only on a change
+    const first = !skyApplied;
+    skyApplied = key;
+    root.setAttribute("data-t3plus-sky", "");
+    if (t !== null) root.style.setProperty("--t3plus-sky-turn", turn.toFixed(1));
+    root.style.setProperty("--t3plus-sky-mix", mix);
+    // Glides between profiles, not in from T3's sky on every load.
+    if (first) win.requestAnimationFrame?.(() => skyApplied && root.setAttribute("data-t3plus-sky-ready", ""));
   }
 
   function nextColor(list) {
@@ -234,6 +381,10 @@ export function createProfiles({ win, doc, area, changedEvent, isEnabled = () =>
     // A switch still sliding lands first. Its thread is not opened when another switch
     // takes its place (T3 would draw a thread nobody sees); the new one opens its own.
     const pending = slide?.committed && slide.navPending ? slide.id : null;
+    if (pending && pending === id) {
+      landNow(); // its own thread, with its fade
+      return;
+    }
     if (slide) landNow({ navigate: false });
     if (id === state.active || !state.list.some((p) => p.id === id)) {
       if (pending) openThreadOf(pending);
@@ -308,8 +459,8 @@ export function createProfiles({ win, doc, area, changedEvent, isEnabled = () =>
     }
     return best?.thread ?? null;
   }
-  /** Opens the thread profile `id` should show, if it is not open already. */
-  function openThreadOf(id) {
+  /** The thread profile `id` should show, when it is not the one open already (else null). */
+  function threadFor(id) {
     const inner = sidebarInner();
     let target = state.last?.[id] ?? null;
     if (target) {
@@ -320,13 +471,20 @@ export function createProfiles({ win, doc, area, changedEvent, isEnabled = () =>
       if ((owner !== null && owner !== id) || (!rowOf(inner, target) && folderOpen)) target = null;
     }
     target ??= recentThreadOf(id);
-    if (!target || !onThreadPage()) return;
+    if (!target || !onThreadPage()) return null;
     const pending = opening && Date.now() - opening.at < 1500 ? opening.thread : null;
-    if (target === (pending ?? currentThread())) return;
-    navigate(target);
+    return target === (pending ?? currentThread()) ? null : target;
   }
-  function navigate(thread) {
+  /** Opens the thread profile `id` should show, if it is not open already; `fade` is the
+   *  chat's fade-out started with the slide (shown again if there is nothing to open). */
+  function openThreadOf(id, fade = null) {
+    const target = threadFor(id);
+    if (target) navigate(target, fade);
+    else fade?.show();
+  }
+  function navigate(thread, fade = null) {
     opening = { thread, at: Date.now() };
+    fade?.arm();
     const row = rowOf(sidebarInner(), thread);
     if (row && !row.closest("[inert]")) {
       row.click(); // T3's own navigation, as if clicked
@@ -340,6 +498,76 @@ export function createProfiles({ win, doc, area, changedEvent, isEnabled = () =>
       win.history.pushState(win.history.state, "", path);
       win.dispatchEvent(new win.PopStateEvent("popstate", { state: win.history.state }));
     }
+  }
+  // The thread swaps smoothly too: the chat fades out with the slide, T3 draws the
+  // profile's thread while it is hidden (asked for once the fade runs on the
+  // compositor, so a frame of it at full strength never shows), and it fades in once
+  // drawn. Opacity only: a move would throw off where t3+ measures the composer to be.
+  let threadFade = null;
+  function fadeOut() {
+    // The main conversation's message list: the composer stays (a faded parent would
+    // stop its glass blurring the glow behind it).
+    const canvas = doc.querySelector(`${T3_SELECTORS.conversationArea} ${T3_SELECTORS.messageList}`) ?? doc.querySelector(T3_SELECTORS.messageList);
+    if (!canvas?.animate || reducedMotion() || !win.requestAnimationFrame) return null;
+    // Taking over one still fading: from where it is.
+    const now = Number.parseFloat(win.getComputedStyle(canvas).opacity);
+    const from = Number.isFinite(now) ? now : 1;
+    threadFade?.cancel();
+    const out = canvas.animate([{ opacity: from }, { opacity: 0 }], { duration: Math.round(90 * from), easing: "cubic-bezier(0.4, 0, 1, 1)", fill: "forwards" });
+    let frame = 0;
+    let seen = null;
+    let inn = null;
+    const fade = {
+      out,
+      armed: false,
+      /** T3 is asked for the thread now: shown again a frame after it has drawn it (or after a second). */
+      arm() {
+        if (threadFade !== fade || fade.armed) return;
+        fade.armed = true;
+        const before = win.location.href;
+        const started = win.performance.now();
+        // Drawn: the old thread's rows have gone (more of its output streaming in is not
+        // the new thread), or, from an empty list, rows came after the address changed.
+        const rowSel = "[data-timeline-row-id]";
+        const old = [...canvas.querySelectorAll(rowSel)];
+        let drawn = false;
+        seen = new win.MutationObserver(() => {
+          if (win.location.href === before) return;
+          drawn = old.length ? old.every((row) => !row.isConnected) : canvas.querySelector(rowSel) !== null;
+        });
+        seen.observe(canvas, { childList: true, subtree: true });
+        const wait = () => {
+          if (threadFade !== fade) return;
+          if (!drawn && win.performance.now() - started < 1000) frame = win.requestAnimationFrame(wait);
+          else fade.show();
+        };
+        frame = win.requestAnimationFrame(wait);
+      },
+      /** Back in (the thread is drawn, or there was none to open). */
+      show() {
+        if (threadFade !== fade || inn) return;
+        seen?.disconnect();
+        win.cancelAnimationFrame(frame);
+        frame = win.requestAnimationFrame(() => {
+          if (threadFade !== fade) return;
+          const at = Number.parseFloat(win.getComputedStyle(canvas).opacity);
+          inn = canvas.animate([{ opacity: Number.isFinite(at) ? at : 0 }, { opacity: 1 }], { duration: 200, easing: "cubic-bezier(0, 0, 0.2, 1)" });
+          out.cancel();
+          inn.onfinish = () => {
+            if (threadFade === fade) threadFade = null;
+          };
+        });
+      },
+      cancel() {
+        win.cancelAnimationFrame(frame);
+        seen?.disconnect();
+        out.cancel();
+        inn?.cancel();
+        if (threadFade === fade) threadFade = null;
+      },
+    };
+    threadFade = fade;
+    return fade;
   }
   // A thread opened from anywhere (⌘K, a link, search, the sidebar): remembered for
   // its profile, and when it belongs to another profile, that profile opens.
@@ -375,7 +603,7 @@ export function createProfiles({ win, doc, area, changedEvent, isEnabled = () =>
     persistTimer = win.setTimeout(() => {
       persistTimer = null;
       if (!running) return;
-      saving = saving.catch(() => {}).then(() => area.set({ [key]: state }));
+      saving = saving.catch(() => {}).then(write);
     }, 400);
   }
 
@@ -426,7 +654,7 @@ export function createProfiles({ win, doc, area, changedEvent, isEnabled = () =>
     scrollTops.set(state.active, scroller?.scrollTop ?? 0);
     const s = {
       id: null, dir, ul, group, scroller, ghost: null, anims: [], timer: null,
-      phase: "drag", committed: false, navPending: false, open: false, apply: null, pairs: [], copies: new Map(),
+      phase: "drag", committed: false, navPending: false, open: false, apply: null, pairs: [], copies: new Map(), fade: null,
       left: box.left - outer.left - group.clientLeft, top: box.top - outer.top - group.clientTop,
       width: box.width, height: ul.offsetHeight, distance: Math.round(box.width) + SLIDE_GAP,
       x: 0, y: 0, raw: 0, v: 0, moves: [], position: null,
@@ -568,13 +796,16 @@ export function createProfiles({ win, doc, area, changedEvent, isEnabled = () =>
     s.timer = win.setTimeout(() => land(s), ms + 150);
     if (s.committed && s.open) {
       s.navPending = true;
-      // Once the slide runs on the compositor, T3 may take the main thread to draw the thread.
+      // The chat fades out with it, when there is another thread to open.
+      s.fade = threadFor(s.id) ? fadeOut() : null;
+      // Once the slide (and the fade) run on the compositor, T3 may take the main thread
+      // to draw the thread.
       const go = () => {
         if (!s.navPending) return;
         s.navPending = false;
-        openThreadOf(s.id);
+        openThreadOf(s.id, s.fade);
       };
-      Promise.all(s.anims.map((a) => a.ready)).then(() => win.requestAnimationFrame(() => win.setTimeout(go, 0)), go);
+      Promise.all([...s.anims, ...(s.fade ? [s.fade.out] : [])].map((a) => a.ready)).then(() => win.requestAnimationFrame(() => win.setTimeout(go, 0)), go);
     }
   }
   /** The slide is over: the real list takes the copy's place, in the same frame. */
@@ -602,7 +833,7 @@ export function createProfiles({ win, doc, area, changedEvent, isEnabled = () =>
     // Not asked for yet (a window in the background paints no frames): now.
     if (s.navPending) {
       s.navPending = false;
-      openThreadOf(s.id);
+      openThreadOf(s.id, s.fade);
     }
     // A route that wanted following while it slid (a thread of another profile opened):
     // once whatever landed it (a click, a key, a swipe) has started its own switch.
@@ -635,7 +866,10 @@ export function createProfiles({ win, doc, area, changedEvent, isEnabled = () =>
     const s = slide;
     if (!s) return;
     if (s.phase === "drag") s.committed = false;
-    if (!navigate) s.navPending = false;
+    if (!navigate && s.navPending) {
+      s.navPending = false;
+      s.fade?.show(); // its thread is not opened: the chat back (or the next switch's fade takes over)
+    }
     land(s);
   }
 
@@ -703,34 +937,117 @@ export function createProfiles({ win, doc, area, changedEvent, isEnabled = () =>
       closeEditor();
       if (wasActive) openThreadOf(list[0].id);
     });
+    // Arrow keys move (and pick) within a row of choices; one Tab stop each.
+    const roving = (group, selector) => {
+      group.addEventListener("keydown", (e) => {
+        const step = { ArrowLeft: -1, ArrowUp: -1, ArrowRight: 1, ArrowDown: 1 }[e.key];
+        if (!step) return;
+        e.preventDefault();
+        const all = [...group.querySelectorAll(selector)];
+        const next = all[(all.indexOf(doc.activeElement) + step + all.length) % all.length];
+        next.focus();
+        next.click();
+      });
+    };
+    const keepFocus = (el) => el.addEventListener("pointerdown", (e) => e.preventDefault()); // the name field keeps it
+    const pick = (group, chosen) => {
+      for (const el of group.querySelectorAll("[role=radio]")) {
+        el.setAttribute("aria-checked", String(el === chosen));
+        el.tabIndex = el === chosen ? 0 : -1;
+      }
+      if (!group.contains(doc.activeElement)) input.focus();
+    };
+    const change = (patch) => {
+      Object.assign(profile, patch);
+      save({ ...state, list: state.list.map((p) => (p.id === id ? { ...p, ...patch } : p)) });
+    };
+
+    // Its icon, shown before its name.
+    const icons = doc.createElement("div");
+    icons.className = "t3plus-profile-icons";
+    icons.setAttribute("role", "radiogroup");
+    icons.setAttribute("aria-label", "Icon");
+    for (const key of [null, ...Object.keys(PROFILE_ICONS)]) {
+      const b = doc.createElement("button");
+      b.type = "button";
+      b.className = "t3plus-profile-icon-pick";
+      b.setAttribute("role", "radio");
+      b.setAttribute("aria-label", key ? PROFILE_ICONS[key].label : "No icon");
+      b.title = b.getAttribute("aria-label");
+      const on = (profile.icon ?? null) === key;
+      b.setAttribute("aria-checked", String(on));
+      b.tabIndex = on ? 0 : -1;
+      if (key) b.innerHTML = profileIconSvg(key, 13);
+      keepFocus(b);
+      b.addEventListener("click", () => {
+        change({ icon: key });
+        pick(icons, b);
+      });
+      icons.append(b);
+    }
+    roving(icons, "[role=radio]");
+
+    // One row of colors for the dot, the sky or the dither glow (the same choices),
+    // and which of them it colors.
+    const fields = [["color", "Dot"], ...(skyTint && nightSky() ? [["sky", "Sky"]] : []), ["dither", "Dither"]];
+    let field = "color";
+    const tabs = doc.createElement("div");
+    tabs.className = "t3plus-profile-tabs";
+    tabs.setAttribute("role", "group");
+    tabs.setAttribute("aria-label", "Color of");
     const swatches = doc.createElement("div");
     swatches.className = "t3plus-profile-colors";
     swatches.setAttribute("role", "radiogroup");
-    swatches.setAttribute("aria-label", "Dot color");
-    for (const [color, hex] of Object.entries(PROFILE_COLORS)) {
-      const swatch = doc.createElement("button");
-      swatch.type = "button";
-      swatch.className = "t3plus-profile-swatch";
-      swatch.setAttribute("role", "radio");
-      swatch.setAttribute("aria-checked", String(profile.color === color));
-      swatch.setAttribute("aria-label", color === "default" ? "Default" : color[0].toUpperCase() + color.slice(1));
-      swatch.title = swatch.getAttribute("aria-label");
-      if (hex) swatch.style.setProperty("--t3plus-profile-color", hex);
-      // Keep the name field's focus (and its pending rename) while picking a color.
-      swatch.addEventListener("pointerdown", (e) => e.preventDefault());
-      swatch.addEventListener("click", () => {
-        profile.color = color;
-        save({ ...state, list: state.list.map((p) => (p.id === id ? { ...p, color } : p)) });
-        for (const el of swatches.children) el.setAttribute("aria-checked", String(el === swatch));
-        input.focus();
+    roving(swatches, "[role=radio]");
+    const paint = () => {
+      const label = fields.find(([f]) => f === field)[1];
+      for (const t of tabs.children) t.setAttribute("aria-pressed", String(t.dataset.field === field));
+      swatches.dataset.field = field;
+      swatches.setAttribute("aria-label", `${label} color`);
+      swatches.replaceChildren();
+      // As stored now (Settings or another window may have changed it since it opened).
+      const current = (state.list.find((p) => p.id === id) ?? profile)[field] ?? "default";
+      const choices = Object.entries(PROFILE_COLORS);
+      // A custom color (made in Settings → t3+) shows as one more choice, picked.
+      if (HEX_COLOR.test(current)) choices.push([current, current]);
+      for (const [value, hex] of choices) {
+        const swatch = doc.createElement("button");
+        swatch.type = "button";
+        swatch.className = "t3plus-profile-swatch";
+        swatch.setAttribute("role", "radio");
+        const name = value === "default" ? "Default" : HEX_COLOR.test(value) ? "Custom" : value[0].toUpperCase() + value.slice(1);
+        swatch.setAttribute("aria-label", name);
+        swatch.title = value !== "default" ? name : field === "sky" ? "Default (T3's sky)" : field === "dither" ? "Default (the color in Settings → t3+)" : name;
+        swatch.setAttribute("aria-checked", String(current === value));
+        swatch.tabIndex = current === value ? 0 : -1;
+        if (hex) swatch.style.setProperty("--t3plus-profile-color", hex);
+        keepFocus(swatch);
+        swatch.addEventListener("click", () => {
+          change({ [field]: value });
+          pick(swatches, swatch);
+        });
+        swatches.append(swatch);
+      }
+    };
+    for (const [f, label] of fields) {
+      const t = doc.createElement("button");
+      t.type = "button";
+      t.className = "t3plus-profile-tab";
+      t.dataset.field = f;
+      t.textContent = label;
+      keepFocus(t);
+      t.addEventListener("click", () => {
+        field = f;
+        paint();
       });
-      swatches.append(swatch);
+      tabs.append(t);
     }
+    paint();
     const row = doc.createElement("div");
     row.className = "t3plus-profile-editor-row";
     row.append(input);
     if (!isFirst) row.append(remove);
-    editor.append(row, swatches);
+    editor.append(row, icons, tabs, swatches);
     bar.append(editor);
     input.focus();
     input.select();
@@ -1117,14 +1434,19 @@ export function createProfiles({ win, doc, area, changedEvent, isEnabled = () =>
     const footer = inner?.querySelector(T3_SELECTORS.sidebarFooter);
     watchWheel(on ? inner : null);
     if (!on && slide) {
-      // Profiles turned off mid-switch: dropped, the list as it was.
+      // Profiles turned off mid-switch: dropped, the list (and the chat) as they were.
       slide.committed = false;
       slide.navPending = false;
+      slide.fade?.show();
       land(slide);
       gesture = null;
     }
     if (!on || !footer) {
       if (bar.isConnected) bar.remove();
+      if (!on) {
+        tintSky(null);
+        setLook(null);
+      }
       for (const el of doc.querySelectorAll("[data-t3plus-profile-off]")) {
         el.removeAttribute("data-t3plus-profile-off");
         el.removeAttribute("inert");
@@ -1192,12 +1514,11 @@ export function createProfiles({ win, doc, area, changedEvent, isEnabled = () =>
       doc.removeEventListener("keydown", onKeyDown, true);
       doc.removeEventListener("click", onClick, true);
       running = false;
-      win.clearTimeout(nameTimer);
       win.clearTimeout(swipeTimer);
       if (persistTimer !== null) {
         win.clearTimeout(persistTimer);
         persistTimer = null;
-        area.set({ [key]: state }).catch?.(() => {});
+        write()?.catch?.(() => {});
       }
       if (slide) {
         // Stopped mid-switch: dropped (nothing is saved after stop).
@@ -1209,6 +1530,7 @@ export function createProfiles({ win, doc, area, changedEvent, isEnabled = () =>
       gesture = null;
       for (const el of doc.querySelectorAll("[data-t3plus-profile-next]")) el.remove();
       releaseFocus?.();
+      threadFade?.cancel();
       dragging?.ghost.remove();
       dragging = null;
       pending = null;
@@ -1220,5 +1542,20 @@ export function createProfiles({ win, doc, area, changedEvent, isEnabled = () =>
     /** For tests and the settings panel. */
     switchTo,
     save,
+    /** Settings → t3+: a profile's icon or colors (checked as stored values are). */
+    update(id, patch) {
+      // Before the stored profiles have loaded, the one default profile here is not them:
+      // saving it would replace them all.
+      if (!loaded || !state.list.some((p) => p.id === id)) return Promise.resolve();
+      return save({ ...state, list: state.list.map((p) => (p.id === id ? { ...p, ...patch } : p)) });
+    },
+    /** The dither glow's color the open profile sets ("#rrggbb"), or null (the one in Settings). */
+    ditherAccent: () => (running && loaded && isEnabled() ? look : null),
+    /** Whether the stored profiles have loaded (until then Settings shows none). */
+    isLoaded: () => loaded,
+    /** Whether this T3 draws the night sky a profile can color (and the browser can turn it). */
+    hasSky: () => skyTint && Boolean(nightSky()),
+    /** For a preview: the turn that gives the sky the color `value` (null: T3's sky). */
+    skyTurnFor: (value) => (skyTint ? skyTurn(value, skyBase()) : null),
   };
 }

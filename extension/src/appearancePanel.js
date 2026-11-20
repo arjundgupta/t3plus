@@ -1,4 +1,7 @@
 import { botClipPath, botEdgeColor, botFillUrl, botShapeHasOwnColors } from "./botArt.js";
+import { WHATS_NEW, renderNotes } from "./whatsNew.js";
+import { PROFILE_COLORS, profileHex } from "./profiles.js";
+import { PROFILE_ICONS, profileIconSvg } from "./profileIcons.js";
 import { applyAvatarVars, botPaintColor, PROJECT_COLOR, resolveBotPresentation } from "./bots.js";
 import { APPEARANCE_ROUTE, BOT_COLORS, BOT_SHAPES, BOT_STYLES, DEFAULT_BOT_MARKER, IMAGE_LIMITS, T3_SELECTORS, T3PLUS } from "./config.js";
 import { createBuilder, setText, uniqueId as id } from "./dom.js";
@@ -34,7 +37,7 @@ export function ensurePanelMounted(container, panel) {
  *   bots: [{ key, title, titleLabel, prefs: { shape, color }, view, preview }], botMessage,
  * }
  */
-export function createAppearancePanel(doc, actions, { desktop = false } = {}) {
+export function createAppearancePanel(doc, actions, { desktop = false, version = null, whatsNew = false } = {}) {
   // The desktop build keeps everything in T3's own storage on this computer, not a browser's.
   const where = desktop ? "on this computer" : "in this browser";
   const h = createBuilder(doc);
@@ -122,7 +125,9 @@ export function createAppearancePanel(doc, actions, { desktop = false } = {}) {
   colorInput.addEventListener("input", () => actions.previewAccent(colorInput.value));
   colorInput.addEventListener("change", () => actions.setAccent(colorInput.value));
   const themeButton = button("Theme", () => actions.setAccent("theme"));
-  const accentRow = row({ title: "Accent", description: "Color of the glow. Theme follows your T3 theme's primary color.", control: [colorInput, themeButton] });
+  const ACCENT_TEXT = "Color of the glow. Theme follows your T3 theme's primary color.";
+  const accentRow = row({ title: "Accent", description: ACCENT_TEXT, control: [colorInput, themeButton] });
+  const accentDesc = accentRow.querySelector(".t3plus-row-desc");
 
   const ditherSizeName = id("dither-size");
   const ditherSizeInputs = {};
@@ -291,6 +296,19 @@ export function createAppearancePanel(doc, actions, { desktop = false } = {}) {
     }),
     row({ title: "Usage widgets", description: "Pools, activity and usage under the new-thread composer, and the current provider's pool in thread details (Usage limits).", control: homeToggle }),
   ]);
+
+  // What changed in the installed version (the notes of the latest one, in a build
+  // newer than any), and every version in the What's New sheet.
+  const notesEntry = WHATS_NEW.find((e) => e.version === version) ?? WHATS_NEW[0];
+  const whatsNewCard = whatsNew && notesEntry
+    ? h("div", { class: "t3plus-card" }, [
+      row({
+        title: notesEntry.version === "Unreleased" ? "What's new in the next update" : `What's new in ${notesEntry.version}`,
+        control: button("All versions", () => actions.openWhatsNew?.()),
+        extra: renderNotes(doc, { version, entries: [notesEntry], titles: false }),
+      }),
+    ])
+    : null;
 
   const advanced = h("details", { class: "t3plus-advanced" }, [
     h("summary", { class: "t3plus-advanced-summary", text: "Advanced" }),
@@ -462,6 +480,215 @@ export function createAppearancePanel(doc, actions, { desktop = false } = {}) {
     }
   }
 
+  // ---------- Profiles: an icon and three colors each ----------
+  // Pick a profile, then its icon and the colors of its dot, the sidebar's sky and the
+  // dither glow: one of the nine (as in the sidebar), or a color of your own. The
+  // preview shows them together, as you pick (a custom color while you drag it).
+  const PROFILE_FIELDS = [
+    ["color", "Dot", "The dot and the name beside it."],
+    ["sky", "Sky", "The night sky at the top of the sidebar."],
+    ["dither", "Dither", "The dithered glow behind the chat."],
+  ];
+  let profiles = null; // { list, active, sky }
+  let editing = null; // the profile shown
+  let draft = {}; // { field: "#rrggbb" } while a custom color is dragged
+  let profilesSignature = "";
+  let demoNames = false;
+  let globalAccent = "theme";
+  const ppChips = h("div", { class: "t3plus-pp-chips", role: "radiogroup", "aria-label": "Profile" });
+  const ppSky = h("div", { class: "t3plus-pp-sky" });
+  const ppName = h("span", { class: "t3plus-profiles-name t3plus-pp-name" });
+  const ppDots = h("span", { class: "t3plus-pp-dots" });
+  const ppPane = h("div", { class: "t3plus-pp-pane" }, [h("div", { class: "t3plus-pp-card" })]);
+  const ppPreview = h("div", { class: "t3plus-pp", "aria-hidden": "true" }, [
+    h("div", { class: "t3plus-pp-side" }, [
+      ppSky,
+      h("div", { class: "t3plus-pp-rows" }, [h("span"), h("span"), h("span")]),
+      h("div", { class: "t3plus-pp-foot" }, [ppName, ppDots]),
+    ]),
+    ppPane,
+  ]);
+  // Arrow keys move and pick within a row of choices; one Tab stop each.
+  const rovingRow = (group) =>
+    group.addEventListener("keydown", (e) => {
+      const step = { ArrowLeft: -1, ArrowUp: -1, ArrowRight: 1, ArrowDown: 1 }[e.key];
+      if (!step) return;
+      e.preventDefault();
+      const all = [...group.querySelectorAll("[role=radio]")];
+      const next = all[(all.indexOf(doc.activeElement) + step + all.length) % all.length];
+      next.focus();
+      next.click();
+    });
+  const checkIn = (group, isOn) => {
+    for (const el of group.querySelectorAll("[role=radio]")) {
+      const on = isOn(el);
+      if (el.getAttribute("aria-checked") !== String(on)) el.setAttribute("aria-checked", String(on));
+      el.tabIndex = on ? 0 : -1;
+    }
+  };
+  function setProfile(patch) {
+    if (!profiles || !editing) return;
+    profiles = { ...profiles, list: profiles.list.map((p) => (p.id === editing ? { ...p, ...patch } : p)) };
+    paintProfiles();
+    actions.updateProfile?.(editing, patch);
+  }
+  const ppIcons = h("div", { class: "t3plus-pp-icons", role: "radiogroup", "aria-label": "Icon" },
+    [null, ...Object.keys(PROFILE_ICONS)].map((key) => {
+      const b = h("button", { type: "button", class: "t3plus-pp-icon", role: "radio", "data-icon": key ?? "", "aria-label": key ? PROFILE_ICONS[key].label : "No icon", title: key ? PROFILE_ICONS[key].label : "No icon" });
+      if (key) b.innerHTML = profileIconSvg(key, 15);
+      b.addEventListener("click", () => setProfile({ icon: key }));
+      return b;
+    }));
+  rovingRow(ppIcons);
+  const ppRows = {};
+  for (const [field, label, hint] of PROFILE_FIELDS) {
+    const swatches = h("div", { class: "t3plus-pp-swatches", role: "radiogroup", "aria-label": `${label} color`, "data-field": field },
+      Object.entries(PROFILE_COLORS).map(([value, hex]) => {
+        const name = value === "default" ? "Default" : value[0].toUpperCase() + value.slice(1);
+        const title = value !== "default" ? name : field === "sky" ? "Default (T3's sky)" : field === "dither" ? "Default (the glow's color above)" : name;
+        const b = h("button", { type: "button", class: "t3plus-pp-swatch", role: "radio", "data-value": value, "aria-label": name, title });
+        if (hex) b.style.setProperty("--t3plus-profile-color", hex);
+        b.addEventListener("click", () => setProfile({ [field]: value }));
+        return b;
+      }));
+    rovingRow(swatches);
+    // A color of your own: the preview follows while you drag, and it is kept on letting go.
+    const custom = h("input", { type: "color", class: "t3plus-pp-custom", "aria-label": `Custom ${label.toLowerCase()} color`, title: "A color of your own" });
+    custom.addEventListener("input", () => {
+      draft = { ...draft, [field]: custom.value.toLowerCase() };
+      paintProfiles();
+      actions.previewProfile?.();
+    });
+    custom.addEventListener("change", () => {
+      const value = custom.value.toLowerCase();
+      const { [field]: _dropped, ...rest } = draft;
+      draft = rest;
+      setProfile({ [field]: value });
+    });
+    const rowEl = h("div", { class: "t3plus-pp-row", "data-field": field }, [
+      h("div", { class: "t3plus-pp-row-text" }, [h("span", { class: "t3plus-pp-row-title", text: label }), h("span", { class: "t3plus-pp-row-hint", text: hint })]),
+      h("div", { class: "t3plus-pp-row-picks" }, [swatches, custom]),
+    ]);
+    ppRows[field] = { row: rowEl, swatches, custom };
+  }
+  const profilesCard = h("div", { class: "t3plus-card", hidden: "" }, [
+    row({
+      title: "Profiles",
+      description: "Each profile's icon, and the colors of its dot, the sidebar's sky and the dither glow: one of these, or your own (the last button in a row). Right-click a dot in the sidebar for the same.",
+      extra: h("div", { class: "t3plus-pp-body" }, [
+        ppChips,
+        ppPreview,
+        h("div", { class: "t3plus-pp-row", "data-field": "icon" }, [
+          h("div", { class: "t3plus-pp-row-text" }, [h("span", { class: "t3plus-pp-row-title", text: "Icon" }), h("span", { class: "t3plus-pp-row-hint", text: "Before its name, beside the dots." })]),
+          ppIcons,
+        ]),
+        ...PROFILE_FIELDS.map(([field]) => ppRows[field].row),
+      ]),
+    }),
+  ]);
+  rovingRow(ppChips);
+
+  /** The sidebar's night art, copied for the preview (its gradients given ids of their own). */
+  function ensureSkyArt() {
+    if (ppSky.querySelector("svg")) return;
+    const art = doc.querySelector('.sidebar-stage-backdrop svg[data-stage-art="nightly"]');
+    if (!art) return;
+    const copy = art.cloneNode(true);
+    copy.removeAttribute("data-stage-art");
+    const renamed = [];
+    for (const el of copy.querySelectorAll("[id]")) {
+      renamed.push([el.id, `t3plus-pp-${el.id}`]);
+      el.id = `t3plus-pp-${el.id}`;
+    }
+    renamed.sort((a, b) => b[0].length - a[0].length); // the longest first: one id can start another
+    for (const el of [copy, ...copy.querySelectorAll("*")]) {
+      for (const attr of [...el.attributes]) {
+        if (!attr.value.includes("#")) continue;
+        let value = attr.value;
+        for (const [from, to] of renamed) value = value.split(`#${from}`).join(`#${to}`);
+        if (value !== attr.value) el.setAttribute(attr.name, value);
+      }
+    }
+    ppSky.append(copy);
+  }
+
+  function chipFor(p, i) {
+    const chip = h("button", { type: "button", class: "t3plus-pp-chip", role: "radio", "data-profile": p.id });
+    if (p.icon) chip.insertAdjacentHTML("afterbegin", profileIconSvg(p.icon, 12));
+    chip.append(h("span", { text: demoNames ? `Profile ${i + 1}` : p.name }));
+    const hex = profileHex(p.color);
+    if (hex) chip.style.setProperty("--t3plus-profile-color", hex);
+    chip.addEventListener("click", () => {
+      editing = p.id;
+      draft = {};
+      paintProfiles();
+      actions.previewProfile?.();
+    });
+    return chip;
+  }
+
+  function paintProfiles() {
+    if (!profiles) return;
+    const index = profiles.list.findIndex((p) => p.id === editing);
+    const p = profiles.list[index];
+    if (!p) return;
+    const value = (field) => draft[field] ?? p[field] ?? "default";
+    checkIn(ppChips, (el) => el.dataset.profile === editing);
+    checkIn(ppIcons, (el) => el.dataset.icon === (p.icon ?? ""));
+    ppRows.sky.row.hidden = !profiles.sky;
+    for (const [field] of PROFILE_FIELDS) {
+      const v = value(field);
+      const custom = /^#/.test(v);
+      checkIn(ppRows[field].swatches, (el) => !custom && el.dataset.value === v);
+      ppRows[field].custom.toggleAttribute("data-checked", custom);
+      // Seeded with the color shown, so a custom one starts from it.
+      if (doc.activeElement !== ppRows[field].custom) ppRows[field].custom.value = profileHex(v) ?? "#6d7cff";
+    }
+    // The preview: the name and dots, the sky, the glow.
+    const dot = profileHex(value("color"));
+    const nameText = demoNames ? `Profile ${index + 1}` : p.name;
+    ppName.replaceChildren(h("span", { class: "t3plus-profiles-name-text", text: nameText }));
+    if (p.icon) ppName.insertAdjacentHTML("afterbegin", profileIconSvg(p.icon, 11));
+    if (dot) ppName.style.setProperty("--t3plus-profile-color", dot);
+    else ppName.style.removeProperty("--t3plus-profile-color");
+    ppDots.replaceChildren(
+      ...profiles.list.map((q) => {
+        const d = h("span", { class: "t3plus-pp-dot" });
+        const hex = q.id === editing ? dot : profileHex(q.color);
+        if (hex) d.style.setProperty("--t3plus-profile-color", hex);
+        if (q.id === editing) d.setAttribute("data-on", "");
+        return d;
+      }),
+    );
+    ppSky.hidden = !profiles.sky;
+    if (profiles.sky) {
+      ensureSkyArt();
+      const turn = actions.profileSkyTurn?.(value("sky")) ?? null;
+      ppSky.toggleAttribute("data-tint", turn !== null);
+      ppSky.style.setProperty("--t3plus-sky-turn", (turn ?? 0).toFixed(1));
+      ppSky.style.setProperty("--t3plus-sky-mix", turn === null ? "0" : "1");
+    }
+    const dither = profileHex(value("dither"));
+    ppPane.style.setProperty("--t3plus-accent", dither ?? (globalAccent === "theme" ? "var(--primary, #6d7cff)" : globalAccent));
+  }
+
+  function updateProfiles(next, demo) {
+    profiles = next;
+    profilesCard.hidden = !next;
+    if (!next) return;
+    if (!next.list.some((p) => p.id === editing)) editing = next.active;
+    const signature = JSON.stringify([next.list.map((p) => [p.id, p.name, p.icon ?? null, p.color]), demo]);
+    if (signature !== profilesSignature || demo !== demoNames) {
+      profilesSignature = signature;
+      demoNames = demo;
+      // Rebuilt (a name, an icon or a color changed): the focus stays on its chip.
+      const focused = ppChips.contains(doc.activeElement) ? doc.activeElement.dataset.profile : null;
+      ppChips.replaceChildren(...next.list.map((p, i) => chipFor(p, i)));
+      if (focused) ppChips.querySelector(`[data-profile="${focused}"]`)?.focus();
+    }
+    paintProfiles();
+  }
+
   const titleId = id("title");
   const section = h("section", { id: T3PLUS.panelId, class: "t3plus-section", "aria-labelledby": titleId }, [
     h("div", { class: "t3plus-section-header" }, [
@@ -471,6 +698,8 @@ export function createAppearancePanel(doc, actions, { desktop = false } = {}) {
     h("h3", { class: "t3plus-subsection-title", text: "Features" }),
     featuresCard,
     botsCard,
+    profilesCard,
+    whatsNewCard,
     advanced,
   ]);
 
@@ -481,6 +710,10 @@ export function createAppearancePanel(doc, actions, { desktop = false } = {}) {
     for (const [value, input] of Object.entries(modeInputs)) input.checked = g.mode === value;
     imageRow.hidden = g.mode !== "image";
     accentRow.hidden = g.mode === "image";
+    globalAccent = g.accent;
+    // The open profile may have its own dither color: then that one shows, not this.
+    setText(accentDesc, state.ditherAccent ? `${ACCENT_TEXT} The open profile has its own dither color (Profiles, below).` : ACCENT_TEXT);
+    updateProfiles(state.profiles ?? null, Boolean(settings.demo?.enabled));
 
     const usingUpload = g.imageSource === "upload" && image;
     thumb.style.backgroundImage = imageUrl ? `url("${imageUrl.replace(/"/g, '\\"')}")` : "";
@@ -538,6 +771,12 @@ export function createAppearancePanel(doc, actions, { desktop = false } = {}) {
   return {
     element: section,
     update,
+    /** The dither color the Profiles preview shows ("#rrggbb"), or null for the glow's own. */
+    profilePreviewAccent: () => {
+      if (!profiles || profilesCard.hidden) return null;
+      const p = profiles.list.find((q) => q.id === editing);
+      return profileHex(draft.dither ?? p?.dither ?? "default");
+    },
     /** Closes the open bot's picker (leaving Settings: it opens closed next time). */
     closeBotEditor: () => openBot !== null && setOpenBot(null),
   };

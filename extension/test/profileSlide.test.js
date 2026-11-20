@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { after, test } from "node:test";
-import { createProfiles } from "../src/profiles.js";
+import { createProfiles, normalizeProfiles } from "../src/profiles.js";
 import { clearBotDecoration } from "../src/bots.js";
 import { STORAGE_KEYS } from "../src/config.js";
 import { createDom, createFakeChromeStorage, settle } from "./helpers.js";
@@ -16,13 +16,15 @@ const thread = (key, parent, current = false) =>
   `<li data-thread-item="${key}"><div role="button" tabindex="0" data-sidebar-row="${key}" data-sidebar-parent="${parent}"${current ? ' aria-current="page"' : ""} aria-label="${key}"><span dir="auto">${key}</span><span>1d</span></div></li>`;
 const ROWS = folder("p/a") + thread("env:a1", "folder:p/a", true) + folder("p/b") + thread("env:b1", "folder:p/b");
 const TWO = { active: "main", list: [{ id: "main", name: "Main" }, { id: "work", name: "Work" }], projects: { "p/a": "main", "p/b": "work" }, adopted: true };
+// T3's night art at the top of the sidebar (nightly builds), its colors from the theme.
+const SKY = '<div class="sidebar-stage-backdrop" style="--stage-night-mid: oklch(22.7% .086 278)"><svg data-stage-art="nightly"></svg></div>';
 const windows = [];
 after(() => windows.forEach((w) => w.close()));
 
 function setup({ rows = ROWS, stored = TWO, reduced = false, path = "/env/a1", enabled = () => true, demo = () => false } = {}) {
   const dom = createDom(
     path,
-    `<div data-slot="sidebar-inner"><div data-slot="scroll-area-viewport"><div id="group"><ul id="list">${rows}</ul></div></div><div data-slot="sidebar-footer"></div></div>`,
+    `<div data-slot="sidebar-inner"><div data-slot="scroll-area-viewport"><div id="group"><ul id="list">${rows}</ul></div></div><div data-slot="sidebar-footer"></div></div>${SKY}<div data-workspace-area="conversation"><div data-chat-canvas><div class="messages-timeline-scroll" id="msgs"><div data-timeline-row-id="a1-m1">a1</div></div><div class="composer"></div></div></div>`,
   );
   const win = dom.window;
   windows.push(win);
@@ -41,6 +43,16 @@ function setup({ rows = ROWS, stored = TWO, reduced = false, path = "/env/a1", e
     return a;
   };
   win.matchMedia = (q) => ({ matches: reduced && q.includes("reduce") });
+  // Chromium's relative colors (the sky), and the computed color of a var() (jsdom
+  // resolves neither): the probe t3+ reads the theme's sky through gets the backdrop's.
+  win.CSS = { supports: () => true };
+  const computed = win.getComputedStyle.bind(win);
+  win.getComputedStyle = (el, ...rest) => {
+    const style = computed(el, ...rest);
+    if (!/var\(--stage-night-mid\)/.test(el.style?.cssText ?? "")) return style;
+    const host = el.parentElement?.querySelector(".sidebar-stage-backdrop");
+    return { ...style, color: host?.style.getPropertyValue("--stage-night-mid") ?? "", getPropertyValue: (n) => style.getPropertyValue(n) };
+  };
   const list = doc.getElementById("list");
   list.getBoundingClientRect = () => ({ left: 8, top: 0, width: 200, height: 600, right: 208, bottom: 600 });
   doc.addEventListener("click", (e) => {
@@ -241,7 +253,7 @@ const FOUR = {
   projects: { "p/a": "main", "p/b": "work", "p/c": "c", "p/d": "d" },
   adopted: true,
 };
-const live = (t) => t.anims.filter((a) => !a.cancelled);
+const live = (t) => t.anims.filter((a) => !a.cancelled && !a.el.matches(".messages-timeline-scroll")); // the list and its copy
 
 test("one swipe is one switch: its momentum (even arriving in bursts after T3 draws the thread) moves nothing more; a pause or the other way starts a new one", async () => {
   const t = setup({ rows: ROWS4, stored: FOUR });
@@ -556,5 +568,275 @@ test("the focus kept on the dots after a keyboard switch gives way to a dialog T
   await frames(t, 4);
   assert.equal(t.doc.activeElement, ok);
   t.finish();
+  t.profiles.stop();
+});
+
+test("the thread swaps smoothly too: the chat fades out, stays hidden until T3 has drawn the new thread, then fades in", async () => {
+  const t = setup();
+  await t.profiles.start();
+  const canvas = t.doc.querySelector(".messages-timeline-scroll");
+  const onCanvas = () => t.anims.filter((a) => a.el === canvas);
+  t.dot("work").click();
+  const [out] = onCanvas();
+  assert.deepEqual(out?.keyframes.map((k) => k.opacity), [1, 0], "out, with the slide");
+  assert.equal(out.options.fill, "forwards", "and held hidden");
+  assert.equal(t.route(), "/env/a1", "T3 is asked for the thread only once the fade runs too");
+  await t.started();
+  assert.equal(t.route(), "/env/b1");
+  await frames(t, 4);
+  assert.equal(onCanvas().length, 1, "still hidden: T3 has not drawn it yet");
+  const more = t.doc.createElement("div"); // the old thread still streaming
+  more.setAttribute("data-timeline-row-id", "a1-m2");
+  canvas.append(more);
+  await frames(t, 4);
+  assert.equal(onCanvas().length, 1, "more of the old thread is not the new one");
+  canvas.innerHTML = '<div data-timeline-row-id="b1-m1">b1</div>'; // T3 draws the thread
+  await frames(t, 4);
+  const [, inn] = onCanvas();
+  assert.deepEqual(inn?.keyframes.map((k) => k.opacity), [0, 1], "then in");
+  assert.ok(out.cancelled, "the hold is let go");
+  assert.equal(t.anims.some((a) => a.el.matches?.(".composer, [data-chat-canvas]")), false, "the composer is not faded (its glass)");
+  t.finish();
+  t.profiles.stop();
+
+  const r = setup({ reduced: true });
+  await r.profiles.start();
+  r.dot("work").click();
+  assert.equal(r.anims.length, 0, "reduced motion: no fade");
+  r.profiles.stop();
+});
+
+test("a switch with no other thread to open does not fade the chat; one overtaken shows it again", async () => {
+  const t = setup({ rows: ROWS4, stored: { ...FOUR, list: [...FOUR.list, { id: "e", name: "Empty" }] } });
+  await t.profiles.start();
+  const canvas = t.doc.querySelector(".messages-timeline-scroll");
+  t.dot("e").click(); // no threads there
+  assert.equal(t.anims.filter((a) => a.el === canvas).length, 0);
+  await t.started();
+  for (const a of live(t)) a.finish();
+  t.dot("work").click(); // fades out...
+  t.dot("e").click(); // ...and is overtaken by a switch with nothing to open
+  await frames(t, 3);
+  const last = t.anims.filter((a) => a.el === canvas).at(-1);
+  assert.equal(last.keyframes.at(-1).opacity, 1, "faded back in");
+  t.profiles.stop();
+});
+
+test("the open profile's name sits beside the dots in its color, and T3's sky takes the profile's own sky color", async () => {
+  const t = setup({ stored: { ...TWO, list: [{ id: "main", name: "Main", color: "default" }, { id: "work", name: "Work", color: "blue", sky: "orange" }] } });
+  t.win.CSS = { supports: () => true }; // Chromium's relative colors
+  // (created again: support is checked when profiles start)
+  const storage = createFakeChromeStorage();
+  storage.area.data.set(STORAGE_KEYS.profiles, { ...TWO, list: [{ id: "main", name: "Main", color: "default" }, { id: "work", name: "Work", color: "blue", sky: "orange" }] });
+  t.profiles = createProfiles({ win: t.win, doc: t.doc, area: storage.area, changedEvent: storage.onChanged });
+  await t.profiles.start();
+  const name = t.doc.querySelector(".t3plus-profiles-name");
+  const root = t.doc.documentElement;
+  assert.equal(name.textContent, "Main");
+  assert.equal(name.style.getPropertyValue("--t3plus-profile-color"), "", "the default color: T3's text color");
+  assert.equal(root.style.getPropertyValue("--t3plus-sky-mix"), "0", "and T3's own sky");
+  assert.equal(root.hasAttribute("data-t3plus-sky-ready"), false, "no glide in from T3's sky on load");
+  t.dot("work").click();
+  assert.equal(name.textContent, "Work", "named as soon as it slides in");
+  assert.equal(name.style.getPropertyValue("--t3plus-profile-color"), "#3b82f6", "the name in the dot's color");
+  assert.ok(root.hasAttribute("data-t3plus-sky"));
+  assert.equal(root.style.getPropertyValue("--t3plus-sky-turn"), "129.6", "the sky in its own pick: from the theme's 278° to orange's 47.6°, the short way round");
+  assert.equal(root.style.getPropertyValue("--t3plus-sky-mix"), "1", "the sky in the profile's color");
+  // Another theme (Ember: an orange sky): the same pick turns it far less.
+  t.doc.querySelector(".sidebar-stage-backdrop").style.setProperty("--stage-night-mid", "oklch(25% .08 31.1)");
+  t.doc.documentElement.setAttribute("data-theme-id", "ember"); // T3 switching theme
+  t.profiles.sync();
+  assert.equal(root.style.getPropertyValue("--t3plus-sky-turn"), "16.5", "measured from the theme's own sky");
+  t.finish();
+  t.profiles.stop();
+  assert.equal(root.hasAttribute("data-t3plus-sky"), false, "T3's sky as it was");
+  assert.equal(root.style.getPropertyValue("--t3plus-sky-turn"), "");
+});
+
+test("the profile editor: an icon, and one row of colors for the dot, the sky or the dither glow", async () => {
+  const t = setup({ stored: { ...TWO, list: [{ id: "main", name: "Main" }, { id: "work", name: "Work", color: "blue" }] } });
+  await t.profiles.start();
+  assert.equal(t.profiles.state.list[1].sky, "default", "T3's sky until one is picked");
+  assert.equal(t.profiles.state.list[1].dither, "default", "and the glow's own color");
+  t.dot("work").dispatchEvent(new t.win.MouseEvent("contextmenu", { bubbles: true, cancelable: true }));
+  const editor = t.doc.querySelector(".t3plus-profile-editor");
+  // The icon.
+  const icons = editor.querySelector('[role=radiogroup][aria-label="Icon"]');
+  icons.querySelector('[aria-label="Rocket"]').click();
+  assert.equal(t.profiles.state.list[1].icon, "rocket");
+  assert.equal(t.doc.querySelector(".t3plus-profiles-name svg"), null, "Main is open: no icon");
+  t.profiles.switchTo("work");
+  assert.ok(t.doc.querySelector(".t3plus-profiles-name svg"), "Work's icon, beside its name");
+  t.finish();
+  // One row of colors; the tabs say what it colors.
+  const tabs = [...editor.querySelectorAll(".t3plus-profile-tab")].map((b) => b.textContent);
+  assert.deepEqual(tabs, ["Dot", "Sky", "Dither"]);
+  assert.equal(editor.querySelectorAll(".t3plus-profile-colors").length, 1, "not a row each");
+  const row = () => editor.querySelector(".t3plus-profile-colors");
+  row().querySelector('[aria-label="Teal"]').click();
+  assert.equal(t.profiles.state.list[1].color, "teal");
+  editor.querySelector('.t3plus-profile-tab[data-field="sky"]').click();
+  assert.equal(row().getAttribute("aria-label"), "Sky color");
+  assert.equal(row().querySelector('[aria-checked="true"]').getAttribute("aria-label"), "Default");
+  row().querySelector('[aria-label="Orange"]').click();
+  editor.querySelector('.t3plus-profile-tab[data-field="dither"]').click();
+  row().querySelector('[aria-label="Pink"]').click();
+  assert.deepEqual([t.profiles.state.list[1].color, t.profiles.state.list[1].sky, t.profiles.state.list[1].dither], ["teal", "orange", "pink"], "each its own");
+  // A custom color (made in Settings) shows as one more choice, picked.
+  await t.profiles.update("work", { dither: "#12AB34" });
+  assert.equal(t.profiles.state.list[1].dither, "#12ab34", "kept, lowercased");
+  editor.querySelector('.t3plus-profile-tab[data-field="color"]').click();
+  editor.querySelector('.t3plus-profile-tab[data-field="dither"]').click();
+  t.profiles.stop();
+});
+
+test("the editor has no Sky tab where T3 draws no sky; each row is one Tab stop with arrow keys", async () => {
+  const t = setup({ stored: { ...TWO, list: [{ id: "main", name: "Main" }, { id: "work", name: "Work", color: "blue" }] } });
+  t.doc.querySelector(".sidebar-stage-backdrop").remove(); // stable T3: no night art
+  await t.profiles.start();
+  t.dot("work").dispatchEvent(new t.win.MouseEvent("contextmenu", { bubbles: true, cancelable: true }));
+  const editor = t.doc.querySelector(".t3plus-profile-editor");
+  assert.deepEqual([...editor.querySelectorAll(".t3plus-profile-tab")].map((b) => b.textContent), ["Dot", "Dither"]);
+  const radios = [...editor.querySelectorAll(".t3plus-profile-colors [role=radio]")];
+  assert.deepEqual(radios.filter((r) => r.tabIndex === 0).map((r) => r.getAttribute("aria-label")), ["Blue"], "one Tab stop: the picked one");
+  radios[1].focus();
+  radios[1].dispatchEvent(new t.win.KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true, cancelable: true }));
+  assert.equal(t.profiles.state.list[1].color, "purple", "arrows move and pick");
+  t.profiles.stop();
+});
+
+test("bad colors and icons are dropped; a custom color or a preset is kept", () => {
+  const n = normalizeProfiles({ list: [{ id: "a", name: "A", color: "#GGGGGG", sky: "#0A0B0C", dither: "nope", icon: "<svg>" }, { id: "b", name: "B", color: "teal", icon: "rocket" }] });
+  assert.deepEqual(n.list[0], { id: "a", name: "A", color: "default", sky: "#0a0b0c", dither: "default" });
+  assert.deepEqual(n.list[1], { id: "b", name: "B", color: "teal", sky: "default", dither: "default", icon: "rocket" });
+});
+
+test("the open profile's dither color is the glow's (and the app is told when it changes)", async () => {
+  const looks = [];
+  const dom = createDom("/env/a1", `<div data-slot="sidebar-inner"><ul id="list">${ROWS}</ul><div data-slot="sidebar-footer"></div></div>`);
+  windows.push(dom.window);
+  const storage = createFakeChromeStorage();
+  storage.area.data.set(STORAGE_KEYS.profiles, { ...TWO, list: [{ id: "main", name: "Main" }, { id: "work", name: "Work", dither: "#112233" }] });
+  const profiles = createProfiles({ win: dom.window, doc: dom.window.document, area: storage.area, changedEvent: storage.onChanged, onLook: (hex) => looks.push(hex) });
+  await profiles.start();
+  assert.equal(profiles.ditherAccent(), null, "Main: the glow's own color");
+  profiles.switchTo("work");
+  assert.equal(profiles.ditherAccent(), "#112233");
+  profiles.switchTo("main");
+  profiles.stop();
+  assert.deepEqual(looks, ["#112233", null]);
+  assert.equal(profiles.ditherAccent(), null);
+});
+
+test("profiles turned off mid-switch leave the chat visible", async () => {
+  let on = true;
+  const t = setup({ enabled: () => on });
+  await t.profiles.start();
+  const list = t.doc.querySelector(".messages-timeline-scroll");
+  t.dot("work").click();
+  on = false;
+  t.profiles.sync();
+  await frames(t, 3);
+  const last = t.anims.filter((a) => a.el === list).at(-1);
+  assert.equal(last.keyframes.at(-1).opacity, 1, "faded back in");
+  t.profiles.stop();
+});
+
+test("a backup import keeps profiles' icons and colors, and drops anything that is not one", async () => {
+  const { importAll, exportAll } = await import("../src/backup.js");
+  const storage = createFakeChromeStorage();
+  const backup = {
+    app: "t3plus",
+    data: {
+      [STORAGE_KEYS.profiles]: {
+        active: "main",
+        list: [
+          { id: "main", name: "Main", color: "#3B82F6", sky: "url(x)", dither: "#123456; background: red", icon: '<img src=x onerror="alert(1)">' },
+          { id: "w", name: "<b>Work</b>", color: "pink", sky: "teal", dither: "#a1b2c3", icon: "rocket" },
+        ],
+        projects: {},
+      },
+    },
+  };
+  await importAll(storage.area, backup, { [STORAGE_KEYS.profiles]: normalizeProfiles });
+  const saved = storage.area.data.get(STORAGE_KEYS.profiles);
+  assert.deepEqual(saved.list[0], { id: "main", name: "Main", color: "#3b82f6", sky: "default", dither: "default" }, "a custom hex kept; css and markup dropped");
+  assert.deepEqual(saved.list[1], { id: "w", name: "<b>Work</b>", color: "pink", sky: "teal", dither: "#a1b2c3", icon: "rocket" });
+  const out = await exportAll(storage.area, "0.21.0");
+  assert.deepEqual(out.data[STORAGE_KEYS.profiles].list[1].icon, "rocket", "and exported again");
+
+  // Shown with the name as text, never as markup.
+  const t = setup({ stored: saved, path: "/env/b1" });
+  await t.profiles.start();
+  t.profiles.switchTo("w");
+  assert.equal(t.doc.querySelector(".t3plus-profiles-name b"), null);
+  assert.equal(t.doc.querySelector(".t3plus-profiles-name").textContent, "<b>Work</b>");
+  t.finish();
+  t.profiles.stop();
+});
+
+test("this window's own saves coming back late (as Chrome's storage does) never undo a newer one", async () => {
+  const t = setup();
+  // Chrome-style: the change event arrives a moment after the write, not inside it.
+  const listeners = new Set();
+  const data = t.storage.area.data;
+  const area = {
+    data,
+    get: async (k) => ({ [k]: structuredClone(data.get(k)) }),
+    set: async (items) => {
+      for (const [k, v] of Object.entries(items)) data.set(k, structuredClone(v));
+      const change = Object.fromEntries(Object.entries(items).map(([k, v]) => [k, { newValue: structuredClone(v) }]));
+      setTimeout(() => listeners.forEach((fn) => fn(change, "local")), 5);
+      await sleep(10); // and the write resolves after its event has arrived
+    },
+  };
+  const profiles = createProfiles({ win: t.win, doc: t.doc, area, changedEvent: { addListener: (fn) => listeners.add(fn), removeListener: (fn) => listeners.delete(fn) } });
+  await profiles.start();
+  profiles.update("work", { icon: "rocket" });
+  await sleep(1);
+  profiles.update("work", { icon: "star" });
+  await sleep(60);
+  assert.equal(profiles.state.list[1].icon, "star", "in memory");
+  assert.equal(data.get(STORAGE_KEYS.profiles).list[1].icon, "star", "and stored");
+  profiles.stop();
+});
+
+test("Settings cannot change profiles before the stored ones have loaded", async () => {
+  const t = setup({ stored: { ...TWO, list: [...TWO.list, { id: "c", name: "C" }] } });
+  const get = t.storage.area.get;
+  let release;
+  t.storage.area.get = (k) => new Promise((r) => (release = () => r(get(k))));
+  const started = t.profiles.start();
+  assert.equal(t.profiles.isLoaded(), false);
+  await t.profiles.update("main", { icon: "star" });
+  assert.equal(t.storage.area.data.get(STORAGE_KEYS.profiles).list.length, 3, "nothing written over them");
+  release();
+  await started;
+  assert.equal(t.profiles.isLoaded(), true);
+  assert.equal(t.profiles.state.list.length, 3);
+  t.profiles.stop();
+});
+
+test("the sky's own hue is read as resolved, also where a theme mixes it", async () => {
+  const t = setup({ stored: { ...TWO, list: [{ id: "main", name: "Main" }, { id: "work", name: "Work", sky: "orange" }] } });
+  // t3-chat: --stage-night-mid is a color-mix; computed, it is one oklch color (about 304°).
+  t.doc.querySelector(".sidebar-stage-backdrop").style.setProperty("--stage-night-mid", "oklch(0.25 0.09 304)");
+  await t.profiles.start();
+  t.profiles.switchTo("work");
+  assert.equal(t.doc.documentElement.style.getPropertyValue("--t3plus-sky-turn"), "103.6", "from 304° to orange's 47.6°");
+  t.finish();
+  t.profiles.stop();
+});
+
+test("the editor shows the colors as stored now, after a change from Settings", async () => {
+  const t = setup({ stored: { ...TWO, list: [{ id: "main", name: "Main" }, { id: "work", name: "Work", color: "blue" }] } });
+  await t.profiles.start();
+  t.dot("work").dispatchEvent(new t.win.MouseEvent("contextmenu", { bubbles: true, cancelable: true }));
+  const editor = t.doc.querySelector(".t3plus-profile-editor");
+  await t.profiles.update("work", { dither: "#12ab34" });
+  editor.querySelector('.t3plus-profile-tab[data-field="dither"]').click();
+  const picked = editor.querySelector('.t3plus-profile-colors [aria-checked="true"]');
+  assert.equal(picked.getAttribute("aria-label"), "Custom", "the custom color, picked");
+  assert.equal(picked.style.getPropertyValue("--t3plus-profile-color"), "#12ab34");
   t.profiles.stop();
 });

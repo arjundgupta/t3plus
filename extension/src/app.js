@@ -147,18 +147,28 @@ export function createT3Plus(deps) {
   let panelStale = true;
   function updatePanel() {
     panelStale = false;
+    const profiles = deps.profiles?.state ?? null;
     panel.update({
       ...state,
       bots: botsForPanel(),
       botMarker: DEFAULT_BOT_MARKER,
+      // Profiles (their icons and colors), when they are on.
+      profiles: profiles && state.settings.sidebar.profiles && deps.profiles.isLoaded?.() ? { list: profiles.list, active: profiles.active, sky: Boolean(deps.profiles.hasSky?.()) } : null,
+      ditherAccent: deps.profiles?.ditherAccent?.() ?? null,
     });
+  }
+
+  /** The settings as drawn: the open profile's dither color, when it has one, over the glow's. */
+  function lookSettings() {
+    const accent = state.settings.sidebar.profiles ? deps.profiles?.ditherAccent?.() : null;
+    return accent ? { ...state.settings, composerGradient: { ...state.settings.composerGradient, accent } } : state.settings;
   }
 
   function render() {
     if (stopped) return;
     setBotStyle(state.settings.sidebar.botStyle);
     state.imageUrl = resolveImageUrl();
-    applyComposerTheme(doc, computeComposerTheme(state.settings, state.imageUrl));
+    applyComposerTheme(doc, computeComposerTheme(lookSettings(), state.imageUrl));
     if (panel.element.isConnected) updatePanel();
     else panelStale = true;
     watcher.schedule();
@@ -357,8 +367,9 @@ export function createT3Plus(deps) {
   function syncDither() {
     const renderer = deps.backdropRenderer;
     if (!renderer) return;
-    const g = state.settings.composerGradient;
-    const theme = computeComposerTheme(state.settings, state.imageUrl);
+    const look = lookSettings();
+    const g = look.composerGradient;
+    const theme = computeComposerTheme(look, state.imageUrl);
     const preview = panel.element.isConnected ? panel.element.querySelector(".t3plus-preview-pane") : null;
     // With t3+'s settings open, the live preview is what is on screen: T3 keeps the
     // last thread rendered behind its Settings, and drawn into that pane instead, the
@@ -389,15 +400,32 @@ export function createT3Plus(deps) {
       const c = card.getBoundingClientRect();
       if (p.height > 0 && c.height > 0) cy = Math.max(0, Math.min(1.2, (c.top + c.height * 0.9 - p.top) / p.height)); // around the composer
     }
+    syncProfilePreview();
     renderer.update({
       mode: g.dither ? theme.mode : null,
-      settings: state.settings,
+      settings: look,
       imageSrc: g.imageSource === "upload" && state.image ? state.image.dataUrl : assetUrl(SAMPLE_IMAGE_PATH),
       host: pane ?? preview,
       cx: pane && Number.isFinite(lastAnchor) ? lastAnchor / 100 : 0.5,
       cy,
       wide: Boolean(pane && hero),
       composerWidth: boxRect ? boxRect.width : 0,
+    });
+  }
+
+  /** The Profiles preview in Settings: its own glow, in the dither color being picked. */
+  function syncProfilePreview() {
+    const renderer = deps.previewRenderer;
+    if (!renderer) return;
+    const host = panel.element.isConnected && SETTINGS_ROUTE.test(routePath()) ? panel.element.querySelector(".t3plus-pp-pane") : null;
+    const g = state.settings.composerGradient;
+    const accent = panel.profilePreviewAccent?.() ?? g.accent;
+    renderer.update({
+      // The glow only (an image keeps its own colors): the preview shows its CSS glow otherwise.
+      mode: host && g.enabled && g.dither ? "half-circle" : null,
+      settings: { ...state.settings, composerGradient: { ...g, accent } },
+      host,
+      cx: 0.5,
     });
   }
 
@@ -855,9 +883,14 @@ export function createT3Plus(deps) {
   }
 
   const actions = {
+    openWhatsNew: () => deps.whatsNew?.open(),
     setEnabled: (enabled) => persist(gradient({ enabled })),
     setMode: (mode) => persist(gradient({ mode })),
     previewAccent: (accent) => preview(gradient({ accent })),
+    // Profiles (Settings → t3+): a profile's icon or colors, and the turn its sky takes.
+    updateProfile: (id, patch) => deps.profiles?.update(id, patch),
+    profileSkyTurn: (value) => deps.profiles?.skyTurnFor?.(value) ?? null,
+    previewProfile: () => watcher.schedule(),
     setAccent: (accent) => persist(gradient({ accent })),
     previewIntensity: (intensity) => preview(gradient({ intensity })),
     setIntensity: (intensity) => persist(gradient({ intensity })),
@@ -966,7 +999,7 @@ export function createT3Plus(deps) {
     },
   };
 
-  const panel = createAppearancePanel(doc, actions, { desktop: Boolean(deps.desktop) });
+  const panel = createAppearancePanel(doc, actions, { desktop: Boolean(deps.desktop), version: deps.version ?? null, whatsNew: Boolean(deps.whatsNew) });
   const home = createHomeView(doc);
   const detailsPool = createHomeView(doc, { variant: "pool" });
   const usageDither = createUsageDither(doc);
@@ -1071,6 +1104,10 @@ export function createT3Plus(deps) {
   const api = {
     state,
     perf,
+    /** The open profile's dither color changed (profiles.js onLook): drawn again in it. */
+    profilesLook() {
+      if (!stopped) render();
+    },
     /** The desktop loader handed over new feeds: read them now, not at the next poll. */
     feedsUpdated() {
       if (stopped) return;
@@ -1152,6 +1189,8 @@ export function createT3Plus(deps) {
       }
       deps.profiles?.start().catch(() => {});
       unsubscribers.push(() => deps.profiles?.stop());
+      deps.whatsNew?.start().catch(() => {});
+      unsubscribers.push(() => deps.whatsNew?.stop());
       watchPopups();
       // A T3 theme switch (light/dark, another palette) changes only <html>'s class and
       // theme attributes: the glow (and the Settings preview) take the new colors right
@@ -1199,6 +1238,7 @@ export function createT3Plus(deps) {
       for (const el of doc.querySelectorAll(`${T3_SELECTORS.conversationArea}, [${T3PLUS.backdropHostAttr}]`)) el.style.removeProperty("--t3plus-composer-x");
       syncBackdropHosts(doc, false);
       deps.backdropRenderer?.clear();
+      deps.previewRenderer?.clear();
       const cleared = Object.keys(computeComposerTheme(state.settings, null).vars).map((name) => [name, null]);
       releaseLane();
       if (laneFrame !== null) win.cancelAnimationFrame?.(laneFrame);

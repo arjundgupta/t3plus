@@ -116,7 +116,7 @@ test("controls switch modes, persist, and drive the composer theme", async () =>
   assert.equal(storage.area.data.get(STORAGE_KEYS.settings).composerGradient.intensity, 90);
 
   // Custom accent, then back to theme.
-  const color = panel.querySelector('input[type="color"]');
+  const color = panel.querySelector('.t3plus-advanced input[type="color"]');
   color.value = "#ff3366";
   color.dispatchEvent(new dom.window.Event("change", { bubbles: true }));
   await settle();

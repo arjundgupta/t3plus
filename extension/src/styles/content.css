@@ -470,9 +470,11 @@ html[data-t3plus-glass] :is([data-chat-composer-surface="true"], [data-t3plus-su
   image-rendering: pixelated;
 }
 
-/* Settled threads: smaller faces (and badges), the text closer in. */
+/* Settled threads: smaller faces (and badges), the text closer in, and room above
+   and below the two lines (T3's settled rows are one line tall: they touched). */
 [data-t3plus-bot-body][data-sidebar-parent="shelf:settled"] {
   padding-left: 2.5rem !important;
+  padding-block: 0.3125rem !important;
 }
 [data-sidebar-parent="shelf:settled"] > .t3plus-bot-avatar {
   left: 0.6875rem;
@@ -2119,28 +2121,94 @@ html[data-t3plus-demo] img[data-t3plus-demo-badge] {
   display: none;
 }
 
-/* The open profile's name, shown for a moment after switching. */
-.t3plus-profiles-name {
-  position: absolute;
-  bottom: calc(100% + 0.125rem);
-  left: 50%;
-  transform: translate(-50%, 0.25rem);
-  padding: 0.125rem 0.5rem;
-  border-radius: 999px;
-  background: color-mix(in srgb, var(--popover, var(--background)) 92%, transparent);
-  box-shadow: 0 0 0 1px color-mix(in srgb, var(--border) 70%, transparent);
-  color: var(--foreground);
-  font-size: 0.8125rem;
-  font-weight: 500;
-  line-height: 1.25rem;
-  white-space: nowrap;
-  opacity: 0;
-  pointer-events: none;
-  transition: opacity 160ms ease, transform 160ms ease;
+/* The open profile's name, always beside the dots, in its color. */
+/* The dots stay centered whatever the name's length: the name has the column to their left. */
+.t3plus-profiles {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+  align-items: center;
+  column-gap: 0.5rem;
 }
-.t3plus-profiles-name[data-show] {
-  opacity: 1;
-  transform: translate(-50%, 0);
+.t3plus-profiles > .t3plus-profiles-dots {
+  grid-column: 2;
+}
+.t3plus-profiles-name {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  grid-column: 1;
+  grid-row: 1;
+  justify-self: end;
+  max-width: 100%;
+  overflow: hidden;
+  padding: 0.0625rem 0.5rem;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--t3plus-profile-color, var(--foreground)) 14%, transparent);
+  /* Toward the text color, so yellow stays readable on a light sidebar. */
+  color: color-mix(in oklab, var(--t3plus-profile-color, var(--foreground)) 70%, var(--foreground));
+  font-size: 0.6875rem;
+  font-weight: 600;
+  line-height: 1.125rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  pointer-events: none;
+  transition: color 200ms ease, background-color 200ms ease;
+}
+.t3plus-profiles-name:empty {
+  display: none;
+}
+.t3plus-profiles-name > svg,
+.t3plus-profile-chip > svg {
+  flex: none;
+}
+.t3plus-profiles-name-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+/* Dragging a project: the dots open into named chips, the name steps aside. */
+html[data-t3plus-profile-drag] .t3plus-profiles-name {
+  display: none;
+}
+
+/* T3's night sky at the top of the sidebar in the open profile's sky color: its hues
+   turned (profiles.js works out the turn from the theme's own sky) so it centers on the
+   profile's, keeping its spread, lightness and stars. Default keeps T3's sky. */
+@property --t3plus-sky-turn {
+  syntax: "<number>";
+  inherits: true;
+  initial-value: 0;
+}
+@property --t3plus-sky-mix {
+  syntax: "<number>";
+  inherits: true;
+  initial-value: 0;
+}
+/* The glide runs on the sky alone (on <html> it restyled the whole page every frame). */
+html[data-t3plus-sky-ready] .sidebar-stage-backdrop {
+  transition: --t3plus-sky-turn 400ms ease, --t3plus-sky-mix 400ms ease;
+}
+html[data-t3plus-sky] .sidebar-stage-backdrop,
+.t3plus-pp-sky[data-tint] {
+  --t3plus-sky-bottom: var(--stage-night-bottom);
+  --t3plus-sky-mid: var(--stage-night-mid);
+  --t3plus-sky-top: var(--stage-night-top);
+  --t3plus-sky-glow-highlight: var(--stage-night-glow-highlight);
+  --t3plus-sky-glow-secondary: var(--stage-night-glow-secondary);
+  --t3plus-sky-highlight: var(--stage-night-highlight);
+  --t3plus-sky-secondary: var(--stage-night-secondary);
+  --t3plus-sky-tertiary: var(--stage-night-tertiary);
+}
+html[data-t3plus-sky] .sidebar-stage-backdrop > svg,
+.t3plus-pp-sky[data-tint] > svg {
+  --stage-night-bottom: oklch(from var(--t3plus-sky-bottom) l c calc(h + var(--t3plus-sky-turn) * var(--t3plus-sky-mix)));
+  --stage-night-mid: oklch(from var(--t3plus-sky-mid) l c calc(h + var(--t3plus-sky-turn) * var(--t3plus-sky-mix)));
+  --stage-night-top: oklch(from var(--t3plus-sky-top) l c calc(h + var(--t3plus-sky-turn) * var(--t3plus-sky-mix)));
+  --stage-night-glow-highlight: oklch(from var(--t3plus-sky-glow-highlight) l c calc(h + var(--t3plus-sky-turn) * var(--t3plus-sky-mix)));
+  --stage-night-glow-secondary: oklch(from var(--t3plus-sky-glow-secondary) l c calc(h + var(--t3plus-sky-turn) * var(--t3plus-sky-mix)));
+  --stage-night-highlight: oklch(from var(--t3plus-sky-highlight) l c calc(h + var(--t3plus-sky-turn) * var(--t3plus-sky-mix)));
+  --stage-night-secondary: oklch(from var(--t3plus-sky-secondary) l c calc(h + var(--t3plus-sky-turn) * var(--t3plus-sky-mix)));
+  --stage-night-tertiary: oklch(from var(--t3plus-sky-tertiary) l c calc(h + var(--t3plus-sky-turn) * var(--t3plus-sky-mix)));
 }
 
 /* While a folder is dragged, the dots open into named drop targets. */
@@ -2266,8 +2334,98 @@ html[data-t3plus-profile-drag] * {
 }
 .t3plus-profile-colors {
   display: flex;
+  align-items: center;
   justify-content: space-between;
   padding: 0.125rem 0.25rem;
+}
+/* Sky swatches: little skies (a rounded square, dark into the color); default is T3's. */
+.t3plus-profile-colors[data-field="sky"] .t3plus-profile-swatch::before {
+  border-radius: 0.125rem;
+  background: linear-gradient(135deg, color-mix(in oklab, var(--t3plus-profile-color) 30%, #0b0b1a), color-mix(in oklab, var(--t3plus-profile-color) 75%, #0b0b1a));
+}
+.t3plus-profile-colors[data-field="sky"] .t3plus-profile-swatch:first-of-type::before,
+.t3plus-pp-swatches[data-field="sky"] .t3plus-pp-swatch:first-of-type::before {
+  background: linear-gradient(135deg, var(--stage-night-mid, #1e1b4b), var(--stage-night-top, #4c2a85));
+}
+/* Dither swatches: the color under t3+'s dither pattern; default is the glow's own color. */
+.t3plus-profile-colors[data-field="dither"] .t3plus-profile-swatch::before,
+.t3plus-pp-swatches[data-field="dither"] .t3plus-pp-swatch::before {
+  background: var(--t3plus-dither, none) 0 0 / 4px 4px, var(--t3plus-profile-color, var(--t3plus-accent, var(--primary, #6d7cff)));
+  background-blend-mode: soft-light, normal;
+}
+.t3plus-pp-swatches[data-field="sky"] .t3plus-pp-swatch:not(:first-of-type)::before {
+  border-radius: 0.1875rem;
+  background: linear-gradient(135deg, color-mix(in oklab, var(--t3plus-profile-color) 30%, #0b0b1a), color-mix(in oklab, var(--t3plus-profile-color) 75%, #0b0b1a));
+}
+
+/* The editor's icons (a grid under the name) and which color the row below picks. */
+.t3plus-profile-icons {
+  display: grid;
+  grid-template-columns: repeat(8, minmax(0, 1fr));
+  gap: 0.125rem;
+  padding: 0 0.125rem;
+}
+.t3plus-profile-icon-pick {
+  display: grid;
+  place-items: center;
+  height: 1.375rem;
+  padding: 0;
+  border: 0;
+  border-radius: 0.375rem;
+  background: transparent;
+  color: var(--muted-foreground);
+  cursor: pointer;
+}
+.t3plus-profile-icon-pick:not(:has(svg))::before {
+  content: "";
+  width: 0.625rem;
+  height: 0.625rem;
+  border: 1.5px dashed currentColor;
+  border-radius: 999px;
+  opacity: 0.7;
+}
+.t3plus-profile-icon-pick:hover {
+  color: var(--foreground);
+  background: color-mix(in srgb, var(--foreground) 8%, transparent);
+}
+.t3plus-profile-icon-pick[aria-checked="true"] {
+  color: var(--foreground);
+  background: color-mix(in srgb, var(--foreground) 14%, transparent);
+}
+.t3plus-profile-icon-pick:focus-visible,
+.t3plus-profile-tab:focus-visible {
+  outline: 2px solid var(--ring, var(--primary));
+  outline-offset: -2px;
+}
+.t3plus-profile-tabs {
+  display: flex;
+  gap: 0.125rem;
+  padding: 0.125rem;
+  border-radius: 0.5rem;
+  background: color-mix(in srgb, var(--foreground) 6%, transparent);
+}
+.t3plus-profile-tab {
+  flex: 1;
+  height: 1.375rem;
+  padding: 0;
+  border: 0;
+  border-radius: 0.375rem;
+  background: transparent;
+  color: var(--muted-foreground);
+  font-size: 0.6875rem;
+  font-weight: 500;
+  cursor: pointer;
+}
+.t3plus-profile-tab[aria-pressed="true"] {
+  background: var(--popover, var(--background));
+  color: var(--foreground);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--border) 70%, transparent);
+}
+.t3plus-profile-editor .t3plus-profile-colors[data-field="sky"] .t3plus-profile-swatch {
+  border-radius: 0.25rem;
+}
+.t3plus-profile-editor .t3plus-profile-colors[data-field="sky"] .t3plus-profile-swatch:first-of-type[aria-checked="true"] {
+  box-shadow: 0 0 0 1.5px var(--foreground);
 }
 .t3plus-profile-editor .t3plus-profile-swatch {
   display: grid;
@@ -2325,4 +2483,370 @@ html[data-t3plus-profile-drag] * {
 /* Settings -> t3+ -> Status: a problem reads in T3's warning color. */
 .t3plus-health[data-problem] {
   color: var(--warning, #f59e0b);
+}
+
+/* ---------- What's New (src/whatsNew.js) ---------- */
+
+/* The notes: a heading per version (the installed one marked), then "Lead: text" items. */
+.t3plus-notes-version + .t3plus-notes-version {
+  margin-top: 1.5rem;
+  padding-top: 1.5rem;
+  border-top: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
+}
+.t3plus-notes-title {
+  display: flex;
+  align-items: center;
+  gap: 0.625rem;
+  margin: 0 0 0.75rem;
+  color: var(--foreground);
+  font-size: 1.125rem;
+  font-weight: 600;
+}
+.t3plus-notes-badge {
+  padding: 0.0625rem 0.5rem;
+  border-radius: 0.375rem;
+  background: color-mix(in srgb, var(--primary) 18%, transparent);
+  color: var(--primary);
+  font-size: 0.75rem;
+  font-weight: 600;
+}
+.t3plus-notes ul {
+  display: grid;
+  gap: 0.5rem;
+  margin: 0;
+  padding-left: 1.25rem;
+  list-style: disc;
+  color: color-mix(in srgb, var(--foreground) 82%, transparent);
+  font-size: 0.875rem;
+  line-height: 1.5;
+}
+.t3plus-notes strong {
+  color: var(--foreground);
+  font-weight: 600;
+}
+/* In Settings: the installed version's notes under the row's title. */
+.t3plus-row > .t3plus-notes {
+  margin-top: 0.625rem;
+}
+.t3plus-row > .t3plus-notes ul {
+  font-size: 0.8125rem;
+}
+
+/* The sheet that opens once after an update: every version, over T3. */
+.t3plus-whatsnew {
+  position: fixed;
+  inset: 0;
+  z-index: 2147483000;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  background: color-mix(in srgb, var(--background) 92%, transparent);
+  backdrop-filter: blur(6px);
+}
+.t3plus-whatsnew-page {
+  max-width: 44rem;
+  margin: 0 auto;
+  padding: 4.5rem 1.5rem 4rem;
+}
+.t3plus-whatsnew-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-bottom: 2rem;
+}
+.t3plus-whatsnew-header h2 {
+  margin: 0;
+  color: var(--foreground);
+  font-size: 1.75rem;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+.t3plus-whatsnew-header p {
+  margin: 0.25rem 0 0;
+  color: var(--muted-foreground);
+  font-size: 0.875rem;
+}
+.t3plus-whatsnew .t3plus-notes ul {
+  font-size: 0.9375rem;
+  gap: 0.625rem;
+}
+.t3plus-whatsnew-close {
+  display: grid;
+  place-items: center;
+  width: 2rem;
+  height: 2rem;
+  border: 0;
+  border-radius: 0.5rem;
+  background: transparent;
+  color: var(--muted-foreground);
+  font-size: 1.375rem;
+  line-height: 1;
+  cursor: pointer;
+}
+.t3plus-whatsnew-close:hover {
+  background: var(--accent, var(--muted));
+  color: var(--foreground);
+}
+.t3plus-whatsnew-close:focus-visible {
+  outline: 2px solid var(--ring, var(--primary));
+  outline-offset: 1px;
+}
+
+/* ---------- Profiles in Settings → t3+ (appearancePanel.js) ---------- */
+.t3plus-pp-body {
+  display: grid;
+  gap: 0.875rem;
+  margin-top: 0.75rem;
+}
+.t3plus-pp-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.375rem;
+}
+.t3plus-pp-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.375rem;
+  max-width: 12rem;
+  height: 1.75rem;
+  padding: 0 0.625rem;
+  border: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--foreground);
+  font-size: 0.8125rem;
+  cursor: pointer;
+}
+.t3plus-pp-chip::before {
+  content: "";
+  flex: none;
+  order: -1;
+  width: 0.4375rem;
+  height: 0.4375rem;
+  border-radius: 999px;
+  background: var(--t3plus-profile-color, var(--foreground));
+}
+.t3plus-pp-chip > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.t3plus-pp-chip[aria-checked="true"] {
+  border-color: color-mix(in oklab, var(--t3plus-profile-color, var(--foreground)) 70%, transparent);
+  background: color-mix(in oklab, var(--t3plus-profile-color, var(--foreground)) 14%, transparent);
+}
+.t3plus-pp-chip:focus-visible,
+.t3plus-pp-icon:focus-visible,
+.t3plus-pp-swatch:focus-visible,
+.t3plus-pp-custom:focus-visible {
+  outline: 2px solid var(--ring, var(--primary));
+  outline-offset: 2px;
+}
+
+/* The preview: a sidebar (the sky, a few rows, the name and dots) beside a pane with the glow. */
+.t3plus-pp {
+  display: grid;
+  grid-template-columns: 11rem minmax(0, 1fr);
+  height: 11rem;
+  overflow: hidden;
+  border: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
+  border-radius: 0.625rem;
+  background: var(--background);
+}
+.t3plus-pp-side {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  border-right: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
+  background: var(--sidebar, var(--background));
+}
+.t3plus-pp-sky {
+  position: absolute;
+  inset: 0 0 auto;
+  height: 3.75rem;
+  overflow: hidden;
+  -webkit-mask-image: linear-gradient(#000 0%, #000 55%, transparent 92%);
+  mask-image: linear-gradient(#000 0%, #000 55%, transparent 92%);
+}
+.t3plus-pp-sky > svg {
+  width: 100%;
+  height: 100%;
+}
+.t3plus-pp-rows {
+  position: relative;
+  display: grid;
+  gap: 0.5rem;
+  margin: 3.25rem 0.75rem 0;
+}
+.t3plus-pp-rows > span {
+  height: 0.5rem;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--foreground) 10%, transparent);
+}
+.t3plus-pp-rows > span:nth-child(2) {
+  width: 70%;
+}
+.t3plus-pp-foot {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.375rem;
+  margin-top: auto;
+  padding: 0.5rem;
+}
+.t3plus-pp-name {
+  max-width: 6rem;
+}
+.t3plus-pp-dots {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+}
+.t3plus-pp-dot {
+  width: 0.375rem;
+  height: 0.375rem;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--t3plus-profile-color, var(--foreground)) 32%, transparent);
+}
+.t3plus-pp-dot[data-on] {
+  width: 0.875rem;
+  background: var(--t3plus-profile-color, var(--foreground));
+}
+.t3plus-pp-pane {
+  position: relative;
+  isolation: isolate;
+  overflow: clip;
+}
+/* Its CSS glow (the Smooth look, or until the dithered one is drawn). */
+.t3plus-pp-pane::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  background-image:
+    var(--t3plus-dither, none),
+    radial-gradient(ellipse 34% 30% at 50% 100%, color-mix(in oklab, var(--t3plus-accent) var(--t3plus-core, 38%), transparent) 0%, transparent 100%),
+    radial-gradient(ellipse 70% 60% at 50% 100%, color-mix(in oklab, var(--t3plus-accent) var(--t3plus-halo, 25%), transparent) 0%, color-mix(in oklab, var(--t3plus-accent) var(--t3plus-fade, 10%), transparent) 55%, transparent 100%);
+  background-size: 8px 8px, 100% 100%, 100% 100%;
+  background-repeat: repeat, no-repeat, no-repeat;
+  background-blend-mode: soft-light, normal, normal;
+}
+.t3plus-pp-pane:has(> .t3plus-glow:not([hidden])[data-kind])::before {
+  background: none;
+}
+.t3plus-pp-card {
+  position: absolute;
+  left: 18%;
+  right: 18%;
+  bottom: 0.75rem;
+  height: 2.25rem;
+  border: 1px solid color-mix(in srgb, var(--border) 80%, transparent);
+  border-radius: 0.75rem;
+  background: color-mix(in srgb, var(--card, var(--background)) 70%, transparent);
+  backdrop-filter: blur(8px);
+}
+
+/* A row: its name and what it colors, then the choices. */
+.t3plus-pp-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.375rem 1rem;
+}
+.t3plus-pp-row[hidden] {
+  display: none;
+}
+.t3plus-pp-row-text {
+  display: grid;
+}
+.t3plus-pp-row-title {
+  color: var(--foreground);
+  font-size: 0.8125rem;
+  font-weight: 500;
+}
+.t3plus-pp-row-hint {
+  color: var(--muted-foreground);
+  font-size: 0.75rem;
+}
+.t3plus-pp-row-picks {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+.t3plus-pp-swatches,
+.t3plus-pp-icons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem;
+}
+.t3plus-pp-swatch,
+.t3plus-pp-icon {
+  display: grid;
+  place-items: center;
+  width: 1.5rem;
+  height: 1.5rem;
+  padding: 0;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--muted-foreground);
+  cursor: pointer;
+}
+.t3plus-pp-icon {
+  border-radius: 0.375rem;
+}
+.t3plus-pp-icon:not(:has(svg))::before {
+  content: "";
+  width: 0.75rem;
+  height: 0.75rem;
+  border: 1.5px dashed currentColor;
+  border-radius: 999px;
+  opacity: 0.7;
+}
+.t3plus-pp-icon:hover {
+  color: var(--foreground);
+  background: color-mix(in srgb, var(--foreground) 8%, transparent);
+}
+.t3plus-pp-icon[aria-checked="true"] {
+  color: var(--foreground);
+  background: color-mix(in srgb, var(--foreground) 14%, transparent);
+}
+.t3plus-pp-swatch::before {
+  content: "";
+  width: 0.875rem;
+  height: 0.875rem;
+  border-radius: 999px;
+  background: var(--t3plus-profile-color, var(--foreground));
+}
+.t3plus-pp-swatch[aria-checked="true"] {
+  box-shadow: 0 0 0 1.5px var(--t3plus-profile-color, var(--foreground));
+}
+.t3plus-pp-swatches[data-field="sky"] .t3plus-pp-swatch {
+  border-radius: 0.3125rem;
+}
+/* Your own color: a swatch that opens the color picker; ringed when it is the one in use. */
+.t3plus-pp-custom {
+  width: 1.5rem;
+  height: 1.5rem;
+  padding: 0;
+  border: 1px dashed color-mix(in srgb, var(--foreground) 45%, transparent);
+  border-radius: 999px;
+  background: transparent;
+  cursor: pointer;
+}
+.t3plus-pp-custom::-webkit-color-swatch-wrapper {
+  padding: 3px;
+}
+.t3plus-pp-custom::-webkit-color-swatch {
+  border: 0;
+  border-radius: 999px;
+}
+.t3plus-pp-custom[data-checked] {
+  border: 1.5px solid var(--foreground);
+}
+/* Not in use: a color wheel (any color), not the color it starts from. */
+.t3plus-pp-custom:not([data-checked])::-webkit-color-swatch {
+  background-image: conic-gradient(from 90deg, #ef4444, #eab308, #22c55e, #14b8a6, #3b82f6, #8b5cf6, #ec4899, #ef4444);
 }

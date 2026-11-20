@@ -185,6 +185,10 @@ export const STORAGE_KEYS = Object.freeze({
   homeFeedCache: "t3plus.homeFeed.cache.v1",
   /** Profiles (src/profiles.js): { active, list: [{ id, name }], projects: { projectKey: profileId } }. */
   profiles: "t3plus.profiles.v2",
+  /** The last t3+ version whose What's New was shown (whatsNew.js). */
+  whatsNew: "t3plus.whatsNew.v1",
+  /** Which window opens it, when several start at once (whatsNew.js). */
+  whatsNewClaim: "t3plus.whatsNew.claim.v1",
 });
 
 export const GRADIENT_MODES = Object.freeze(["half-circle", "image"]);

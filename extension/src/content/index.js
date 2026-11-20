@@ -17,6 +17,7 @@ import { createImageStore, normalizeImageRecord } from "../imageStore.js";
 import { createRuntimeFetcher } from "../runtimeFetch.js";
 import { createSettingsStore, normalizeSettings } from "../settings.js";
 import { createProfiles, normalizeProfiles } from "../profiles.js";
+import { createWhatsNew } from "../whatsNew.js";
 import { normalizeBotPrefsMap, normalizeKnownBots, normalizeManualBots } from "../bots.js";
 import { DESKTOP_IMAGE_LIMITS, STORAGE_KEYS } from "../config.js";
 
@@ -61,7 +62,12 @@ const app = createT3Plus({
     changedEvent: changed,
     isEnabled: () => appRef?.state.settings.sidebar.profiles ?? true,
     isDemo: () => appRef?.state.settings.demo.enabled ?? false,
+    // The open profile's dither color: the glow is drawn again in it.
+    onLook: () => appRef?.profilesLook?.(),
   }),
+  version: chrome.runtime.getManifest?.().version,
+  // After an update, what changed (once); always in Settings → t3+.
+  whatsNew: createWhatsNew({ win: window, doc: document, area, version: chrome.runtime.getManifest?.().version }),
   settingsStore: createSettingsStore(area, changed),
   imageStore: createImageStore(area, changed),
   // The desktop build stores into T3's own localStorage (inject/page-stub.js).
@@ -70,6 +76,8 @@ const app = createT3Plus({
   botFeed: createBotFeed({ area, fetchRemote }),
   homeFeed: createHomeFeed({ area, fetchRemote }),
   backdropRenderer: createBackdropRenderer({ win: window, doc: document }),
+  // The Profiles preview in Settings → t3+ (its own glow, in the color being picked).
+  previewRenderer: createBackdropRenderer({ win: window, doc: document, marksPage: false }),
   assetUrl: (path) => chrome.runtime.getURL(path),
   isAlive: () => Boolean(chrome.runtime?.id),
   backup: {

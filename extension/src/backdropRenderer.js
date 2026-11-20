@@ -51,8 +51,16 @@ export function ditherGrid(width, height, dpr, cellCss = DITHER_CELL_CSS.medium)
   return { cell, cols: Math.ceil(width / cell), rows: Math.ceil(height / cell) };
 }
 
-export function createBackdropRenderer({ win, doc, delayMs = 120 }) {
+export function createBackdropRenderer({ win, doc, delayMs = 120, marksPage = true }) {
   const root = doc.documentElement;
+  // The page's renderer marks <html> while its render shows (the CSS fallback steps
+  // aside); a second one (a preview in Settings) leaves that mark to it.
+  const markPage = (mode) => {
+    if (!marksPage) return;
+    if (mode) {
+      if (root.getAttribute("data-t3plus-dithered") !== mode) root.setAttribute("data-t3plus-dithered", mode);
+    } else root.removeAttribute("data-t3plus-dithered");
+  };
   let lastKey = null;
   let scheduledKey = null;
   // A render that failed (an image that will not decode): its key stays on the CSS
@@ -146,7 +154,7 @@ export function createBackdropRenderer({ win, doc, delayMs = 120 }) {
       const box = imageBox ?? shown;
       setStyle(layer, "background-size", `${px(box.w)} ${px(box.h)}`);
     }
-    if (root.getAttribute("data-t3plus-dithered") !== shown.mode) root.setAttribute("data-t3plus-dithered", shown.mode);
+    markPage(shown.mode);
   }
 
   function clear() {
@@ -156,7 +164,7 @@ export function createBackdropRenderer({ win, doc, delayMs = 120 }) {
     timer = null;
     lastKey = null;
     scheduledKey = null;
-    root.removeAttribute("data-t3plus-dithered");
+    markPage(null);
     layer?.remove();
     layer = pos = nearEl = wideEl = null;
     if (shown && ![...renders.values()].includes(shown)) for (const u of [shown.url, shown.wideUrl]) if (u) win.URL.revokeObjectURL(u);
@@ -328,7 +336,7 @@ export function createBackdropRenderer({ win, doc, delayMs = 120 }) {
         // Fall back to the CSS gradient rather than leave a stale image: the layer's
         // images go too (put back by a later update, it showed the last render over
         // the fallback until the next one landed), and it stays hidden until one does.
-        root.removeAttribute("data-t3plus-dithered");
+        markPage(null);
         for (const el of [layer, nearEl, wideEl]) el?.style.removeProperty("background-image");
         if (layer) layer.hidden = true;
         layer?.remove();
@@ -431,7 +439,7 @@ export function createBackdropRenderer({ win, doc, delayMs = 120 }) {
     if (key === failedKey) {
       // Hidden, not removed: ensureLayer above put it back, and removing it again
       // would be a DOM change on every check.
-      root.removeAttribute("data-t3plus-dithered");
+      markPage(null);
       if (layer && !layer.hidden) layer.hidden = true;
       return;
     }

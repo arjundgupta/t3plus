@@ -429,7 +429,7 @@ test("profiles: dots in the sidebar footer, folders of other profiles hidden, a 
   assert.equal(doc.querySelector('[data-sidebar-row="folder:p/a"]').closest("li").hasAttribute("data-t3plus-profile-off"), true);
   assert.equal(doc.querySelector('[data-sidebar-row="folder:p/b"]').closest("li").hasAttribute("data-t3plus-profile-off"), false);
   assert.equal(doc.querySelector('.t3plus-profile-dot[data-profile="work"]').getAttribute("aria-pressed"), "true");
-  assert.deepEqual(normalizeProfiles({ list: [], projects: { x: "nope" } }), { active: "main", list: [{ id: "main", name: "Main", color: "default" }], projects: {} }, "bad data falls back to one profile");
+  assert.deepEqual(normalizeProfiles({ list: [], projects: { x: "nope" } }), { active: "main", list: [{ id: "main", name: "Main", color: "default", sky: "default", dither: "default" }], projects: {} }, "bad data falls back to one profile");
   profiles.stop();
   assert.equal(doc.querySelector(".t3plus-profiles"), null);
   assert.equal(doc.querySelectorAll("[data-t3plus-profile-off]").length, 0, "stopping shows every folder again");
