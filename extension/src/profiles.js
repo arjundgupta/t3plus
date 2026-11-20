@@ -4,7 +4,8 @@ import { findSidebarInner, threadKeyFromPath } from "./sidebar.js";
 // Profiles, like Dia's (or Arc's spaces): each one shows a set of the sidebar's
 // project folders. A row of small dots at the bottom of the sidebar says which
 // one is open: click a dot, or swipe sideways with two fingers on the sidebar,
-// to switch. Drag a project folder's header and the dots open into named
+// to switch. The list slides away and the next profile's slides in beside it; a
+// swipe moves both with the fingers. Drag a project folder's header and the dots open into named
 // chips: drop it on one to move the project there, or on "New" to start a new
 // profile with it. Right-click (or double-click) a dot to rename or delete it.
 // Everything is local to t3+: T3's projects and folders are only hidden or shown.
@@ -117,7 +118,8 @@ export function createProfiles({ win, doc, area, changedEvent, isEnabled = () =>
     const next = normalizeProfiles(changes[key].newValue);
     // This window's own save coming back: nothing to redo.
     if (JSON.stringify(next) === JSON.stringify(state)) return;
-    state = next;
+    // Mid-switch, the thread just noted for the profile being left is not saved yet: kept.
+    state = slide ? normalizeProfiles({ ...next, last: { ...(next.last ?? {}), ...(state.last ?? {}) } }) : next;
     sync();
   };
 
@@ -143,10 +145,12 @@ export function createProfiles({ win, doc, area, changedEvent, isEnabled = () =>
 
   function renderDots() {
     const signature = JSON.stringify([state.list, dragging ? 1 : 0, isDemo()]);
+    // While a switch slides in, its dot is the open one already.
+    const shown = slide?.committed ? slide.id : state.active;
     if (signature === dotsSignature) {
       // Only the open profile changed: the dots stay (a rebuild dropped keyboard focus).
       for (const dot of dots.querySelectorAll(".t3plus-profile-dot:not(.t3plus-profile-add)")) {
-        const on = dot.dataset.profile === state.active;
+        const on = dot.dataset.profile === shown;
         if (dot.getAttribute("aria-pressed") !== String(on)) dot.setAttribute("aria-pressed", String(on));
         if (dot.tabIndex !== (on ? 0 : -1)) dot.tabIndex = on ? 0 : -1;
       }
@@ -159,9 +163,9 @@ export function createProfiles({ win, doc, area, changedEvent, isEnabled = () =>
       dot.type = "button";
       dot.className = "t3plus-profile-dot";
       dot.setAttribute(T3PLUS.ownedAttr, "");
-      dot.setAttribute("aria-pressed", String(p.id === state.active));
+      dot.setAttribute("aria-pressed", String(p.id === shown));
       // One stop in the Tab order (the open profile); arrows reach the rest.
-      dot.tabIndex = p.id === state.active ? 0 : -1;
+      dot.tabIndex = p.id === shown ? 0 : -1;
       const name = shownName(p, i);
       dot.setAttribute("aria-label", `${name} (profile ${i + 1})`);
       dot.setAttribute("aria-keyshortcuts", i < 9 ? `Control+Shift+${i + 1}` : "");
@@ -192,9 +196,10 @@ export function createProfiles({ win, doc, area, changedEvent, isEnabled = () =>
   }
 
   let nameTimer = null;
-  function flashName() {
-    const i = state.list.findIndex((p) => p.id === state.active);
-    name.textContent = i >= 0 ? shownName(state.list[i], i) : "";
+  function flashName(id = state.active) {
+    const i = state.list.findIndex((p) => p.id === id);
+    if (i < 0) return;
+    name.textContent = shownName(state.list[i], i);
     name.setAttribute("data-show", "");
     win.clearTimeout(nameTimer);
     nameTimer = win.setTimeout(() => name.removeAttribute("data-show"), 900);
@@ -225,9 +230,24 @@ export function createProfiles({ win, doc, area, changedEvent, isEnabled = () =>
    * that switched because you opened a thread (follow) leaves that thread open.
    */
   function switchTo(id, direction = 0, { open = true } = {}) {
-    if (id === state.active || !state.list.some((p) => p.id === id)) return;
+    useUp(gesture); // the rest of a swipe in progress moves nothing
+    // A switch still sliding lands first. Its thread is not opened when another switch
+    // takes its place (T3 would draw a thread nobody sees); the new one opens its own.
+    const pending = slide?.committed && slide.navPending ? slide.id : null;
+    if (slide) landNow({ navigate: false });
+    if (id === state.active || !state.list.some((p) => p.id === id)) {
+      if (pending) openThreadOf(pending);
+      return;
+    }
     const from = state.list.findIndex((p) => p.id === state.active);
     const to = state.list.findIndex((p) => p.id === id);
+    // One landed before its thread opened: the open thread is not its own to remember.
+    const apply = leave(id, { note: !pending });
+    slideTo(id, direction || Math.sign(to - from), { open, apply });
+  }
+  /** Notes the thread to come back to in the profile being left; returns the switch itself. */
+  function leave(id, { note = true } = {}) {
+    if (!note) return () => save({ ...state, active: id });
     const leaving = state.active;
     // The thread open now is the one to come back to in the profile being left
     // (a pinned or settled thread too: they show in every profile).
@@ -235,13 +255,7 @@ export function createProfiles({ win, doc, area, changedEvent, isEnabled = () =>
     const last = { ...(state.last ?? {}) };
     if (current && (threadProfile(current) ?? leaving) === leaving) last[leaving] = current;
     state = { ...state, last };
-    // Asked for right away: T3 renders the thread while the sidebar fades, instead of
-    // after it (a hidden row is opened by its address).
-    if (open) openThreadOf(id);
-    transition(direction || Math.sign(to - from), () => {
-      save({ ...state, active: id });
-      flashName();
-    });
+    return () => save({ ...state, active: id });
   }
 
   // ---------- The profile's own thread ----------
@@ -337,7 +351,7 @@ export function createProfiles({ win, doc, area, changedEvent, isEnabled = () =>
       routeSeen = thread;
       routeSettled = false;
     }
-    if (!thread || routeSettled || swapping) return;
+    if (!thread || routeSettled || slide || landing) return;
     const owner = threadProfile(thread);
     if (owner === null) return; // pinned, settled, not rendered yet: decided when known
     routeSettled = true;
@@ -350,7 +364,9 @@ export function createProfiles({ win, doc, area, changedEvent, isEnabled = () =>
       state = { ...state, last: { ...(state.last ?? {}), [owner]: thread } };
       persistSoon();
     }
-    if (owner !== state.active) switchTo(owner, 0, { open: false });
+    // One this window opened for a switch that a later switch overtook (it opened no
+    // thread of its own, or not yet): no switching back to it.
+    if (owner !== state.active && !own) switchTo(owner, 0, { open: false });
   }
   // The open thread is written down a moment later, not on every navigation.
   let persistTimer = null;
@@ -369,58 +385,258 @@ export function createProfiles({ win, doc, area, changedEvent, isEnabled = () =>
     if (next) switchTo(next.id, delta);
   }
 
-  // The folder list slides in from the side it came from (compositor only).
-  // Switching: the folder list slides out toward the side it is leaving and
-  // fades, the folders swap while it is invisible, then the new set slides in
-  // from the other side. Transform and opacity only (compositor), so it stays
-  // smooth; a switch during one finishes it at once and starts its own.
-  let swapping = null; // { out, done }
-  function transition(direction, apply) {
-    const list = folderList();
-    if (swapping) swapping.done(false); // a switch during one: finish that one now
-    if (!list?.animate || !direction || win.matchMedia?.("(prefers-reduced-motion: reduce)").matches) {
-      apply();
+  // ---------- The slide ----------
+  // Like Dia: the open profile's list slides away sideways and the next profile's
+  // slides in beside it, both moving with the fingers on a swipe. The next one is a
+  // copy of T3's list laid out as the switch will leave it (the other profiles'
+  // folders are rendered, only hidden); when it is in place, the real list takes
+  // over in one frame. Transform only, so the compositor runs it: it keeps moving
+  // while T3 draws the profile's thread, which is asked for once it has started.
+  const SLIDE_MS = 240;
+  const SLIDE_GAP = 12;
+  const SLIDE_EASE = "cubic-bezier(0.25, 1, 0.5, 1)";
+  const SLIDING_ATTR = "data-t3plus-profile-sliding";
+  // Nothing in the copy can be found, focused or clicked: T3's and t3+'s own lookups
+  // (rows, folders, ids) find the real list only. data-sidebar-parent stays (styles).
+  const COPY_DROP = ["id", "data-thread-item", "data-testid", "data-sidebar-row", "tabindex", "aria-controls", "aria-labelledby", "aria-describedby", "aria-owns", "aria-activedescendant"];
+  let slide = null;
+  let landing = false; // inside land(): a route followed now waits for the next check
+  // Each profile's place in the list (this window only): back to where you were.
+  const scrollTops = new Map();
+  const reducedMotion = () => Boolean(win.matchMedia?.("(prefers-reduced-motion: reduce)").matches);
+  const canSlide = () => Boolean(folderList()?.animate) && !reducedMotion();
+  const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
+  // Past the first or last profile the list gives a little and springs back.
+  const rubber = (x, d) => Math.sign(x) * (1 - 1 / ((Math.abs(x) * 0.55) / d + 1)) * d * 0.35;
+  const unrubber = (x, d) => {
+    const k = 1 / Math.max(0.05, 1 - Math.abs(x) / (d * 0.35)) - 1;
+    return (Math.sign(x) * k * d) / 0.55;
+  };
+
+  /** Starts a slide toward profile `id` (null: none that way, the list only gives). */
+  function beginSlide(id, dir) {
+    for (let i = 0; slide && i < 3; i += 1) landNow(); // never two at once
+    const ul = folderList();
+    const group = ul?.parentElement;
+    if (!ul?.animate || !group || !dir) return null;
+    const box = ul.getBoundingClientRect();
+    if (!(box.width > 0)) return null;
+    const outer = group.getBoundingClientRect();
+    const scroller = ul.closest(T3_SELECTORS.sidebarScroller);
+    scrollTops.set(state.active, scroller?.scrollTop ?? 0);
+    const s = {
+      id: null, dir, ul, group, scroller, ghost: null, anims: [], timer: null,
+      phase: "drag", committed: false, navPending: false, open: false, apply: null, pairs: [], copies: new Map(),
+      left: box.left - outer.left - group.clientLeft, top: box.top - outer.top - group.clientTop,
+      width: box.width, height: ul.offsetHeight, distance: Math.round(box.width) + SLIDE_GAP,
+      x: 0, y: 0, raw: 0, v: 0, moves: [], position: null,
+    };
+    group.setAttribute(SLIDING_ATTR, "");
+    if (win.getComputedStyle(group).position === "static") {
+      s.position = group.style.position;
+      group.style.position = "relative";
+    }
+    ul.style.willChange = "transform";
+    slide = s;
+    setTarget(s, id, dir);
+    return s;
+  }
+  /** The profile coming in from side `dir`: a copy of the list as it would show. */
+  function setTarget(s, id, dir) {
+    if (s.ghost) s.copies.set(s.id, { ghost: s.ghost, pairs: s.pairs });
+    s.ghost?.remove();
+    s.ghost = null;
+    s.pairs = [];
+    s.id = id;
+    s.dir = dir;
+    if (!id) return;
+    // Back and forth across the start of a swipe: the copy made the first time.
+    const kept = s.copies.get(id);
+    if (kept) {
+      s.ghost = kept.ghost;
+      s.pairs = kept.pairs;
+      s.group.append(s.ghost);
+      s.y = (s.scroller?.scrollTop ?? 0) - (scrollTops.get(id) ?? 0);
+      placeSlide(s);
       return;
     }
-    const shift = 12;
-    const out = list.animate(
-      [
-        { transform: "none", opacity: 1 },
-        { transform: `translateX(${-direction * shift}px)`, opacity: 0 },
-      ],
-      { duration: 80, easing: "cubic-bezier(0.4, 0, 1, 1)", fill: "forwards" },
-    );
-    let timer = null;
-    const current = {
-      out,
-      /** Stopped mid-switch: drop it (no save after stop). */
-      cancel() {
-        if (swapping !== current) return;
-        swapping = null;
-        win.clearTimeout(timer);
-        out.cancel();
-      },
-      done(animateIn = true) {
-        if (swapping !== current) return;
-        swapping = null;
-        win.clearTimeout(timer);
-        apply();
-        out.cancel();
-        if (animateIn) {
-          list.animate(
-            [
-              { transform: `translateX(${direction * shift}px)`, opacity: 0 },
-              { transform: "none", opacity: 1 },
-            ],
-            { duration: 160, easing: "cubic-bezier(0.22, 1, 0.36, 1)" },
-          );
-        }
-      },
-    };
-    swapping = current;
-    out.onfinish = () => current.done();
+    const ghost = s.ul.cloneNode(false);
+    // The rows that profile shows; the others (most of the list) as empty hidden
+    // stand-ins, so first-child and sibling styles come out as in the real list.
+    for (const item of s.ul.children) {
+      if (shownIn(item, id)) {
+        const copy = copyItem(item, id);
+        s.pairs.push([item, copy]);
+        ghost.append(copy);
+      } else {
+        const stub = item.cloneNode(false);
+        for (const attr of COPY_DROP) stub.removeAttribute(attr);
+        stub.setAttribute("data-t3plus-profile-off", "");
+        ghost.append(stub);
+      }
+    }
+    for (const attr of COPY_DROP) ghost.removeAttribute(attr);
+    ghost.setAttribute(T3PLUS.ownedAttr, "");
+    ghost.setAttribute("data-t3plus-profile-next", "");
+    ghost.setAttribute("aria-hidden", "true");
+    ghost.setAttribute("inert", "");
+    ghost.removeAttribute("style");
+    Object.assign(ghost.style, {
+      position: "absolute", left: `${s.left}px`, top: `${s.top}px`, width: `${s.width}px`,
+      minHeight: `${s.height}px`, margin: "0", pointerEvents: "none", willChange: "transform",
+    });
+    // Shown at the place it was left at (the top, the first time).
+    s.y = (s.scroller?.scrollTop ?? 0) - (scrollTops.get(id) ?? 0);
+    s.group.append(ghost);
+    s.ghost = ghost;
+    placeSlide(s);
+  }
+  /** The project a row of the list belongs to: a folder's, or a thread's in a folder (else null). */
+  function rowProject(item) {
+    if (item.matches(T3_SELECTORS.projectFolderItem)) {
+      const header = item.querySelector(`[data-sidebar-row^="${FOLDER_PREFIX}"]`);
+      return header ? header.getAttribute("data-sidebar-row").slice(FOLDER_PREFIX.length) : null;
+    }
+    if (!item.matches(T3_SELECTORS.threadItem)) return null;
+    const parent = item.querySelector("[data-sidebar-parent]")?.getAttribute("data-sidebar-parent") ?? "";
+    return parent.startsWith(FOLDER_PREFIX) ? parent.slice(FOLDER_PREFIX.length) : null;
+  }
+  // Rows of no project (pinned and settled threads, headings) show in every profile.
+  const shownIn = (item, id) => {
+    const project = rowProject(item);
+    return project === null || profileOf(state, project) === id;
+  };
+  /** A row of the list (a folder, a thread, a heading) as it shows in profile `id`. */
+  function copyItem(item, id) {
+    const copy = item.cloneNode(true);
+    copy.toggleAttribute("data-t3plus-profile-off", !shownIn(item, id));
+    for (const el of [copy, ...copy.querySelectorAll("*")]) for (const attr of COPY_DROP) el.removeAttribute(attr);
+    return copy;
+  }
+  /** T3 moved the open-thread highlight (the thread opened mid-slide): the copy follows. */
+  function refreshCopy(s) {
+    // Screenshot mode covers T3's text after this check: a fresh copy could show it.
+    if (isDemo()) return;
+    const current = (el) => Boolean(el.querySelector("[aria-current]"));
+    for (const pair of s.pairs) {
+      const [item, copy] = pair;
+      if (!item.isConnected || current(item) === current(copy)) continue;
+      pair[1] = copyItem(item, s.id);
+      copy.replaceWith(pair[1]);
+    }
+  }
+  const shift = (x, y = 0) => `translate3d(${x}px, ${y}px, 0)`;
+  function placeSlide(s) {
+    s.ul.style.transform = shift(s.x);
+    if (s.ghost) s.ghost.style.transform = shift(s.x + s.dir * s.distance, s.y);
+  }
+  /** Runs a switch to `id` as a slide (or at once, with nothing to slide). */
+  function slideTo(id, dir, { open = false, apply }) {
+    const s = canSlide() ? beginSlide(id, dir) : null;
+    if (!s) {
+      const scroller = folderList()?.closest(T3_SELECTORS.sidebarScroller) ?? null;
+      if (scroller) scrollTops.set(state.active, scroller.scrollTop);
+      // Asked for first: T3 draws the thread while the sidebar changes.
+      if (open) openThreadOf(id);
+      apply();
+      placeList(scroller, id, open);
+      flashName(id);
+      return;
+    }
+    s.apply = apply;
+    s.open = open;
+    settle(s, true, SLIDE_MS);
+  }
+  /** Lets go: on to the next profile (commit) or back to where it was. */
+  function settle(s, commit, duration) {
+    s.phase = "settle";
+    s.committed = commit && Boolean(s.id);
+    const to = s.committed ? -s.dir * s.distance : 0;
+    // As fast as the fingers were going, within reason.
+    const ms = duration ?? Math.round(clamp(Math.abs(to - s.x) / Math.max(Math.abs(s.v), 0.9), 120, 260));
+    if (s.committed) {
+      renderDots();
+      flashName(s.id);
+    }
+    for (const a of s.anims) a.cancel();
+    const run = (el, from, end, y) =>
+      el.animate([{ transform: shift(from, y) }, { transform: shift(end, y) }], { duration: ms, easing: SLIDE_EASE, fill: "forwards" });
+    s.anims = [run(s.ul, s.x, to, 0)];
+    if (s.ghost) s.anims.push(run(s.ghost, s.x + s.dir * s.distance, to + s.dir * s.distance, s.y));
+    s.anims[0].onfinish = () => land(s);
     // The finish event needs the page to be painting; the switch must happen regardless.
-    timer = win.setTimeout(() => current.done(), 120);
+    s.timer = win.setTimeout(() => land(s), ms + 150);
+    if (s.committed && s.open) {
+      s.navPending = true;
+      // Once the slide runs on the compositor, T3 may take the main thread to draw the thread.
+      const go = () => {
+        if (!s.navPending) return;
+        s.navPending = false;
+        openThreadOf(s.id);
+      };
+      Promise.all(s.anims.map((a) => a.ready)).then(() => win.requestAnimationFrame(() => win.setTimeout(go, 0)), go);
+    }
+  }
+  /** The slide is over: the real list takes the copy's place, in the same frame. */
+  function land(s) {
+    if (slide !== s) return;
+    slide = null;
+    win.clearTimeout(s.timer);
+    for (const a of s.anims) a.cancel();
+    s.ul.style.removeProperty("transform");
+    s.ul.style.removeProperty("will-change");
+    s.ghost?.remove();
+    s.group.removeAttribute(SLIDING_ATTR);
+    if (s.position !== null) s.group.style.position = s.position;
+    if (!s.committed) {
+      renderDots();
+      return;
+    }
+    landing = true;
+    try {
+      s.apply?.();
+    } finally {
+      landing = false;
+    }
+    placeList(s.scroller, s.id, s.open);
+    // Not asked for yet (a window in the background paints no frames): now.
+    if (s.navPending) {
+      s.navPending = false;
+      openThreadOf(s.id);
+    }
+    // A route that wanted following while it slid (a thread of another profile opened):
+    // once whatever landed it (a click, a key, a swipe) has started its own switch.
+    win.setTimeout(() => {
+      if (running && !slide) followRoute();
+    }, 0);
+  }
+  /** The list where it was left in profile `id`; switched because one of its threads opened
+   *  (⌘K, a link), that thread's row in view. */
+  function placeList(scroller, id, open) {
+    if (scroller) scroller.scrollTop = scrollTops.get(id) ?? 0;
+    if (!open) rowOf(sidebarInner(), currentThread() ?? "")?.scrollIntoView?.({ block: "nearest" });
+  }
+  /** Fingers back on the pad while the list springs back: it carries on from where it is. */
+  function resume(s) {
+    const m = /matrix\(([^)]+)\)/.exec(win.getComputedStyle(s.ul).transform ?? "");
+    const x = m ? Number(m[1].split(",")[4]) || 0 : s.x;
+    for (const a of s.anims) a.cancel();
+    s.anims = [];
+    win.clearTimeout(s.timer);
+    s.phase = "drag";
+    s.x = x;
+    s.raw = s.id ? x : unrubber(x, s.distance);
+    s.moves = [];
+    s.v = 0;
+    placeSlide(s);
+  }
+  /** Ends a slide now: one let go goes where it was going, one still under the fingers goes back. */
+  function landNow({ navigate = true } = {}) {
+    const s = slide;
+    if (!s) return;
+    if (s.phase === "drag") s.committed = false;
+    if (!navigate) s.navPending = false;
+    land(s);
   }
 
   // ---------- Rename / delete (right-click or double-click a dot) ----------
@@ -523,17 +739,60 @@ export function createProfiles({ win, doc, area, changedEvent, isEnabled = () =>
     const dot = event.target.closest?.(".t3plus-profile-dot");
     if (!dot) return;
     if (dot.dataset.profile === "+new") {
+      // A new profile still sliding in: a second click (a double-click) makes no other.
+      if (slide?.committed && !state.list.some((p) => p.id === slide.id)) return;
+      useUp(gesture);
+      landNow();
       const id = newProfileId();
-      const list = [...state.list, { id, name: nextName(state.list), color: nextColor(state.list) }];
-      transition(1, () => {
-        save({ ...state, list, active: id });
-        flashName();
-        openEditor(id);
+      const profile = { id, name: nextName(state.list), color: nextColor(state.list) };
+      slideTo(id, 1, {
+        apply: () => {
+          save({ ...state, list: [...state.list, profile], active: id });
+          flashName();
+          openEditor(id);
+        },
       });
       return;
     }
+    // Pressed from the keyboard (Enter or Space on a focused dot: a click with no detail).
+    const fromKeys = event.detail === 0 && doc.activeElement === dot;
     switchTo(dot.dataset.profile);
+    if (fromKeys) holdFocus();
   });
+  // T3 puts the focus in the composer when it opens a thread. A switch made from the
+  // keyboard on the dots keeps it on them (the arrows go on to the next profile),
+  // unless you click or press a key first.
+  // (Checked each frame: in a window without the system focus, focus moves fire no events.)
+  let releaseFocus = null;
+  function holdFocus() {
+    releaseFocus?.();
+    const until = win.performance.now() + 1500;
+    let frame = 0;
+    let times = 0;
+    const check = () => {
+      const active = doc.activeElement;
+      // Not from a dialog T3 opened (an approval, a prompt), and not over and over.
+      if (win.performance.now() > until || times >= 2 || active?.closest?.('dialog, [role="dialog"], [role="alertdialog"], [aria-modal="true"]')) {
+        releaseFocus?.();
+        return;
+      }
+      if (!bar.contains(active)) {
+        times += 1;
+        dots.querySelector('.t3plus-profile-dot[tabindex="0"]')?.focus({ preventScroll: true });
+      }
+      frame = win.requestAnimationFrame(check);
+    };
+    frame = win.requestAnimationFrame(check);
+    const done = () => releaseFocus?.();
+    doc.addEventListener("pointerdown", done, true);
+    doc.addEventListener("keydown", done, true);
+    releaseFocus = () => {
+      win.cancelAnimationFrame(frame);
+      doc.removeEventListener("pointerdown", done, true);
+      doc.removeEventListener("keydown", done, true);
+      releaseFocus = null;
+    };
+  }
   dots.addEventListener("dblclick", (event) => {
     const dot = event.target.closest?.(".t3plus-profile-dot");
     if (dot && dot.dataset.profile !== "+new") openEditor(dot.dataset.profile);
@@ -576,28 +835,150 @@ export function createProfiles({ win, doc, area, changedEvent, isEnabled = () =>
     wheelHost = host;
     wheelHost?.addEventListener("wheel", onWheel, { capture: true, passive: false });
   }
-  let swipeX = 0;
-  let swipeLock = false;
+  // One gesture: wheel events with no pause longer than this. After it, the
+  // fingers (and the momentum that follows them) have stopped. Wheel events cannot
+  // tell fingers resting on the pad from lifted ones: long enough for a hesitation.
+  const SWIPE_IDLE_MS = 140;
+  // A swipe that has switched swallows what follows it the same way (the momentum,
+  // and events T3's drawing of the thread held back) until a pause this long, or
+  // until the fingers go the other way.
+  const SWIPE_DONE_MS = 260;
+  // ...counted in painted frames as well: while T3 draws the thread no frames are
+  // painted, and the momentum it held back arrives all at once afterwards.
+  const SWIPE_DONE_FRAMES = 8;
+  function countQuiet(g) {
+    win.cancelAnimationFrame?.(g.frame);
+    if (!win.requestAnimationFrame) {
+      g.quiet = SWIPE_DONE_FRAMES; // no frames to count: the time alone
+      return;
+    }
+    g.quiet = 0;
+    const tick = () => {
+      g.quiet += 1;
+      if (gesture === g && g.quiet < SWIPE_DONE_FRAMES) g.frame = win.requestAnimationFrame(tick);
+    };
+    g.frame = win.requestAnimationFrame(tick);
+  }
+  /** The swipe in progress has done its switch (or another switch replaced it): the rest of it moves nothing. */
+  function useUp(g, sign = 0) {
+    if (!g) return;
+    g.done = true;
+    g.sign = sign;
+    countQuiet(g);
+  }
+  let gesture = null; // { at, axis, sx, sy, raw, last, slows, done, sign, quiet, frame }
   let swipeTimer = null;
   function onWheel(event) {
-    if (!isEnabled() || state.list.length < 2) return;
-    const inner = event.target.closest?.(T3_SELECTORS.sidebarInner);
-    if (!inner) return;
-    if (Math.abs(event.deltaX) <= Math.abs(event.deltaY) * 1.2) return;
-    event.preventDefault();
-    win.clearTimeout(swipeTimer);
-    // One switch per gesture: the lock lasts until the fingers (and the momentum) stop.
-    swipeTimer = win.setTimeout(() => {
-      swipeX = 0;
-      swipeLock = false;
-    }, 220);
-    if (swipeLock) return;
-    swipeX += event.deltaX;
-    if (Math.abs(swipeX) >= SWIPE_PX) {
-      swipeLock = true;
-      step(swipeX > 0 ? 1 : -1);
-      swipeX = 0;
+    if (!isEnabled() || state.list.length < 2 || event.ctrlKey) return; // ctrl: pinch-zoom
+    if (!event.target.closest?.(T3_SELECTORS.sidebarInner)) return;
+    const scale = event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? 400 : 1;
+    const dx = event.deltaX * scale;
+    const dy = event.deltaY * scale;
+    const t = win.performance.now();
+    const g0 = gesture;
+    const fresh = !g0
+      || (g0.done ? t - g0.at > SWIPE_DONE_MS && g0.quiet >= SWIPE_DONE_FRAMES : t - g0.at > SWIPE_IDLE_MS)
+      // After a switch, the other way or up and down: a new gesture (the momentum
+      // goes on the way the swipe went).
+      || (g0.done && g0.sign && Math.sign(dx) === -g0.sign && Math.abs(dx) >= 3)
+      || (g0.done && Math.abs(dy) > Math.abs(dx) * 1.2 && Math.abs(dy) >= 3);
+    if (fresh) {
+      if (g0) win.cancelAnimationFrame?.(g0.frame);
+      gesture = { at: t, axis: null, sx: 0, sy: 0, raw: 0, last: 0, slows: 0, done: false, sign: 0, quiet: 0, frame: 0 };
     }
+    const g = gesture;
+    g.at = t;
+    if (g.axis === null) {
+      // Sideways or up and down, decided over the first few pixels and kept to the end:
+      // scrolling the list never turns into a switch halfway.
+      g.sx += dx;
+      g.sy += dy;
+      if (Math.abs(g.sx) + Math.abs(g.sy) < 4) {
+        if (Math.abs(dx) > Math.abs(dy)) event.preventDefault();
+        return;
+      }
+      g.axis = Math.abs(g.sx) > Math.abs(g.sy) * 1.2 ? "x" : "y";
+      if (g.axis === "y") return;
+      event.preventDefault();
+      armSwipeEnd();
+      if (g.done) countQuiet(g);
+      else drag(-g.sx, t);
+      return;
+    }
+    if (g.axis !== "x") return;
+    event.preventDefault();
+    armSwipeEnd();
+    if (g.done) {
+      countQuiet(g);
+      return;
+    }
+    drag(-dx, t);
+  }
+  function armSwipeEnd() {
+    win.clearTimeout(swipeTimer);
+    swipeTimer = win.setTimeout(endSwipe, SWIPE_IDLE_MS);
+  }
+  /** The fingers moved the list by `delta` px at time `t` (left is negative: the next profile). */
+  function drag(delta, t) {
+    const g = gesture;
+    g.slows = Math.abs(delta) < Math.abs(g.last) ? g.slows + 1 : 0;
+    g.last = -delta;
+    if (slide && slide.phase !== "drag") {
+      // Springing back: picked up where it is. A switch still landing: landed first,
+      // and its profile is the open one.
+      if (!slide.committed) resume(slide);
+      else landNow();
+    }
+    const i = state.list.findIndex((p) => p.id === state.active);
+    const neighbor = (dir) => state.list[i + dir]?.id ?? null;
+    let s = slide;
+    if (!s && canSlide()) s = beginSlide(neighbor(delta < 0 ? 1 : -1), delta < 0 ? 1 : -1);
+    if (!s) {
+      // Nothing to slide (reduced motion): one switch once the fingers have gone far enough.
+      g.raw += delta;
+      if (Math.abs(g.raw) >= SWIPE_PX) {
+        useUp(g, g.raw < 0 ? 1 : -1);
+        step(g.sign);
+      }
+      return;
+    }
+    s.raw += delta;
+    // Speed over the last 80 ms of movement (px/ms): a single event says little.
+    s.moves.push([t, s.raw]);
+    while (s.moves.length > 2 && t - s.moves[0][0] > 80) s.moves.shift();
+    const [t0, raw0] = s.moves[0];
+    s.v = t - t0 >= 8 ? (s.raw - raw0) / (t - t0) : 0;
+    // Back past where it started: the profile on the other side comes in instead.
+    const dir = s.raw < 0 ? 1 : s.raw > 0 ? -1 : s.dir;
+    if (dir !== s.dir) setTarget(s, neighbor(dir), dir);
+    s.x = s.id ? clamp(s.raw, -s.distance, s.distance) : rubber(s.raw, s.distance);
+    // The list scrolled under the copy (a swipe that began a little diagonally): kept in line.
+    if (s.ghost && s.scroller) s.y = s.scroller.scrollTop - (scrollTops.get(s.id) ?? 0);
+    placeSlide(s);
+    // All the way over, or let go with the list well on its way (the momentum slowing
+    // down): no need to wait for the last of the momentum.
+    // (A finger slowing down looks the same as momentum dying out: only well past half.)
+    if (s.id && (Math.abs(s.x) >= s.distance || (g.slows >= 6 && Math.abs(s.x) > s.distance * 0.6))) commitSwipe(s);
+  }
+  function commitSwipe(s) {
+    useUp(gesture, -Math.sign(s.raw)); // the way the fingers went (as DOM deltaX)
+    s.apply = leave(s.id);
+    s.open = true;
+    settle(s, true);
+  }
+  function endSwipe() {
+    const s = slide;
+    if (s && s.phase === "drag") {
+      // A third of the way, or a flick toward the next profile. A commit keeps the
+      // gesture (done): what it held back still moves nothing.
+      const toward = -s.dir;
+      if (s.id && (Math.abs(s.x) > s.distance * 0.3 || (s.v * toward > 0.5 && Math.abs(s.x) > 16))) {
+        commitSwipe(s);
+        return;
+      }
+      settle(s, false);
+    }
+    if (!gesture?.done) gesture = null; // a done one swallows the rest until a longer pause
   }
 
   // ---------- Drag a folder onto a profile ----------
@@ -690,8 +1071,8 @@ export function createProfiles({ win, doc, area, changedEvent, isEnabled = () =>
     if (!target) return;
     event.preventDefault();
     event.stopPropagation();
-    const from = state.list.findIndex((p) => p.id === state.active);
-    switchTo(target.id, Math.sign(Number(n) - 1 - from));
+    if (event.repeat) return; // held down: one switch
+    switchTo(target.id); // its side, from the profile open once any slide has landed
   };
   const onClick = (event) => {
     if (!swallowClick) return;
@@ -735,6 +1116,13 @@ export function createProfiles({ win, doc, area, changedEvent, isEnabled = () =>
     const inner = sidebarInner();
     const footer = inner?.querySelector(T3_SELECTORS.sidebarFooter);
     watchWheel(on ? inner : null);
+    if (!on && slide) {
+      // Profiles turned off mid-switch: dropped, the list as it was.
+      slide.committed = false;
+      slide.navPending = false;
+      land(slide);
+      gesture = null;
+    }
     if (!on || !footer) {
       if (bar.isConnected) bar.remove();
       for (const el of doc.querySelectorAll("[data-t3plus-profile-off]")) {
@@ -760,6 +1148,7 @@ export function createProfiles({ win, doc, area, changedEvent, isEnabled = () =>
     }
     if (placeNew(folders.map(([, project]) => project))) return; // saved, and synced again with it
     for (const [folder, project] of folders) hide(folder, profileOf(state, project) !== state.active);
+    if (slide?.ghost) refreshCopy(slide);
     // A folder's threads are its next siblings, not its children: each row names
     // its folder in data-sidebar-parent. Pinned and settled threads stay everywhere.
     for (const item of inner.querySelectorAll(T3_SELECTORS.threadItem)) {
@@ -810,7 +1199,16 @@ export function createProfiles({ win, doc, area, changedEvent, isEnabled = () =>
         persistTimer = null;
         area.set({ [key]: state }).catch?.(() => {});
       }
-      swapping?.cancel();
+      if (slide) {
+        // Stopped mid-switch: dropped (nothing is saved after stop).
+        slide.committed = false;
+        slide.navPending = false;
+        land(slide);
+      }
+      if (gesture) win.cancelAnimationFrame?.(gesture.frame);
+      gesture = null;
+      for (const el of doc.querySelectorAll("[data-t3plus-profile-next]")) el.remove();
+      releaseFocus?.();
       dragging?.ghost.remove();
       dragging = null;
       pending = null;

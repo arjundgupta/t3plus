@@ -2044,6 +2044,11 @@ html[data-t3plus-demo] img[data-t3plus-demo-badge] {
 [data-t3plus-profile-off] {
   display: none !important;
 }
+/* Switching: the list and the next profile's (a copy) slide side by side, clipped
+   at the sidebar's edges (a moved list would otherwise widen the scroll area). */
+[data-t3plus-profile-sliding] {
+  overflow-x: clip;
+}
 
 /* A row of small dots at the top of the sidebar footer. */
 .t3plus-profiles {

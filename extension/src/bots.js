@@ -527,8 +527,9 @@ export function undecorateBotRow(row) {
 /** Removes all bot decoration under `root` (feature off, or stop). */
 export function clearBotDecoration(root) {
   for (const row of root.querySelectorAll(`[${T3PLUS.botAttr}]`)) undecorateBotRow(row);
-  // Profiles (profiles.js) live in the same sidebar and stay when bots are off.
-  for (const el of root.querySelectorAll(`[${T3PLUS.ownedAttr}]`)) if (!el.closest(".t3plus-profiles")) el.remove();
+  // Profiles (profiles.js) live in the same sidebar and stay when bots are off: the dots,
+  // and the copy of the list that slides in while switching.
+  for (const el of root.querySelectorAll(`[${T3PLUS.ownedAttr}]`)) if (!el.closest(".t3plus-profiles, [data-t3plus-profile-next]")) el.remove();
 }
 
 /** Decorates the active thread breadcrumb without changing T3's route/header structure. */

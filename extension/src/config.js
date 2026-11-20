@@ -91,6 +91,8 @@ export const T3_SELECTORS = Object.freeze({
   rowDirTitle: "span[dir]",
   /** A folder header's project name. */
   folderTitle: ".truncate",
+  /** The sidebar's scrolling viewport, around the thread list. */
+  sidebarScroller: '[data-slot="scroll-area-viewport"]',
   /** The sidebar's footer (the profile dots go at its top). */
   sidebarFooter: '[data-slot="sidebar-footer"], [data-sidebar="footer"]',
   /** Any sidebar at all, and the desktop sidebar's outer wrapper. */
