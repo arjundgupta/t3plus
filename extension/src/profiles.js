@@ -126,7 +126,7 @@ function ageMinutes(text) {
   return Number(m[1]) * { s: 1 / 60, m: 1, h: 60, d: 1440, w: 10080, mo: 43200, y: 525600 }[m[2]];
 }
 
-export function createProfiles({ win, doc, area, changedEvent, isEnabled = () => true, isDemo = () => false, onLook = null }) {
+export function createProfiles({ win, doc, area, changedEvent, isEnabled = () => true, isDemo = () => false, onLook = null, onChange = null }) {
   // Screenshot mode: profile names are the user's own words ("Acme work"), so the
   // dots, chips and name pill say "Profile 1", "Profile 2". The rename field,
   // opened on purpose, keeps the real name.
@@ -142,26 +142,38 @@ export function createProfiles({ win, doc, area, changedEvent, isEnabled = () =>
     const seen = changes;
     const stored = (await area.get(key))?.[key];
     if (!running) return;
-    if (changes === seen) state = normalizeProfiles(stored); // else onChanged has the newer one
+    if (changes === seen) {
+      // (else onChanged has the newer one)
+      state = normalizeProfiles(stored);
+      storedJson = stored === undefined ? null : JSON.stringify(state);
+    }
     loaded = true;
     sync();
+    onChange?.();
   }
   let saving = Promise.resolve();
   // This window's writes not yet seen coming back (their JSON). Its own echo is not news
   // from another window: taken as such, an older write's echo undid a newer save, which
   // the queued write then lost for good.
   const echoes = [];
+  // What storage holds now, as far as this window knows: a write of the same is skipped
+  // (storage reports no change for it, so its echo would never come back and would stay
+  // to swallow another window's write of that value).
+  let storedJson = null;
   function write() {
-    const value = state;
+    const value = normalizeProfiles(state); // its JSON is the echo's (key order and all)
     const json = JSON.stringify(value);
+    if (json === storedJson) return Promise.resolve();
+    storedJson = json;
     echoes.push(json);
     if (echoes.length > 20) echoes.shift();
     return area.set({ [key]: value });
   }
   function save(next) {
     state = normalizeProfiles(next);
+    saving = saving.catch(() => {}).then(write); // queued first: a check that throws loses no save
     sync();
-    saving = saving.catch(() => {}).then(write);
+    onChange?.();
     return saving;
   }
   const onChanged = (changes_, areaName) => {
@@ -170,6 +182,7 @@ export function createProfiles({ win, doc, area, changedEvent, isEnabled = () =>
     changes += 1;
     const next = normalizeProfiles(changes_[key].newValue);
     const json = JSON.stringify(next);
+    storedJson = json;
     // This window's own save coming back (the latest, or an older one): nothing to redo.
     const own = echoes.indexOf(json);
     if (own >= 0) {
@@ -180,6 +193,7 @@ export function createProfiles({ win, doc, area, changedEvent, isEnabled = () =>
     // Mid-switch, the thread just noted for the profile being left is not saved yet: kept.
     state = slide ? normalizeProfiles({ ...next, last: { ...(next.last ?? {}), ...(state.last ?? {}) } }) : next;
     sync();
+    onChange?.();
   };
 
   // ---------- The dots ----------
@@ -201,6 +215,7 @@ export function createProfiles({ win, doc, area, changedEvent, isEnabled = () =>
   dots.setAttribute("aria-label", "Profiles");
   bar.append(name, dots);
   let dotsSignature = "";
+  let tabShown = null; // the profile the Tab stop was last given to
 
   function renderDots() {
     const signature = JSON.stringify([state.list, dragging ? 1 : 0, isDemo()]);
@@ -209,14 +224,19 @@ export function createProfiles({ win, doc, area, changedEvent, isEnabled = () =>
     flashName(shown);
     if (signature === dotsSignature) {
       // Only the open profile changed: the dots stay (a rebuild dropped keyboard focus).
-      for (const dot of dots.querySelectorAll(".t3plus-profile-dot:not(.t3plus-profile-add)")) {
+      // The Tab stop goes to the open profile (a switch moves it), but not back while the
+      // arrows move it around the dots.
+      const roving = dots.contains(doc.activeElement) && shown === tabShown;
+      tabShown = shown;
+      for (const dot of dots.querySelectorAll(".t3plus-profile-dot")) {
         const on = dot.dataset.profile === shown;
-        if (dot.getAttribute("aria-pressed") !== String(on)) dot.setAttribute("aria-pressed", String(on));
-        if (dot.tabIndex !== (on ? 0 : -1)) dot.tabIndex = on ? 0 : -1;
+        if (!dot.classList.contains("t3plus-profile-add") && dot.getAttribute("aria-pressed") !== String(on)) dot.setAttribute("aria-pressed", String(on));
+        if (!roving && dot.tabIndex !== (on ? 0 : -1)) dot.tabIndex = on ? 0 : -1;
       }
       return;
     }
     dotsSignature = signature;
+    tabShown = shown;
     dots.replaceChildren();
     for (const [i, p] of state.list.entries()) {
       const dot = doc.createElement("button");
@@ -313,10 +333,8 @@ export function createProfiles({ win, doc, area, changedEvent, isEnabled = () =>
     skyProbe.remove();
     const m = /oklch\(\s*[\d.]+%?\s+[\d.]+\s+([\d.]+)/i.exec(color);
     const hue = m ? Number.parseFloat(m[1]) : /^#[0-9a-f]{6}$/i.test(color) ? oklchHue(color) : rgbHue(color);
-    if (Number.isFinite(hue)) {
-      skyBaseKey = stamp;
-      skyBaseHue = hue;
-    }
+    skyBaseKey = stamp; // also when unreadable: not probed again until the theme changes
+    if (Number.isFinite(hue)) skyBaseHue = hue;
     return skyBaseHue;
   }
   /** The OKLCH hue of "rgb(r, g, b)" (how some colors come back computed). */
@@ -426,6 +444,9 @@ export function createProfiles({ win, doc, area, changedEvent, isEnabled = () =>
   // while T3 is still opening the previous one compares against it, and the late
   // arrival of that previous one is not taken for a thread opened from elsewhere.
   let opening = null; // { thread, at }
+  // A switch made where no thread shows (Settings, a draft): coming back to the chat (T3
+  // reopens the thread it had) opens the profile's own thread, instead of switching back.
+  let openLater = null;
   // thread key -> project key, for threads seen in a folder (their rows go when a
   // folder is collapsed; the profile of a thread opened from there is still known).
   const threadProjects = new Map();
@@ -467,8 +488,20 @@ export function createProfiles({ win, doc, area, changedEvent, isEnabled = () =>
       const owner = threadProfile(target);
       // Moved to another profile since, or gone: its folder is open, yet its row is not there.
       const project = threadProjects.get(target);
-      const folderOpen = project !== undefined && inner?.querySelector(`[data-sidebar-row="${cssEscape(FOLDER_PREFIX + project)}"][aria-expanded="true"]`);
-      if ((owner !== null && owner !== id) || (!rowOf(inner, target) && folderOpen)) target = null;
+      // Its row may be missing because its folder is collapsed (then it opens by address).
+      // Known folder: that one is open. Unknown (seen in an earlier session): none of the
+      // profile's folders is collapsed. Either way the thread is gone: forgotten.
+      const gone = !rowOf(inner, target) && (project !== undefined
+        ? Boolean(inner?.querySelector(`[data-sidebar-row="${cssEscape(FOLDER_PREFIX + project)}"][aria-expanded="true"]`))
+        : ![...(inner?.querySelectorAll(`[data-sidebar-row^="${FOLDER_PREFIX}"][aria-expanded="false"]`) ?? [])].some((h) => profileOf(state, h.getAttribute("data-sidebar-row").slice(FOLDER_PREFIX.length)) === id));
+      if ((owner !== null && owner !== id) || gone) {
+        if (gone) {
+          const { [id]: _gone, ...rest } = state.last ?? {};
+          state = { ...state, last: rest };
+          persistSoon();
+        }
+        target = null;
+      }
     }
     target ??= recentThreadOf(id);
     if (!target || !onThreadPage()) return null;
@@ -583,6 +616,14 @@ export function createProfiles({ win, doc, area, changedEvent, isEnabled = () =>
     const owner = threadProfile(thread);
     if (owner === null) return; // pinned, settled, not rendered yet: decided when known
     routeSettled = true;
+    if (openLater !== null) {
+      const wanted = openLater;
+      openLater = null;
+      if (wanted === state.active && owner !== state.active && !(opening && opening.thread === thread)) {
+        openThreadOf(state.active);
+        return;
+      }
+    }
     // One this window opened for a switch: not a thread opened from elsewhere. Only the
     // newest such request counts as current; an older one landing late is overtaken.
     const own = opening && Date.now() - opening.at < 1500;
@@ -760,6 +801,7 @@ export function createProfiles({ win, doc, area, changedEvent, isEnabled = () =>
   }
   /** Runs a switch to `id` as a slide (or at once, with nothing to slide). */
   function slideTo(id, dir, { open = false, apply }) {
+    openLater = open && !onThreadPage() ? id : null;
     const s = canSlide() ? beginSlide(id, dir) : null;
     if (!s) {
       const scroller = folderList()?.closest(T3_SELECTORS.sidebarScroller) ?? null;
@@ -875,16 +917,20 @@ export function createProfiles({ win, doc, area, changedEvent, isEnabled = () =>
 
   // ---------- Rename / delete (right-click or double-click a dot) ----------
   let editor = null;
+  let editorCommit = null;
   function closeEditor(refocus = false) {
     const id = editor?.dataset.profile;
     const hadFocus = editor?.contains(doc.activeElement);
     editor?.remove();
     editor = null;
-    // Closed from the keyboard (Escape, Enter): back to the profile's dot, not lost to <body>.
-    if (refocus || hadFocus) dots.querySelector(`.t3plus-profile-dot[data-profile="${id}"]`)?.focus();
+    editorCommit = null;
+    // Closed from the keyboard (Escape, Enter): back to the profile's dot, not lost to
+    // <body> (the open profile's, when its own was deleted).
+    if (refocus || hadFocus) (dots.querySelector(`.t3plus-profile-dot[data-profile="${id}"]`) ?? dots.querySelector('.t3plus-profile-dot[tabindex="0"]'))?.focus();
   }
   function openEditor(id) {
-    closeEditor();
+    if (editorCommit) editorCommit(); // the name being typed in the open one is kept
+    else closeEditor();
     const profile = state.list.find((p) => p.id === id);
     if (!profile) return;
     editor = doc.createElement("div");
@@ -908,10 +954,12 @@ export function createProfiles({ win, doc, area, changedEvent, isEnabled = () =>
     const self = editor;
     const commit = (refocus = false) => {
       if (editor !== self) return;
+      editorCommit = null;
       const value = input.value.trim();
       if (value && value !== profile.name) save({ ...state, list: state.list.map((p) => (p.id === id ? { ...p, name: value } : p)) });
       closeEditor(refocus);
     };
+    editorCommit = commit;
     // For the whole editor, not just the name field: tabbing on through the delete
     // button and the swatches left it open for good, and dropped the typed name.
     editor.addEventListener("keydown", (e) => {
@@ -1095,7 +1143,7 @@ export function createProfiles({ win, doc, area, changedEvent, isEnabled = () =>
       }
       if (!bar.contains(active)) {
         times += 1;
-        dots.querySelector('.t3plus-profile-dot[tabindex="0"]')?.focus({ preventScroll: true });
+        dots.querySelector('.t3plus-profile-dot[aria-pressed="true"]')?.focus({ preventScroll: true });
       }
       frame = win.requestAnimationFrame(check);
     };
@@ -1515,10 +1563,10 @@ export function createProfiles({ win, doc, area, changedEvent, isEnabled = () =>
       doc.removeEventListener("click", onClick, true);
       running = false;
       win.clearTimeout(swipeTimer);
-      if (persistTimer !== null) {
+      const flush = persistTimer !== null;
+      if (flush) {
         win.clearTimeout(persistTimer);
         persistTimer = null;
-        write()?.catch?.(() => {});
       }
       if (slide) {
         // Stopped mid-switch: dropped (nothing is saved after stop).
@@ -1538,6 +1586,15 @@ export function createProfiles({ win, doc, area, changedEvent, isEnabled = () =>
       closeEditor();
       loaded = false;
       sync();
+      // The thread note not yet written, last: storage can throw here (an extension
+      // reloaded under this copy), and nothing above may be left undone by it.
+      if (flush) {
+        try {
+          write()?.catch?.(() => {});
+        } catch {
+          // gone with the old copy
+        }
+      }
     },
     /** For tests and the settings panel. */
     switchTo,

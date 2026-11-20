@@ -9,6 +9,15 @@ import { STORAGE_KEYS, T3PLUS } from "./config.js";
 
 export const WHATS_NEW = Object.freeze([
   {
+    version: "0.22.1",
+    date: "2026-11-20",
+    notes: [
+      ["Profiles hold on to changes", "quick changes, or ones made in another window, are no longer lost or undone, and Settings can no longer change them before they have loaded."],
+      ["Fixes", "a thread deleted earlier is no longer reopened, a name being typed is kept when you right-click another dot, a switch made on the Settings page stays when you go back to the chat, and the Settings profile card follows changes made in the sidebar."],
+      ["What's New", "T3's shortcuts stay out of the way behind it, and the notes scroll with the keyboard."],
+    ],
+  },
+  {
     version: "0.22.0",
     date: "2026-11-20",
     notes: [
@@ -110,37 +119,41 @@ export function createWhatsNew({ win, doc, area, version, entries = WHATS_NEW })
     if (!sheet) return;
     sheet.remove();
     sheet = null;
+    bodyWatch?.disconnect();
+    bodyWatch = null;
+    doc.removeEventListener("focusin", onFocus, true);
     for (const el of walled) el.removeAttribute("inert");
     walled = [];
     if (returnFocus?.isConnected) returnFocus.focus({ preventScroll: true });
     returnFocus = null;
   }
-  // Keys while the sheet is open are the sheet's. Listening on the window from the start
-  // (before T3 adds its own) and marking them handled: T3's shortcuts skip a key whose
-  // default is prevented (⌘K, ⌘B and the composer's do nothing behind the sheet).
+  // Keys while the sheet is open are the sheet's, without taking keys from the sheet
+  // itself (scrolling, copying, the app's own ⌘Q stay): T3 skips a key that comes from
+  // inside an alertdialog (its shortcuts) or a modal (its other key handlers), and the
+  // focus is kept inside the sheet. On the window from the start, so handlers added
+  // later (the extension loads before T3) never see one.
   function onKey(event) {
     if (!sheet) return;
-    const inSheet = sheet.contains(event.target);
     event.stopImmediatePropagation();
     if (event.key === "Escape") {
       event.preventDefault();
       close();
-      return;
-    }
-    if (event.key === "Tab") {
+    } else if (event.key === "Tab") {
       event.preventDefault();
       const focusable = [...sheet.querySelectorAll("button, a[href]")];
       if (!focusable.length) return;
       const at = focusable.indexOf(doc.activeElement);
       const next = at < 0 ? (event.shiftKey ? focusable.length - 1 : 0) : (at + (event.shiftKey ? -1 : 1) + focusable.length) % focusable.length;
       focusable[next].focus();
-      return;
     }
-    // Enter or Space on the sheet's own button still presses it.
-    if (inSheet && (event.key === "Enter" || event.key === " ")) return;
-    event.preventDefault();
   }
   win.addEventListener("keydown", onKey, true);
+  // Focus leaving the sheet (a click on its text, T3 focusing its composer) comes back to it.
+  function onFocus(event) {
+    if (sheet && !sheet.contains(event.target)) sheet.querySelector(".t3plus-whatsnew-page")?.focus({ preventScroll: true });
+  }
+  // What T3 adds to the page while the sheet is open (a toast, a popover) is out of reach too.
+  let bodyWatch = null;
 
   /** The sheet with every version's notes, over T3. */
   function open() {
@@ -150,11 +163,13 @@ export function createWhatsNew({ win, doc, area, version, entries = WHATS_NEW })
     sheet = doc.createElement("div");
     sheet.className = "t3plus-whatsnew";
     sheet.setAttribute(T3PLUS.ownedAttr, "");
-    sheet.setAttribute("role", "dialog");
+    // An alertdialog: T3's shortcuts skip keys from inside one.
+    sheet.setAttribute("role", "alertdialog");
     sheet.setAttribute("aria-modal", "true");
     sheet.setAttribute("aria-labelledby", "t3plus-whatsnew-title");
     const page = doc.createElement("div");
     page.className = "t3plus-whatsnew-page";
+    page.tabIndex = -1; // takes the focus when its text is clicked (else <body>, outside the sheet)
     const header = doc.createElement("header");
     header.className = "t3plus-whatsnew-header";
     const title = doc.createElement("h2");
@@ -181,6 +196,18 @@ export function createWhatsNew({ win, doc, area, version, entries = WHATS_NEW })
     walled = [...doc.body.children].filter((el) => !el.hasAttribute("inert"));
     for (const el of walled) el.setAttribute("inert", "");
     doc.body.append(sheet);
+    bodyWatch = new win.MutationObserver((records) => {
+      for (const r of records) {
+        for (const el of r.addedNodes) {
+          if (el.nodeType === 1 && el !== sheet && !el.hasAttribute("inert")) {
+            el.setAttribute("inert", "");
+            walled.push(el);
+          }
+        }
+      }
+    });
+    bodyWatch.observe(doc.body, { childList: true });
+    doc.addEventListener("focusin", onFocus, true);
     if (!win.matchMedia?.("(prefers-reduced-motion: reduce)").matches) {
       sheet.animate?.([{ opacity: 0 }, { opacity: 1 }], { duration: 180, easing: "cubic-bezier(0, 0, 0.2, 1)" });
     }
@@ -195,6 +222,7 @@ export function createWhatsNew({ win, doc, area, version, entries = WHATS_NEW })
     },
     async start() {
       running = true;
+      win.addEventListener("keydown", onKey, true); // again after a stop (the same listener once)
       if (!version || !area) return;
       let got;
       try {

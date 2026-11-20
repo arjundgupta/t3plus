@@ -48,7 +48,7 @@ test("after an update the sheet opens once, marks the installed version, and Esc
   await new Promise((r) => setTimeout(r, 1600));
   const s = sheet(t);
   assert.ok(s);
-  assert.equal(s.getAttribute("role"), "dialog");
+  assert.equal(s.getAttribute("role"), "alertdialog", "T3's shortcuts skip keys from inside one");
   assert.equal(s.querySelector("h2").textContent, "What's New");
   const installed = [...s.querySelectorAll(".t3plus-notes-title")].find((h) => h.textContent.includes("Installed"));
   assert.match(installed.textContent, /^0\.21\.0/);
@@ -118,16 +118,25 @@ test("it waits while you type, opens in one window of several, and keeps keys an
   await new Promise((r) => setTimeout(r, 3200));
   assert.ok(sheet(t), "after a pause");
   assert.ok(t.doc.getElementById("before").hasAttribute("inert"), "the page behind is out of reach");
-  // T3's own shortcut handler: on the window, in the capture phase, added after t3+'s
-  // (as at boot), and skipping keys whose default is prevented.
-  let acted = false;
-  t.win.addEventListener("keydown", (e) => {
-    if (!e.defaultPrevented) acted = true;
-  }, true);
-  const k = new t.win.KeyboardEvent("keydown", { key: "k", metaKey: true, bubbles: true, cancelable: true });
-  t.doc.body.dispatchEvent(k);
-  assert.equal(acted, false, "T3's shortcuts do not act behind it");
-  assert.equal(k.defaultPrevented, true);
+  // A handler added after t3+'s (the extension loads first) never sees a key.
+  let later = false;
+  t.win.addEventListener("keydown", () => (later = true), true);
+  const close = sheet(t).querySelector(".t3plus-whatsnew-close");
+  close.dispatchEvent(new t.win.KeyboardEvent("keydown", { key: "k", metaKey: true, bubbles: true, cancelable: true }));
+  assert.equal(later, false, "T3's shortcuts do not act behind it");
+  // Keys for the sheet itself are not taken from it: the notes scroll, text copies.
+  const down = new t.win.KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true, cancelable: true });
+  close.dispatchEvent(down);
+  assert.equal(down.defaultPrevented, false, "arrow keys scroll the notes");
+  // The focus stays in the sheet (T3 skips keys from inside it).
+  t.doc.body.focus();
+  t.doc.getElementById("before").dispatchEvent(new t.win.FocusEvent("focusin", { bubbles: true }));
+  assert.ok(sheet(t).contains(t.doc.activeElement), "focus that leaves comes back");
+  // What T3 adds to the page meanwhile is out of reach too.
+  const toast = t.doc.createElement("div");
+  t.doc.body.append(toast);
+  await settle();
+  assert.ok(toast.hasAttribute("inert"));
   t.doc.body.focus();
   const tab = new t.win.KeyboardEvent("keydown", { key: "Tab", bubbles: true, cancelable: true });
   t.doc.body.dispatchEvent(tab);
@@ -147,4 +156,22 @@ test("it waits while you type, opens in one window of several, and keeps keys an
   assert.equal(shown, 1);
   a.whatsNew.stop();
   b.stop();
+});
+
+test("on desktop (t3+ injected after T3 set up its keys), T3's shortcuts skip keys from inside the sheet", async () => {
+  const dom = createDom("/env/a1", "");
+  windows.push(dom.window);
+  const { window: win } = dom;
+  // T3's dispatcher, registered first, skipping keys whose target is in an alertdialog.
+  let acted = 0;
+  win.addEventListener("keydown", (e) => {
+    if (e.target instanceof win.Element && e.target.closest('[role="alertdialog"]')) return;
+    acted += 1;
+  }, true);
+  const storage = createFakeChromeStorage();
+  const w = createWhatsNew({ win, doc: win.document, area: storage.area, version: "0.21.0" });
+  w.open();
+  win.document.activeElement.dispatchEvent(new win.KeyboardEvent("keydown", { key: "b", metaKey: true, bubbles: true, cancelable: true }));
+  assert.equal(acted, 0);
+  w.stop();
 });

@@ -105,7 +105,8 @@ test("a remembered thread in a collapsed folder opens by its address; one moved 
   await gone.profiles.start();
   gone.profiles.sync();
   gone.profiles.switchTo("work");
-  assert.ok(["/env/b-deleted", "/env/b1"].includes(gone.route()));
+  assert.equal(gone.route(), "/env/b1", "deleted in an earlier session (Work's folders are all open, it is in none): its most recent instead");
+  assert.equal(gone.profiles.state.last.work, "env:b1", "and the gone one is forgotten");
   for (const x of [t, moved, gone]) x.profiles.stop();
 });
 

@@ -2350,7 +2350,7 @@ html[data-t3plus-profile-drag] * {
 /* Dither swatches: the color under t3+'s dither pattern; default is the glow's own color. */
 .t3plus-profile-colors[data-field="dither"] .t3plus-profile-swatch::before,
 .t3plus-pp-swatches[data-field="dither"] .t3plus-pp-swatch::before {
-  background: var(--t3plus-dither, none) 0 0 / 4px 4px, var(--t3plus-profile-color, var(--t3plus-accent, var(--primary, #6d7cff)));
+  background: var(--t3plus-dither, none) 0 0 / 4px 4px, var(--t3plus-profile-color, var(--t3plus-look-accent, var(--primary, #6d7cff)));
   background-blend-mode: soft-light, normal;
 }
 .t3plus-pp-swatches[data-field="sky"] .t3plus-pp-swatch:not(:first-of-type)::before {
@@ -2732,7 +2732,8 @@ html[data-t3plus-profile-drag] * {
   background-repeat: repeat, no-repeat, no-repeat;
   background-blend-mode: soft-light, normal, normal;
 }
-.t3plus-pp-pane:has(> .t3plus-glow:not([hidden])[data-kind])::before {
+.t3plus-pp-pane:has(> .t3plus-glow:not([hidden])[data-kind])::before,
+.t3plus-pp-pane[data-glow-off]::before {
   background: none;
 }
 .t3plus-pp-card {

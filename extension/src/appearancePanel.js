@@ -495,6 +495,7 @@ export function createAppearancePanel(doc, actions, { desktop = false, version =
   let profilesSignature = "";
   let demoNames = false;
   let globalAccent = "theme";
+  let glowOn = true; // the background is the glow (not off, not an image): a dither color shows
   const ppChips = h("div", { class: "t3plus-pp-chips", role: "radiogroup", "aria-label": "Profile" });
   const ppSky = h("div", { class: "t3plus-pp-sky" });
   const ppName = h("span", { class: "t3plus-profiles-name t3plus-pp-name" });
@@ -520,10 +521,12 @@ export function createAppearancePanel(doc, actions, { desktop = false, version =
       next.click();
     });
   const checkIn = (group, isOn) => {
-    for (const el of group.querySelectorAll("[role=radio]")) {
-      const on = isOn(el);
-      if (el.getAttribute("aria-checked") !== String(on)) el.setAttribute("aria-checked", String(on));
-      el.tabIndex = on ? 0 : -1;
+    const all = [...group.querySelectorAll("[role=radio]")];
+    const picked = all.map(isOn);
+    for (const [i, el] of all.entries()) {
+      if (el.getAttribute("aria-checked") !== String(picked[i])) el.setAttribute("aria-checked", String(picked[i]));
+      // One Tab stop: the picked one, or the first when none is (a custom color in use).
+      el.tabIndex = picked[i] || (i === 0 && !picked.includes(true)) ? 0 : -1;
     }
   };
   function setProfile(patch) {
@@ -556,6 +559,13 @@ export function createAppearancePanel(doc, actions, { desktop = false, version =
     const custom = h("input", { type: "color", class: "t3plus-pp-custom", "aria-label": `Custom ${label.toLowerCase()} color`, title: "A color of your own" });
     custom.addEventListener("input", () => {
       draft = { ...draft, [field]: custom.value.toLowerCase() };
+      paintProfiles();
+      actions.previewProfile?.();
+    });
+    custom.addEventListener("blur", () => {
+      if (!(field in draft)) return; // saved by "change" already
+      const { [field]: _dropped, ...rest } = draft;
+      draft = rest;
       paintProfiles();
       actions.previewProfile?.();
     });
@@ -668,6 +678,9 @@ export function createAppearancePanel(doc, actions, { desktop = false, version =
       ppSky.style.setProperty("--t3plus-sky-turn", (turn ?? 0).toFixed(1));
       ppSky.style.setProperty("--t3plus-sky-mix", turn === null ? "0" : "1");
     }
+    // With the background off or an image, a dither color has nothing to color.
+    ppPane.toggleAttribute("data-glow-off", !glowOn);
+    ppRows.dither.row.querySelector(".t3plus-pp-row-hint").textContent = glowOn ? "The dithered glow behind the chat." : "The glow behind the chat (shown when Background is on and is the glow).";
     const dither = profileHex(value("dither"));
     ppPane.style.setProperty("--t3plus-accent", dither ?? (globalAccent === "theme" ? "var(--primary, #6d7cff)" : globalAccent));
   }
@@ -711,6 +724,7 @@ export function createAppearancePanel(doc, actions, { desktop = false, version =
     imageRow.hidden = g.mode !== "image";
     accentRow.hidden = g.mode === "image";
     globalAccent = g.accent;
+    glowOn = g.enabled && g.mode !== "image";
     // The open profile may have its own dither color: then that one shows, not this.
     setText(accentDesc, state.ditherAccent ? `${ACCENT_TEXT} The open profile has its own dither color (Profiles, below).` : ACCENT_TEXT);
     updateProfiles(state.profiles ?? null, Boolean(settings.demo?.enabled));

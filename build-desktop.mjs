@@ -13,7 +13,7 @@ const esbuild = createRequire(join(src, "package.json"))("esbuild");
 rmSync(work, { recursive: true, force: true });
 mkdirSync(work, { recursive: true });
 mkdirSync(out, { recursive: true });
-await esbuild.build({ entryPoints: [join(src, "src/content/index.js")], outfile: join(work, "content.js"), bundle: true, format: "iife", target: "chrome120", minify: true, legalComments: "none", define: { __T3PLUS_FEED_BASE__: '""' }, logLevel: "warning" });
+await esbuild.build({ entryPoints: [join(src, "src/content/index.js")], outfile: join(work, "content.js"), bundle: true, format: "iife", target: "chrome120", minify: true, legalComments: "eof", define: { __T3PLUS_FEED_BASE__: '""' }, logLevel: "warning" });
 await esbuild.build({ entryPoints: [join(src, "src/styles/content.css")], outfile: join(work, "content.css"), minify: true, logLevel: "warning" });
 copyFileSync(join(src, "assets/sample-spectrum.svg"), join(work, "sample-spectrum.svg"));
 for (const file of ["sample-spectrum.svg", "content.css", "content.js"]) renameSync(join(work, file), join(out, file));

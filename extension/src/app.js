@@ -169,6 +169,11 @@ export function createT3Plus(deps) {
     setBotStyle(state.settings.sidebar.botStyle);
     state.imageUrl = resolveImageUrl();
     applyComposerTheme(doc, computeComposerTheme(lookSettings(), state.imageUrl));
+    // The glow's own color (Look), apart from a profile's override: the "Default" dither
+    // swatches show it.
+    const own = state.settings.composerGradient.accent;
+    if (own === "theme") doc.documentElement.style.removeProperty("--t3plus-look-accent");
+    else if (doc.documentElement.style.getPropertyValue("--t3plus-look-accent") !== own) doc.documentElement.style.setProperty("--t3plus-look-accent", own);
     if (panel.element.isConnected) updatePanel();
     else panelStale = true;
     watcher.schedule();
@@ -422,7 +427,7 @@ export function createT3Plus(deps) {
     const accent = panel.profilePreviewAccent?.() ?? g.accent;
     renderer.update({
       // The glow only (an image keeps its own colors): the preview shows its CSS glow otherwise.
-      mode: host && g.enabled && g.dither ? "half-circle" : null,
+      mode: host && g.enabled && g.dither && g.mode !== "image" ? "half-circle" : null,
       settings: { ...state.settings, composerGradient: { ...g, accent } },
       host,
       cx: 0.5,
@@ -1108,6 +1113,12 @@ export function createT3Plus(deps) {
     profilesLook() {
       if (!stopped) render();
     },
+    /** Profiles loaded or changed (profiles.js onChange): the Settings card is brought up to date. */
+    profilesChanged() {
+      if (stopped) return;
+      if (panel.element.isConnected) updatePanel();
+      else panelStale = true;
+    },
     /** The desktop loader handed over new feeds: read them now, not at the next poll. */
     feedsUpdated() {
       if (stopped) return;
@@ -1239,7 +1250,7 @@ export function createT3Plus(deps) {
       syncBackdropHosts(doc, false);
       deps.backdropRenderer?.clear();
       deps.previewRenderer?.clear();
-      const cleared = Object.keys(computeComposerTheme(state.settings, null).vars).map((name) => [name, null]);
+      const cleared = [...Object.keys(computeComposerTheme(state.settings, null).vars), "--t3plus-look-accent"].map((name) => [name, null]);
       releaseLane();
       if (laneFrame !== null) win.cancelAnimationFrame?.(laneFrame);
       clearHeroVars();

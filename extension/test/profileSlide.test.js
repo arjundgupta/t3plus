@@ -68,6 +68,10 @@ function setup({ rows = ROWS, stored = TWO, reduced = false, path = "/env/a1", e
   return {
     win, doc, list, storage, profiles, anims,
     route: () => win.location.pathname,
+    go: (path) => {
+      win.history.pushState({}, "", path);
+      profiles.sync();
+    },
     copy: () => doc.querySelector("[data-t3plus-profile-next]"),
     dot: (id) => doc.querySelector(`.t3plus-profile-dot[data-profile="${id}"]`),
     off: (root, sel) => root.querySelector(sel).closest("li").hasAttribute("data-t3plus-profile-off"),
@@ -126,6 +130,9 @@ test("a switch slides: a copy of the next profile's list comes in beside the ope
 
 test("a switch made while one is still sliding: the first lands at once and its thread is not drawn; the same dot again opens it", async () => {
   const t = setup();
+  const visited = [];
+  const push = t.win.history.pushState.bind(t.win.history);
+  t.win.history.pushState = (st, title, url) => (visited.push(String(url)), push(st, title, url));
   await t.profiles.start();
   t.dot("work").click();
   t.dot("main").click(); // straight back, before the first has started
@@ -134,6 +141,7 @@ test("a switch made while one is still sliding: the first lands at once and its 
   t.finish();
   assert.equal(t.profiles.state.active, "main");
   assert.equal(t.route(), "/env/a1", "Work's thread was never asked for");
+  assert.deepEqual(visited.filter((u) => u.includes("b1")), [], "not even on the way");
   assert.equal(t.doc.querySelectorAll("[data-t3plus-profile-next]").length, 0);
 
   t.dot("work").click();
@@ -839,4 +847,120 @@ test("the editor shows the colors as stored now, after a change from Settings", 
   assert.equal(picked.getAttribute("aria-label"), "Custom", "the custom color, picked");
   assert.equal(picked.style.getPropertyValue("--t3plus-profile-color"), "#12ab34");
   t.profiles.stop();
+});
+
+// Storage as Chrome's: events after the write (not inside it), none for a value that did not change.
+function chromeLikeArea(data) {
+  const listeners = new Set();
+  return {
+    data,
+    listeners,
+    get: async (k) => ({ [k]: structuredClone(data.get(k)) }),
+    set: async (items) => {
+      const changed = {};
+      for (const [k, v] of Object.entries(items)) {
+        if (JSON.stringify(data.get(k)) === JSON.stringify(v)) continue;
+        data.set(k, structuredClone(v));
+        changed[k] = { newValue: structuredClone(v) };
+      }
+      if (Object.keys(changed).length) setTimeout(() => listeners.forEach((fn) => fn(changed, "local")), 3);
+    },
+    changedEvent: { addListener: (fn) => listeners.add(fn), removeListener: (fn) => listeners.delete(fn) },
+  };
+}
+
+test("a save that changes nothing leaves no echo behind to swallow another window's same write; saved data matches its echo whatever the key order", async () => {
+  const t = setup();
+  const area = chromeLikeArea(t.storage.area.data);
+  const profiles = createProfiles({ win: t.win, doc: t.doc, area, changedEvent: area.changedEvent });
+  await profiles.start();
+  await profiles.update("work", { icon: "rocket" });
+  await sleep(10);
+  await profiles.update("work", { icon: "rocket" }); // the same again: nothing written
+  await sleep(10);
+  // Another window: switches to Work and back to Main (Main is the value this one holds).
+  const other = structuredClone(area.data.get(STORAGE_KEYS.profiles));
+  await area.set({ [STORAGE_KEYS.profiles]: { ...other, active: "work" } });
+  await sleep(10);
+  assert.equal(profiles.state.active, "work");
+  await area.set({ [STORAGE_KEYS.profiles]: { ...other, active: "main" } });
+  await sleep(10);
+  assert.equal(profiles.state.active, "main", "the other window's write is taken, not mistaken for an echo");
+  profiles.stop();
+});
+
+test("the editor keeps a name being typed when another dot is right-clicked; deleting from the keyboard leaves the focus on the open profile's dot", async () => {
+  const t = setup({ stored: { ...TWO, list: [...TWO.list, { id: "c", name: "C" }] } });
+  await t.profiles.start();
+  const menu = (id) => t.dot(id).dispatchEvent(new t.win.MouseEvent("contextmenu", { bubbles: true, cancelable: true }));
+  menu("work");
+  t.doc.querySelector(".t3plus-profile-editor input").value = "Work 2";
+  menu("c");
+  assert.equal(t.profiles.state.list[1].name, "Work 2", "kept, not dropped");
+  assert.equal(t.doc.querySelector(".t3plus-profile-editor").dataset.profile, "c");
+  t.doc.querySelector(".t3plus-profile-editor .t3plus-profile-delete").focus();
+  t.doc.querySelector(".t3plus-profile-editor .t3plus-profile-delete").click();
+  assert.equal(t.profiles.state.list.length, 2);
+  assert.equal(t.doc.activeElement?.dataset.profile, "main", "on the open profile's dot, not <body>");
+  t.profiles.stop();
+});
+
+test("the arrow keys' Tab stop is not reset by a check while on the dots; New is never a second stop; a switch moves it", async () => {
+  const t = setup();
+  await t.profiles.start();
+  const main = t.dot("main");
+  main.focus();
+  main.dispatchEvent(new t.win.KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true, cancelable: true }));
+  t.profiles.sync(); // a check
+  const stops = () => [...t.doc.querySelectorAll(".t3plus-profile-dot")].filter((d) => d.tabIndex === 0).map((d) => d.dataset.profile);
+  assert.deepEqual(stops(), ["work"], "still where the arrows put it");
+  t.doc.activeElement.dispatchEvent(new t.win.KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true, cancelable: true }));
+  assert.deepEqual(stops(), ["+new"]);
+  t.doc.activeElement.blur(); // Tab away
+  t.profiles.sync();
+  assert.deepEqual(stops(), ["main"], "back to the open profile, New not a second stop");
+  t.profiles.stop();
+});
+
+test("stopped while a thread note is waiting and storage throws (an orphaned copy): everything is still put back", async () => {
+  const t = setup();
+  await t.profiles.start();
+  t.go("/env/b1"); // a route: a note waits to be written
+  t.go("/env/a1");
+  t.storage.area.set = () => {
+    throw new Error("Extension context invalidated.");
+  };
+  t.profiles.stop();
+  assert.equal(t.doc.querySelectorAll("[data-t3plus-profile-off]").length, 0, "rows shown again");
+  assert.equal(t.doc.querySelector(".t3plus-profiles"), null, "dots gone");
+});
+
+test("a switch made on Settings: back to the chat (T3 reopens its old thread), the profile's own thread opens instead of switching back", async () => {
+  const t = setup({ reduced: true });
+  await t.profiles.start();
+  t.go("/settings/appearance");
+  t.profiles.switchTo("work");
+  assert.equal(t.profiles.state.active, "work");
+  t.go("/env/a1"); // T3 goes back to the thread it had (Main's)
+  assert.equal(t.profiles.state.active, "work", "not switched back");
+  assert.equal(t.route(), "/env/b1", "Work's thread opened");
+  t.profiles.sync(); // the check after it shows
+  t.go("/env/a1"); // and opening Main's thread from here on, on purpose, does follow
+  assert.equal(t.profiles.state.active, "main");
+  t.profiles.stop();
+});
+
+test("Settings is told when profiles load and change (its card follows)", async () => {
+  const t = setup();
+  let told = 0;
+  const profiles = createProfiles({ win: t.win, doc: t.doc, area: t.storage.area, changedEvent: t.storage.onChanged, onChange: () => (told += 1) });
+  await profiles.start();
+  assert.ok(told >= 1, "on load");
+  const before = told;
+  await profiles.update("work", { icon: "star" });
+  assert.ok(told > before, "on a change here");
+  const mid = told;
+  await t.storage.area.set({ [STORAGE_KEYS.profiles]: { ...profiles.state, list: profiles.state.list.map((p) => (p.id === "work" ? { ...p, name: "Elsewhere" } : p)) } });
+  assert.ok(told > mid, "and on one from another window");
+  profiles.stop();
 });

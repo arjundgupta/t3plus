@@ -61,7 +61,7 @@ const options = {
   bundle: true,
   format: "iife",
   target: "chrome120",
-  legalComments: "none",
+  legalComments: "eof", // keeps third-party notices (Lucide's, src/profileIcons.js)
   logLevel: "info",
   define: { __T3PLUS_FEED_BASE__: JSON.stringify(await resolveFeedBase()) },
 };

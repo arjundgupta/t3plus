@@ -64,6 +64,8 @@ const app = createT3Plus({
     isDemo: () => appRef?.state.settings.demo.enabled ?? false,
     // The open profile's dither color: the glow is drawn again in it.
     onLook: () => appRef?.profilesLook?.(),
+    // Loaded or changed (here, in Settings, or in another window): the Settings card follows.
+    onChange: () => appRef?.profilesChanged?.(),
   }),
   version: chrome.runtime.getManifest?.().version,
   // After an update, what changed (once); always in Settings → t3+.
