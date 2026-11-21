@@ -2,17 +2,17 @@
 
 # t3+ for T3 Code
 
-**Pixel-art bots, a dithered glow, a glass composer and live usage widgets for the T3 Code desktop app.**
+Pixel-art bots, profiles, a dithered glow and usage widgets for the T3 Code desktop app.
 
 <img src="media/hero.gif" alt="t3+ new-thread page: glow behind a glass composer, usage widgets, bots in the sidebar" width="100%">
 
-[Install](#install) · [Bots](#bots) · [Profiles](#profiles) · [Status view](#status-view) · [Glow](#glow-and-glass) · [Usage](#usage-at-a-glance) · [Settings](#settings) · [Walkthrough](#walkthrough)
+[Install](#install) · [Bots](#bots) · [Profiles](#profiles) · [Status view](#status-view) · [Glow](#glow-and-glass) · [Usage](#usage) · [Settings](#settings) · [Walkthrough](#walkthrough)
 
 </div>
 
 ## Install
 
-Copy this to your coding agent (Claude Code, Codex, T3 Code itself):
+You need macOS, the T3 Code desktop app and Node 22.2+. Copy this to your coding agent (Claude Code, Codex or T3 Code itself):
 
 ```text
 Install t3+ for T3 Code on this Mac:
@@ -23,13 +23,11 @@ Install t3+ for T3 Code on this Mac:
    mkdir -p ~/Library/LaunchAgents && sed "s#__HOME__#$HOME#g" ~/.t3plus/launchd/com.t3plus.autostart.plist > ~/Library/LaunchAgents/com.t3plus.autostart.plist && (launchctl bootout gui/$(id -u)/com.t3plus.autostart 2>/dev/null; launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.t3plus.autostart.plist)
 ```
 
-That's it. Settings live in T3 Code under **Settings → t3+**.
+Settings are in T3 Code under Settings → t3+.
 
 - **Update:** `git -C ~/.t3plus pull && sh ~/.t3plus/build.sh && node ~/.t3plus/t3plus.mjs on`
-- **Turn it off for now:** `node ~/.t3plus/t3plus.mjs off` (it loads again the next time T3 Code starts)
+- **Turn off:** `node ~/.t3plus/t3plus.mjs off` (it loads again when T3 Code restarts)
 - **Uninstall:** `launchctl bootout gui/$(id -u)/com.t3plus.autostart; rm ~/Library/LaunchAgents/com.t3plus.autostart.plist; node ~/.t3plus/t3plus.mjs off; rm -rf ~/.t3plus`
-
-You need macOS, the T3 Code desktop app and Node 22.2+.
 
 ## Bots
 
@@ -38,24 +36,24 @@ You need macOS, the T3 Code desktop app and Node 22.2+.
 <td width="260"><img src="media/bots.gif" alt="Bots in the sidebar: animated faces, latest messages and a subagent strip" width="260"></td>
 <td>
 
-Every thread becomes a little pixel-art bot with a face, its name and its latest message.
+Every thread is a pixel-art bot with a face, a name and its latest message.
 
-- **Moods**: eyes closed when idle, animated while the thread works.
-- **Subagents**: small faces line up under a bot while it runs subagents, in the bot's own shape and color by default (pick others in Settings → t3+ → Subagents). Finished ones dim.
-- **Status badges** (off to start): a small tile on each face that shows what the thread is doing.
-- Pick a shape and color per bot in Settings, or let each one take its project's color.
+- **Moods:** eyes closed when idle, animated while working.
+- **Subagents:** small faces under the bot, one per subagent. Finished ones dim.
+- **Status badges:** a small tile on each face. Off by default.
+- **Looks:** pick a shape and color per bot, or use the project's color.
 
 </td>
 </tr>
 </table>
 
-Five styles for bots you haven't customized (Settings → t3+ → Bot style):
+Five styles for bots you haven't customized:
 
 | Classic | Sports | Space | Fruit | Blobs |
 |:---:|:---:|:---:|:---:|:---:|
 | <img src="media/style-classic.png" width="150" alt="Classic bots"> | <img src="media/style-sports.png" width="150" alt="Sports bots"> | <img src="media/style-space.png" width="150" alt="Space bots"> | <img src="media/style-fruit.png" width="150" alt="Fruit bots"> | <img src="media/style-blobs.gif" width="150" alt="Blobs bots, gently animated"> |
 
-**Blobs** are soft blobs in the bot's color with two capsule eyes, always gently alive: they glance around, blink and breathe, and show the mood.
+Blobs are always moving. They look around, blink and breathe.
 
 ## Profiles
 
@@ -64,11 +62,11 @@ Five styles for bots you haven't customized (Settings → t3+ → Bot style):
 <td width="260"><img src="media/profiles.gif" alt="Swiping between two profiles: the list slides and the sky changes color" width="260"></td>
 <td>
 
-Dots at the bottom of the sidebar, next to the profile's name. Each profile shows its own projects and keeps its own open thread.
+Dots at the bottom of the sidebar. Each profile has its own projects and remembers its open thread.
 
-- **Swipe** sideways with two fingers over the sidebar and the lists slide with your fingers. Or click a dot, or press **Ctrl+Shift+1–9**.
-- Drag a project onto a dot, or right-click it → **Move to profile**, to move it.
-- Right-click a dot to rename it, delete it, or give it an icon and its own colors (dot, sky, glow and chat bubbles).
+- **Switch:** swipe with two fingers, click a dot, or press Ctrl+Shift+1–9.
+- **Move a project:** drag it onto a dot, or right-click it and pick Move to profile.
+- **Edit:** right-click a dot to rename it, delete it, or set its icon and colors.
 
 </td>
 </tr>
@@ -81,11 +79,11 @@ Dots at the bottom of the sidebar, next to the profile's name. Each profile show
 <td width="260"><img src="media/status.gif" alt="The Status view: threads grouped by status, with bots in status colors, sliding between profiles" width="260"></td>
 <td>
 
-The button at the right of the profile dots turns the sidebar into a triage list: the profile's threads grouped into **Needs you**, **Working**, **Done** and **Idle**, newest first.
+The button next to the dots groups the profile's threads by status: Needs you, Working, Done and Idle.
 
-- It covers threads T3's own list hides, read from T3's database: approvals, questions, failed and rate-limited runs, goals and queued work.
-- **Status colors** (Settings → t3+, off to start): in this view each bot wears its status's color. Orange needs you, red failed, yellow working, green done, blue idle. Back in the normal list, bots get their own colors again. Balls, planets and fruit always keep theirs.
-- Swipe between profiles here too; the list slides just like the normal one.
+- **Complete:** it also shows threads T3's list hides, like approvals, questions, failed runs and rate limits.
+- **Status colors:** bots take their status's color in this view. Orange needs you, red failed, yellow working, green done, blue idle. Off by default.
+- **Swipe:** switches profiles here too.
 
 </td>
 </tr>
@@ -93,23 +91,23 @@ The button at the right of the profile dots turns the sidebar into a triage list
 
 ## Glow and glass
 
-A dithered glow rises behind a see-through glass composer. It follows your T3 theme color, or any accent you pick.
+A dithered glow sits behind a glass composer. It uses your T3 theme color, or any color you pick.
 
 <img src="media/accent.gif" alt="The glow cycling through accent colors" width="100%">
 
-Three pixel looks, plus a smooth gradient:
+Three pixel looks, plus a smooth one:
 
 | Bayer | Grain | Spectrum |
 |:---:|:---:|:---:|
 | <img src="media/look-bayer.png" alt="Bayer look"> | <img src="media/look-grain.png" alt="Grain look"> | <img src="media/look-spectrum.png" alt="Spectrum look"> |
 
-You can also use your own image instead of the glow:
+Or use your own image:
 
 <img src="media/image-mode.png" alt="Image background behind the new-thread page" width="100%">
 
-## Usage at a glance
+## Usage
 
-Under the new-thread composer: your **Codex and Claude pools** with time to reset, a **tokens-per-day heatmap**, and **spend** this month. Hover anything for the details.
+Under the new-thread composer: your Codex and Claude pools, a tokens-per-day heatmap and this month's spend. Hover for details.
 
 <img src="media/widgets.gif" alt="Hovering the pool, usage and activity widgets" width="100%">
 
@@ -118,9 +116,9 @@ Under the new-thread composer: your **Codex and Claude pools** with time to rese
 <td width="260"><img src="media/details.png" alt="Thread details with the Claude pool and the thread's spend" width="260"></td>
 <td>
 
-Thread details show the current provider's pool, plus what that thread has cost so far.
+Thread details show the provider's pool and what the thread has cost.
 
-Everything is read on your Mac: T3's own database, T3's local API and your Claude/Codex session logs. t3+ makes no network requests of its own.
+All data is read on your Mac, from T3's database, T3's local API and your Claude and Codex logs. t3+ makes no network requests.
 
 </td>
 </tr>
@@ -128,16 +126,16 @@ Everything is read on your Mac: T3's own database, T3's local API and your Claud
 
 ## Screenshot mode
 
-Turn it on in Settings → t3+ to swap thread titles, projects, branches and messages for believable stand-ins, so you can share your screen without personal details. It's off by default. Every image on this page was taken with it on, and the usage numbers are sample data. Terminals, diffs and files stay real.
+Swaps titles, projects, branches and messages for stand-ins, so you can share your screen. Off by default. Every image here uses it, and the usage numbers are sample data.
 
 ## Settings
 
-Everything lives in T3 Code under **Settings → t3+**, with a live preview where it helps.
+Everything is in Settings → t3+, with previews.
 
 <img src="media/settings.png" alt="The t3+ section in T3 Code's settings: the Applying bar and the background preview" width="100%">
 
-- **Per profile and per Mac**: the bar at the top ("Applying t3+ for All profiles on All devices") picks what you're changing. A setting that differs somewhere says so, with **Use for all** to make it the same again. Turning profiles on or off and screenshot mode are the same everywhere, as are each bot's own look and backups.
-- **Changelog**: at the bottom, click it to see what's new in each version, right in Settings.
+- **Per profile and device:** the bar at the top picks what you're changing. Use for all makes a setting the same everywhere again.
+- **Changelog:** at the bottom. Click it to see what changed.
 
 <img src="media/settings-features.png" alt="t3+ features in Settings: bot style, status colors with a preview, status badges, subagents" width="100%">
 
@@ -147,8 +145,8 @@ Everything lives in T3 Code under **Settings → t3+**, with a live preview wher
 
 ## How it works
 
-t3+ is injected into the running T3 Code app. `t3plus.mjs on` briefly opens Node's inspector on `127.0.0.1` in T3's main process, loads the mod and closes the inspector. Nothing in T3's install is modified, and `off` removes it cleanly. The optional launch agent runs the same step whenever T3 Code starts. Usage data is gathered in a background worker thread, so T3's main thread stays free.
+`t3plus.mjs on` opens Node's inspector on `127.0.0.1` in T3's main process for a moment, loads t3+ and closes it. T3's install is not changed, and `off` removes t3+. The launch agent runs the same step when T3 Code starts. Usage data is read in a worker thread, so T3 stays fast.
 
 ## License
 
-PolyForm Noncommercial 1.0.0, see [LICENSE](LICENSE).
+PolyForm Noncommercial 1.0.0. See [LICENSE](LICENSE).
