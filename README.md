@@ -6,7 +6,7 @@ Pixel-art bots, profiles, a dithered glow and usage widgets for the T3 Code desk
 
 <img src="media/hero.gif" alt="t3+ new-thread page: glow behind a glass composer, usage widgets, bots in the sidebar" width="100%">
 
-[Install](#install) · [Bots](#bots) · [Profiles](#profiles) · [Status view](#status-view) · [Glow](#glow-and-glass) · [Usage](#usage) · [Settings](#settings) · [Walkthrough](#walkthrough)
+[Install](#install) · [Glow](#glow-and-glass) · [Bots](#bots) · [Profiles](#profiles) · [Status view](#status-view) · [Usage](#usage) · [Settings](#settings) · [Walkthrough](#walkthrough)
 
 </div>
 
@@ -28,6 +28,22 @@ Settings are in T3 Code under Settings → t3+.
 - **Update:** `git -C ~/.t3plus pull && sh ~/.t3plus/build.sh && node ~/.t3plus/t3plus.mjs on`
 - **Turn off:** `node ~/.t3plus/t3plus.mjs off` (it loads again when T3 Code restarts)
 - **Uninstall:** `launchctl bootout gui/$(id -u)/com.t3plus.autostart; rm ~/Library/LaunchAgents/com.t3plus.autostart.plist; node ~/.t3plus/t3plus.mjs off; rm -rf ~/.t3plus`
+
+## Glow and glass
+
+A dithered glow sits behind a glass composer. It uses your T3 theme color, or any color you pick.
+
+<img src="media/accent.gif" alt="The glow cycling through accent colors" width="100%">
+
+Three pixel looks, plus a smooth one:
+
+| Bayer | Grain | Spectrum |
+|:---:|:---:|:---:|
+| <img src="media/look-bayer.png" alt="Bayer look"> | <img src="media/look-grain.png" alt="Grain look"> | <img src="media/look-spectrum.png" alt="Spectrum look"> |
+
+Or use your own image:
+
+<img src="media/image-mode.png" alt="Image background behind the new-thread page" width="100%">
 
 ## Bots
 
@@ -89,22 +105,6 @@ The button next to the dots groups the profile's threads by status: Needs you, W
 </tr>
 </table>
 
-## Glow and glass
-
-A dithered glow sits behind a glass composer. It uses your T3 theme color, or any color you pick.
-
-<img src="media/accent.gif" alt="The glow cycling through accent colors" width="100%">
-
-Three pixel looks, plus a smooth one:
-
-| Bayer | Grain | Spectrum |
-|:---:|:---:|:---:|
-| <img src="media/look-bayer.png" alt="Bayer look"> | <img src="media/look-grain.png" alt="Grain look"> | <img src="media/look-spectrum.png" alt="Spectrum look"> |
-
-Or use your own image:
-
-<img src="media/image-mode.png" alt="Image background behind the new-thread page" width="100%">
-
 ## Usage
 
 Under the new-thread composer: your Codex and Claude pools, a tokens-per-day heatmap and this month's spend. Hover for details.
@@ -124,10 +124,6 @@ All data is read on your Mac, from T3's database, T3's local API and your Claude
 </tr>
 </table>
 
-## Screenshot mode
-
-Swaps titles, projects, branches and messages for stand-ins, so you can share your screen. Off by default. Every image here uses it, and the usage numbers are sample data.
-
 ## Settings
 
 Everything is in Settings → t3+, with previews.
@@ -142,10 +138,6 @@ Everything is in Settings → t3+, with previews.
 ## Walkthrough
 
 [![Watch the 50-second walkthrough](media/walkthrough-poster.png)](media/walkthrough.mp4)
-
-## How it works
-
-`t3plus.mjs on` opens Node's inspector on `127.0.0.1` in T3's main process for a moment, loads t3+ and closes it. T3's install is not changed, and `off` removes t3+. The launch agent runs the same step when T3 Code starts. Usage data is read in a worker thread, so T3 stays fast.
 
 ## License
 
