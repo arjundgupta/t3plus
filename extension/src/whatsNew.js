@@ -9,7 +9,7 @@ import { STORAGE_KEYS, T3PLUS } from "./config.js";
 
 export const WHATS_NEW = Object.freeze([
   {
-    version: "Unreleased",
+    version: "0.23.0",
     notes: [
       ["Settings per profile and machine", "at the top of Settings → t3+, \"Applying t3+ for All profiles on All devices\": pick a profile (or one of T3's machines) and every setting below is set for it alone. A row it sets is marked, with a reset."],
       ["Status view", "the button at the right of the profile dots groups your threads by what they need: Needs you, Working, Done and Idle, threads in collapsed folders too, with T3's exact words (Limited and Waiting included). Turn on Status colors to see every bot in its status's color: orange needs you, red failed, amber working, green done, blue idle."],
