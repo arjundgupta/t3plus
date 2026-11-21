@@ -1,10 +1,12 @@
-import { botArt, botBadge, botClipPath, botEdgeColor, defaultBotColor, defaultBotShape, MOOD_BY_STATUS } from "./botArt.js";
+import { botArt, botBadge, botClipPath, botEdgeColor, botShapeHasOwnColors, botStill, defaultBotColor, defaultBotShape, MOOD_BY_STATUS } from "./botArt.js";
 import {
   BOT_COLORS,
   BOT_LIMITS,
   BOT_MARKER_PATTERN,
   BOT_SHAPES,
+  BOT_SKINS,
   DEFAULT_BOT_MARKER,
+  SAME_AS_BOT,
   SIDEBAR_ROW_PREFIX,
   STORAGE_KEYS,
   T3_CLASSES,
@@ -12,7 +14,9 @@ import {
   T3PLUS,
 } from "./config.js";
 import { subscribeKey } from "./settings.js";
+import { BOT_STATUS, isRowStatusWord, rowStatus, rowStatusWord } from "./statusView.js";
 import { setSprite } from "./spriteClock.js";
+import { setAttr, setVar } from "./dom.js";
 
 // Bot/orchestrator threads: top-level thread rows whose title carries the
 // exact marker token (default [[t3plus:bot:v1]]) as its first or last
@@ -31,47 +35,23 @@ export function parseBotTitle(title, marker = DEFAULT_BOT_MARKER) {
   return null;
 }
 
-// T3's row aria-label is "<title>, <status label>, <project>" (Sidebar.logic.ts
-// resolveSidebarRowAccessibility); status labels from SidebarThreadRow.tsx.
-const STATUS_BY_LABEL = new Map([
-  ["Setting up", "working"],
-  ["Goal", "working"],
-  ["Working", "working"],
-  ["Waiting", "waiting"],
-  ["Approval", "attention"],
-  ["Input", "attention"],
-  ["Request", "attention"],
-  ["Limited", "failed"],
-  ["Failed", "failed"],
-  ["Woke", "attention"], // a snoozed thread woke up: it wants you (T3 shows it in warning color)
-  ["Done", "done"],
-]);
+// T3's row aria-label is "<title>, <status label>, <project>"; its status word is read by
+// statusView.js (rowStatusWord), and a face's status follows the view's (BOT_STATUS: a
+// usage limit, a snoozed thread that woke and a question all want you).
 
 /** working | waiting | attention | failed | done | idle, from the row's aria-label. */
-export function parseRowStatus(ariaLabel, title) {
-  if (typeof ariaLabel !== "string" || !ariaLabel.startsWith(title)) return "idle";
-  const rest = ariaLabel.slice(title.length);
-  if (!rest.startsWith(", ")) return "idle";
-  const next = rest.slice(2).split(", ")[0];
-  return STATUS_BY_LABEL.get(next) ?? "idle";
-}
+export const parseRowStatus = (ariaLabel, title) => BOT_STATUS[rowStatus(ariaLabel, title)];
 
 /** The project named at the end of a row's aria-label ("<title>, <status>, <project>"), or "". */
 export function parseRowProject(ariaLabel, title) {
   if (typeof ariaLabel !== "string" || !title || !ariaLabel.startsWith(`${title}, `)) return "";
   const parts = ariaLabel.slice(title.length + 2).split(", ");
-  if (STATUS_BY_LABEL.has(parts[0])) parts.shift();
+  if (isRowStatusWord(parts[0])) parts.shift();
   return parts.join(", ");
 }
 
 /** T3's own status word for the row ("Input", "Approval", "Working", ...), or "" when it shows none. */
-export function parseRowStatusLabel(ariaLabel, title) {
-  if (typeof ariaLabel !== "string" || !ariaLabel.startsWith(title)) return "";
-  const rest = ariaLabel.slice(title.length);
-  if (!rest.startsWith(", ")) return "";
-  const next = rest.slice(2).split(", ")[0];
-  return STATUS_BY_LABEL.has(next) ? next : "";
-}
+export const parseRowStatusLabel = rowStatusWord;
 
 /** Top-level: not nested under another thread (folder/shelf parents are fine). */
 export function isTopLevelThread(thread) {
@@ -129,6 +109,18 @@ export function normalizeBotPrefs(raw) {
   };
 }
 
+/**
+ * A bot's prefs as drawn. `statusColor`: the color of its status, where Status colors paint
+ * it (the Status view only; null everywhere else): its own shape in that color (a ball,
+ * planet or fruit keeps its own colors; its badge takes the status's). `badges` (Status
+ * badges): with its badge. The sidebar, the Status view and the Settings preview all draw
+ * through this, so they agree on what a status looks like. Neither: `prefs` itself.
+ */
+export function shownBotPrefs(prefs, { statusColor = null, badges = false } = {}) {
+  const painted = statusColor ? { ...normalizeBotPrefs(prefs), color: statusColor, statusColors: true } : prefs;
+  return badges ? { ...painted, badges: true } : painted;
+}
+
 /** The shape a bot is drawn in: its own pick, else a stable one from its key. */
 export function botShapeFor(bot, prefs) {
   const p = normalizeBotPrefs(prefs);
@@ -154,7 +146,7 @@ export function normalizeBotPrefsMap(raw) {
   const out = {};
   if (!raw || typeof raw !== "object") return out;
   for (const [key, value] of Object.entries(raw).slice(0, BOT_LIMITS.maxBots)) {
-    if (BOT_KEY.test(key)) out[key] = normalizeBotPrefs(value, key);
+    if (BOT_KEY.test(key)) out[key] = normalizeBotPrefs(value);
   }
   return out;
 }
@@ -181,7 +173,6 @@ export function normalizeKnownBots(raw) {
   return out;
 }
 
-/** Stores bot presentation keyed by "<environmentId>:<threadId>". Never sent anywhere. */
 /** Threads turned into bots (or out of them) by hand, as stored: { "<env>:<thread>": boolean }. */
 export function normalizeManualBots(raw) {
   const out = {};
@@ -192,6 +183,7 @@ export function normalizeManualBots(raw) {
   return out;
 }
 
+/** Stores bot presentation keyed by "<environmentId>:<threadId>". Never sent anywhere. */
 export function createBotStore(area, changedEvent) {
   const key = STORAGE_KEYS.bots;
   const knownKey = STORAGE_KEYS.knownBots;
@@ -219,7 +211,7 @@ export function createBotStore(area, changedEvent) {
       if (!all[botKey] && Object.keys(all).length >= BOT_LIMITS.maxBots) {
         throw new Error(`t3+ keeps settings for at most ${BOT_LIMITS.maxBots} bots. Forget one first.`);
       }
-      all[botKey] = normalizeBotPrefs({ ...all[botKey], ...patch }, botKey);
+      all[botKey] = normalizeBotPrefs({ ...all[botKey], ...patch });
       await area.set({ [key]: all });
       return all;
     }),
@@ -271,6 +263,8 @@ export function createBotStore(area, changedEvent) {
  * Display values for one bot: name, shape, color and the CSS values that draw
  * its avatar. The face follows bot.status (closed eyes when idle, animated
  * when working, ...); without a status it is the neutral open-eyed face.
+ * `prefs.badges` (Status badges): a badge on the face for its status; none otherwise,
+ * and none worked out. `prefs.statusColors`: the badge is drawn in the face's color.
  */
 export function resolveBotPresentation(bot, prefs) {
   const p = normalizeBotPrefs(prefs);
@@ -289,48 +283,112 @@ export function resolveBotPresentation(bot, prefs) {
     duration: art.duration,
     clip: botClipPath(shape),
     edge: botEdgeColor(paint, shape),
-    // What the thread is doing, as a small tile on the face's corner (only for a real row: Settings swatches have no status).
-    badge: bot.status ? botBadge(bot.status, bot.statusLabel) : null,
+    badge: faceBadge(bot, prefs, paint),
   };
 }
 
-const setAttr = (el, name, value) => {
-  if (value === null || value === undefined) {
-    if (el.hasAttribute(name)) el.removeAttribute(name);
-  } else if (el.getAttribute(name) !== value) {
-    el.setAttribute(name, value);
-  }
-};
-const setVar = (el, name, value) => {
-  if (value === null) {
-    if (el.style.getPropertyValue(name)) el.style.removeProperty(name);
-  } else if (el.style.getPropertyValue(name) !== value) {
-    el.style.setProperty(name, value);
-  }
-};
+/**
+ * What the thread is doing, as a small tile on the face's corner: only with Status badges
+ * on, and only for a real row (Settings swatches have no status). Under Status colors it
+ * is given the face's color: its own tones (blue for working) read as another status there.
+ */
+function faceBadge(bot, prefs, paint) {
+  if (prefs?.badges !== true || !bot.status) return null;
+  return botBadge(bot.status, bot.statusLabel, prefs.statusColors === true ? paint : null);
+}
 
-/** Writes the avatar CSS variables onto `el` (row avatar, breadcrumb, Settings preview). */
+// What a face was last drawn with, on each element: written again only when it changes.
+// Every check re-applied every bot's face (six style reads, two of them data URLs of a
+// few KB), also for the other profiles' hidden rows.
+const applied = new WeakMap(); // element -> the view's fields as written (and t3+'s avatars: their face and badge children)
+const AVATAR_FIELDS = ["fill", "clip", "edge", "frames", "duration", "shape", "mood", "badge"];
+const sameFace = (was, view) => Boolean(was) && AVATAR_FIELDS.every((name) => was[name] === (view[name] ?? null));
+
+// t3+'s own avatars (a sidebar row's, the Status view's, Settings') show the face and its
+// badge on two children of their own, and the sprite clock steps those. The avatar holds
+// the face's picture (its variables, and the sheet as an unpainted background: content.css)
+// and the face child takes that picture as it is (inherit): a frame step restyles one
+// small child and parses nothing. Stepped through var() on the avatar, every step of the
+// face or its badge substituted and parsed the whole sheet again, tens of KB for a blob.
+// T3's own elements (the breadcrumb, a hover card) keep theirs in ::before: t3+ adds no
+// children to T3's elements.
+const FACE_PART = "t3plus-bot-face";
+const BADGE_PART = "t3plus-bot-badge";
+const isPart = (el) => el.className === FACE_PART || el.className === BADGE_PART;
+
+/** The avatar's face child, and its badge child while it has a badge: made or dropped to match. */
+function avatarParts(el, badge) {
+  const doc = el.ownerDocument;
+  let face = el.firstElementChild;
+  if (face?.className !== FACE_PART) {
+    face = doc.createElement("span");
+    face.className = FACE_PART;
+    el.prepend(face);
+  }
+  let tile = face.nextElementSibling?.className === BADGE_PART ? face.nextElementSibling : null;
+  if (badge && !tile) {
+    tile = doc.createElement("span");
+    tile.className = BADGE_PART;
+    face.after(tile);
+  } else if (!badge && tile) {
+    setSprite(tile, null, null);
+    tile.remove();
+    tile = null;
+  }
+  return { face, tile };
+}
+
+/** Draws a bot's face on `el`, one of t3+'s own avatars: its variables and marks, and its children. */
 export function applyAvatarVars(el, view) {
-  setVar(el, "--t3plus-bot-fill", view.fill);
-  setVar(el, "--t3plus-bot-clip", view.clip);
-  setVar(el, "--t3plus-bot-edge", view.edge);
-  const animated = view.frames > 1;
-  setVar(el, "--t3plus-bot-frames", animated ? String(view.frames) : null);
-  setAttr(el, "data-t3plus-shape", view.shape);
-  setAttr(el, "data-t3plus-mood", view.mood ?? null);
-  setAttr(el, "data-animated", animated ? "" : null);
+  paintFace(el, view, true);
+}
+
+/** Draws a face on `el`: one of t3+'s own avatars (`own`), else an element of T3's (its ::before). */
+function paintFace(el, view, own) {
   const badge = view.badge ?? null;
-  setVar(el, "--t3plus-bot-badge", badge ? badge.url : null);
-  setVar(el, "--t3plus-badge-frames", badge && badge.frames > 1 ? String(badge.frames) : null);
-  setAttr(el, "data-badge", badge ? (badge.frames > 1 ? "animated" : "") : null);
-  // The frames are stepped by one shared clock, only when a frame is due (spriteClock.js).
-  setSprite(el, animated ? { frames: view.frames, duration: view.duration } : null, badge && badge.frames > 1 ? badge : null);
+  let drawn = applied.get(el);
+  // Still as drawn: t3+'s avatar with its children in place, or an element of T3's still
+  // wearing the variables (T3 could have rewritten its style since: one short read).
+  const intact = own ? drawn?.face?.parentNode === el && (!drawn.tile || drawn.tile.parentNode === el) : el.style.getPropertyValue("--t3plus-bot-edge") !== "";
+  if (!sameFace(drawn, view) || !intact) {
+    drawn = Object.fromEntries(AVATAR_FIELDS.map((name) => [name, view[name] ?? null]));
+    setVar(el, "--t3plus-bot-fill", view.fill);
+    setVar(el, "--t3plus-bot-clip", view.clip);
+    setVar(el, "--t3plus-bot-edge", view.edge);
+    const animated = view.frames > 1;
+    setVar(el, "--t3plus-bot-frames", animated ? String(view.frames) : null);
+    setAttr(el, "data-t3plus-shape", view.shape);
+    setAttr(el, "data-t3plus-mood", view.mood ?? null);
+    setAttr(el, "data-animated", animated ? "" : null);
+    setVar(el, "--t3plus-bot-badge", badge ? badge.url : null);
+    setVar(el, "--t3plus-badge-frames", badge && badge.frames > 1 ? String(badge.frames) : null);
+    setAttr(el, "data-badge", badge ? (badge.frames > 1 ? "animated" : "") : null);
+    if (own) Object.assign(drawn, avatarParts(el, badge));
+    applied.set(el, drawn);
+  }
+  // The frames are stepped by one shared clock (spriteClock.js; it reads a sprite's frames
+  // and duration, and steps only one that moves), told on every draw, drawn anew or not:
+  // it lets go of a face taken off the page (the Status view hidden, Settings left), which
+  // joins it again here when it is back and drawn once more.
+  if (!own) setSprite(el, view, badge);
+  else {
+    setSprite(drawn.face, view, null);
+    if (drawn.tile) setSprite(drawn.tile, null, badge);
+  }
+}
+
+/** Lets the sprite clock go of a face (and of its children's, on t3+'s avatar). */
+function releaseFace(el) {
+  applied.delete(el);
+  setSprite(el, null, null);
+  for (const part of el.children) if (isPart(part)) setSprite(part, null, null);
 }
 
 const AVATAR_VARS = ["--t3plus-bot-fill", "--t3plus-bot-clip", "--t3plus-bot-edge", "--t3plus-bot-frames", "--t3plus-bot-badge", "--t3plus-badge-frames"];
-/** Removes everything applyAvatarVars set on an element of T3's (its sprite clock too). */
+/** Removes everything a face drawing set on `el` (its children, its sprite clock). */
 export function clearAvatarVars(el) {
-  setSprite(el, null, null);
+  releaseFace(el);
+  for (const part of [...el.children]) if (isPart(part)) part.remove();
   for (const name of AVATAR_VARS) el.style.removeProperty(name);
   for (const name of ["data-t3plus-shape", "data-t3plus-mood", "data-animated", "data-badge"]) el.removeAttribute(name);
   if (el.getAttribute("style") === "") el.removeAttribute("style");
@@ -418,20 +476,61 @@ function clearBotLayout(row) {
   for (const el of [row, ...row.querySelectorAll(selector)]) for (const name of LAYOUT_ATTRS) el.removeAttribute(name);
 }
 
+const swept = new WeakSet(); // documents cleared of v0.5's third line
+
+// Each bot row as it was last decorated: done again only when what it shows changed (its
+// face, name, status, message or subagents), a part of t3+'s in it went missing, or T3
+// changed something inside it (noteBotRowChanges). Every check redid every row's layout
+// marks, face and subagents (some twenty DOM reads and three queries a row), nearly
+// always on rows in which nothing had changed.
+const decorated = new WeakMap(); // row -> { status, view, preview, subagents, look, titleEl, avatar, strip }
+function sameDecoration(was, row, bot, view, preview, subagents, look) {
+  return (
+    was.status === bot.status &&
+    was.preview === preview &&
+    was.titleEl === bot.thread.titleEl &&
+    was.view.label === view.label &&
+    was.view.paint === view.paint &&
+    sameFace(was.view, view) &&
+    (was.subagents === subagents || (!was.subagents.length && !subagents.length)) &&
+    was.look.shape === look.shape &&
+    was.look.color === look.color &&
+    // T3 dropping t3+'s nodes is no change the checks hear of (they are t3+'s own).
+    was.avatar.parentNode === row &&
+    (!was.strip || row.contains(was.strip))
+  );
+}
+
+/**
+ * Takes the DOM watcher's mutation records: a bot row T3 changed something in (a line
+ * re-rendered, its status slot swapped) is decorated afresh at the next check.
+ */
+export function noteBotRowChanges(records) {
+  for (const { target } of records) {
+    const row = (target.nodeType === 1 ? target : target.parentElement)?.closest(`[${T3PLUS.botAttr}]`);
+    if (row) decorated.delete(row);
+  }
+}
+
 /**
  * Styles bot rows in place: data attributes on T3's row and lines, and one
- * t3+-owned avatar element. Idempotent: only changed values are written, so
- * re-running after each mutation is cheap. Undecorates rows that stopped
- * being bots.
+ * t3+-owned avatar element. Idempotent: a row is decorated again only when
+ * something it shows or holds changed, and then only changed values are
+ * written. Undecorates rows that stopped being bots.
  * @param {(key: string) => string} previewFor latest-message line for a bot
+ * @param {{ shape: string, color: string }} subagentLook subagents' shape and color
+ *   (settings sidebar.subagentShape/Color): SAME_AS_BOT for their bot's
  */
-export function decorateBotRows(doc, scan, bots, prefsByKey, previewFor = () => "", subagentsFor = () => []) {
+export function decorateBotRows(doc, scan, bots, prefsByKey, previewFor = () => "", subagentsFor = () => [], subagentLook = SAME_LOOK) {
   const botRows = new Set();
   for (const bot of bots) {
     const { row, titleEl } = bot.thread;
     botRows.add(row);
     const view = resolveBotPresentation(bot, prefsByKey[bot.key]);
     const preview = previewFor(bot.key);
+    const subagents = subagentsFor(bot.key);
+    const was = decorated.get(row);
+    if (was && sameDecoration(was, row, bot, view, preview, subagents, subagentLook)) continue;
     setAttr(row, T3PLUS.botAttr, bot.status);
     setAttr(row, "aria-description", preview ? `t3+ bot: ${view.label}. ${preview}` : `t3+ bot: ${view.label}`);
     markBotLayout(row, titleEl, view.label);
@@ -448,63 +547,97 @@ export function decorateBotRows(doc, scan, bots, prefsByKey, previewFor = () => 
     setAttr(avatar, "data-status", bot.status);
 
     if (titleEl) setAttr(titleEl, T3PLUS.botTitleAttr, preview);
-    syncSubagents(doc, row, subagentsFor(bot.key), view);
-
-    // Rows decorated by v0.5 carried a third (model/computer) line; drop it.
-    for (const old of row.querySelectorAll(".t3plus-bot-metaline")) old.remove();
+    const strip = syncSubagents(doc, row, subagents, view, subagentLook);
+    decorated.set(row, { status: bot.status, view, preview, subagents, look: subagentLook, titleEl, avatar, strip });
+  }
+  // Rows decorated by v0.5 carried a third (model/computer) line: dropped once a page
+  // (only t3+ ever drew it), not looked for in every row of every check.
+  if (!swept.has(doc)) {
+    swept.add(doc);
+    for (const old of doc.querySelectorAll(".t3plus-bot-metaline")) old.remove();
   }
   for (const row of scan.threads.map((t) => t.row)) {
     if (!botRows.has(row) && row.hasAttribute(T3PLUS.botAttr)) undecorateBotRow(row);
   }
 }
 
-const SUBAGENT_DONE = new Set(["completed", "failed", "interrupted", "cancelled", "canceled"]);
+// A subagent that has ended, by how: its face (dimmed, like every ended one) and its
+// mark in the strip's tooltip. Failed and stopped ones had the finished face's happy
+// eyes and a ✓ too.
+const SUBAGENT_STOPPED = Object.freeze({ mood: "idle", mark: "–" });
+const SUBAGENT_ENDS = new Map([
+  ["completed", Object.freeze({ mood: "done", mark: "✓" })],
+  ["failed", Object.freeze({ mood: "failed", mark: "✗" })],
+  ["interrupted", SUBAGENT_STOPPED],
+  ["cancelled", SUBAGENT_STOPPED],
+  ["canceled", SUBAGENT_STOPPED],
+]);
+/** One still working: open eyes. */
+const SUBAGENT_WORKING = Object.freeze({ mood: "awake", mark: "•" });
 const MAX_MINIS = 6;
+const SAME_LOOK = Object.freeze({ shape: SAME_AS_BOT, color: SAME_AS_BOT });
+
 /**
- * A third line of tiny robots under a bot that is running subagents: one per
- * subagent, stepping through the working face while it works and dimmed once
- * done. Hover shows their titles. Gone when none is working any more.
+ * A subagent's face under the bot drawn as `view`: its bot's shape and color, unless
+ * Settings sets them ({ shape, color, clip }). Its bot's color is the one the bot shows:
+ * a ball, a planet or a fruit shows its own colors, not its paint (and a subagent in one
+ * of those shapes keeps its own colors too).
  */
-function syncSubagents(doc, row, subagents, view) {
+export function subagentFace(view, look = SAME_LOOK) {
+  const pickedShape = look?.shape !== SAME_AS_BOT && Object.hasOwn(BOT_SHAPES, look?.shape ?? "") ? look.shape : null;
+  const pickedColor = look?.color !== SAME_AS_BOT && Object.hasOwn(BOT_COLORS, look?.color ?? "") ? look.color : null;
+  const shape = pickedShape ?? view.shape;
+  // In its paint, a plain face under a white golf ball came out in the project's blue,
+  // a color nowhere on its bot: its ball's own middle color instead.
+  const color = pickedColor ?? (botShapeHasOwnColors(view.shape) ? BOT_SKINS[view.shape].stops[1] : view.paint);
+  return { shape, color, clip: botClipPath(shape) };
+}
+
+/**
+ * A third line of tiny faces under a bot that is running subagents: one per
+ * subagent, in its bot's shape and color (or the ones Settings sets for them),
+ * still, and dimmed once ended: happy eyes when finished, x eyes when failed.
+ * Hover shows their titles. Gone when none is working any more. Returns the strip, or
+ * null. Nearly every bot has none: it is looked for, and its faces worked out, only for
+ * one that has subagents.
+ */
+function syncSubagents(doc, row, subagents, view, look) {
+  let strip = row.querySelector(".t3plus-bot-subs");
+  if (!subagents.length) {
+    strip?.remove();
+    return null;
+  }
   // A card row's body stacks its lines, so the strip is a line of its own there; in
   // a slim row it is the third row of the top line's grid (content.css). In a card's
   // one-line top row it squeezed the bot's name.
   const card = row.getAttribute("data-t3plus-bot-body") === "slim" ? null : row.querySelector(":scope > [data-t3plus-bot-body]");
   const host = card ?? row.querySelector("[data-t3plus-bot-top]") ?? row;
-  let strip = row.querySelector(".t3plus-bot-subs");
-  if (!subagents.length) {
-    if (strip) {
-      for (const el of strip.children) setSprite(el, null, null);
-      strip.remove();
-    }
-    return;
-  }
   if (strip && strip.parentElement !== host) host.append(strip);
-  const signature = JSON.stringify([view.paint, subagents]);
-  if (strip?.dataset.signature === signature) return;
+  const face = subagentFace(view, look);
+  const signature = JSON.stringify([face.shape, face.color, subagents]);
+  if (strip?.dataset.signature === signature) return strip;
   if (!strip) {
     strip = doc.createElement("span");
     strip.className = "t3plus-bot-subs";
     strip.setAttribute(T3PLUS.ownedAttr, "");
     host.append(strip);
   }
-  for (const el of strip.children) setSprite(el, null, null);
   strip.replaceChildren();
   strip.dataset.signature = signature;
-  const working = subagents.filter((s) => !SUBAGENT_DONE.has(s.status)).length;
-  strip.title = `${working} of ${subagents.length} subagents working\n${subagents.map((s) => `${SUBAGENT_DONE.has(s.status) ? "✓" : "•"} ${s.title || "Subagent"}`).join("\n")}`;
-  strip.setAttribute("aria-label", `${working} of ${subagents.length} subagents working`);
+  const working = subagents.filter((s) => !SUBAGENT_ENDS.has(s.status)).length;
+  const failed = subagents.filter((s) => s.status === "failed").length;
+  const summary = `${working} of ${subagents.length} subagents working${failed ? `, ${failed} failed` : ""}`;
+  strip.title = `${summary}\n${subagents.map((s) => `${(SUBAGENT_ENDS.get(s.status) ?? SUBAGENT_WORKING).mark} ${s.title || "Subagent"}`).join("\n")}`;
+  strip.setAttribute("aria-label", summary);
   for (const s of subagents.slice(0, MAX_MINIS)) {
-    const done = SUBAGENT_DONE.has(s.status);
-    const art = botArt(done ? "gray" : view.paint, "robot", done ? "done" : "working");
+    const end = SUBAGENT_ENDS.get(s.status);
+    const art = botStill(face.color, face.shape, (end ?? SUBAGENT_WORKING).mood);
     const mini = doc.createElement("i");
     mini.className = "t3plus-bot-sub";
-    if (done) mini.setAttribute("data-done", "");
+    if (end) mini.setAttribute("data-done", "");
     mini.style.setProperty("--t3plus-bot-fill", art.url);
-    mini.style.setProperty("--t3plus-bot-frames", String(art.frames));
-    mini.style.setProperty("--t3plus-bot-clip", botClipPath("robot"));
+    mini.style.setProperty("--t3plus-bot-clip", face.clip);
     strip.append(mini);
-    setSprite(mini, art.frames > 1 ? { frames: art.frames, duration: art.duration } : null, null);
   }
   if (subagents.length > MAX_MINIS) {
     const more = doc.createElement("span");
@@ -512,10 +645,12 @@ function syncSubagents(doc, row, subagents, view) {
     more.textContent = `+${subagents.length - MAX_MINIS}`;
     strip.append(more);
   }
+  return strip;
 }
 
 export function undecorateBotRow(row) {
-  for (const el of row.querySelectorAll(".t3plus-bot-avatar, .t3plus-bot-sub")) setSprite(el, null, null);
+  decorated.delete(row);
+  for (const el of row.querySelectorAll(".t3plus-bot-avatar")) releaseFace(el);
   row.removeAttribute(T3PLUS.botAttr);
   row.removeAttribute("aria-description");
   if (row.getAttribute("style") === "") row.removeAttribute("style");
@@ -524,23 +659,48 @@ export function undecorateBotRow(row) {
   for (const el of row.querySelectorAll(`[${T3PLUS.ownedAttr}]`)) el.remove();
 }
 
+// t3+'s parts of the sidebar that are no bot's, which stay when bots are off: the profile
+// dots and the copy of the list that slides in while switching (profiles.js), and the
+// Status view with its button's row (app.js). Taken out by every check with bots off and
+// put back by the same check, the view lost the keyboard focus and each removal set off
+// the next check, without end.
+const NOT_BOT_PARTS = ".t3plus-profiles, [data-t3plus-profile-next], .t3plus-status-view, .t3plus-status-toggle-row";
+
 /** Removes all bot decoration under `root` (feature off, or stop). */
 export function clearBotDecoration(root) {
   for (const row of root.querySelectorAll(`[${T3PLUS.botAttr}]`)) undecorateBotRow(row);
-  // Profiles (profiles.js) live in the same sidebar and stay when bots are off: the dots,
-  // and the copy of the list that slides in while switching.
-  for (const el of root.querySelectorAll(`[${T3PLUS.ownedAttr}]`)) if (!el.closest(".t3plus-profiles, [data-t3plus-profile-next]")) el.remove();
+  for (const el of root.querySelectorAll(`[${T3PLUS.ownedAttr}]`)) if (!el.closest(NOT_BOT_PARTS)) el.remove();
 }
+
+/**
+ * A bot's prefs for its face on T3's own elements (the breadcrumb, a hover card): with no
+ * badge, whatever Status badges says. Only t3+'s avatars have a badge child to draw one
+ * in (content.css): here it was worked out, and a moving one stepped, for nothing.
+ */
+const t3ElementPrefs = (prefs) => (prefs?.badges ? { ...prefs, badges: false } : prefs);
 
 /** Decorates the active thread breadcrumb without changing T3's route/header structure. */
 const ACTIONS_PREFIX = "Thread actions for ";
 /** The heading's actions button: T3 labels it with the raw title, marker and all. */
 const actionsButton = (heading) => heading.closest?.(`button[aria-label^="${ACTIONS_PREFIX}"]`) ?? null;
 
+/**
+ * Whether the label t3+ took off T3's actions button is still T3's: t3+'s is on it and
+ * T3's heading does not show those words. Once the marker is taken off the title in T3,
+ * T3's own label is the same as t3+'s: the stale marked one put back stayed (T3 does
+ * not write a label it has not changed).
+ */
+function rawLabelIsCurrent(button) {
+  const set = button.getAttribute("data-t3plus-set-label");
+  const title = button.querySelector(T3_SELECTORS.breadcrumbHeading)?.textContent.trim() ?? "";
+  return button.getAttribute("aria-label") === set && set !== `${ACTIONS_PREFIX}${title}`;
+}
+
 export function decorateBotBreadcrumb(doc, bot) {
   const heading = bot ? doc.querySelector(T3_SELECTORS.breadcrumbHeading) : null;
   for (const old of doc.querySelectorAll(`${T3_SELECTORS.breadcrumbHeading}[data-t3plus-bot-breadcrumb]`)) {
     if (old === heading) continue;
+    if (old.getAttribute("aria-label") === old.getAttribute("data-t3plus-bot-breadcrumb-label")) old.removeAttribute("aria-label");
     old.removeAttribute("data-t3plus-bot-breadcrumb");
     old.removeAttribute("data-t3plus-bot-breadcrumb-label");
     // All of it: the mood, animation and badge stayed on T3's heading after leaving a bot.
@@ -549,15 +709,19 @@ export function decorateBotBreadcrumb(doc, bot) {
   // T3's label back where t3+ set the bot's name (unless T3 has set its own since).
   for (const button of doc.querySelectorAll("button[data-t3plus-raw-label]")) {
     if (heading && actionsButton(heading) === button) continue;
-    if (button.getAttribute("aria-label") === button.getAttribute("data-t3plus-set-label")) button.setAttribute("aria-label", button.getAttribute("data-t3plus-raw-label"));
+    if (rawLabelIsCurrent(button)) button.setAttribute("aria-label", button.getAttribute("data-t3plus-raw-label"));
     button.removeAttribute("data-t3plus-raw-label");
     button.removeAttribute("data-t3plus-set-label");
   }
   if (!heading) return;
-  const view = resolveBotPresentation(bot, bot.prefs);
+  const view = resolveBotPresentation(bot, t3ElementPrefs(bot.prefs));
+  // The heading's name is the bot's: its hidden raw title (marker and all) and the drawn
+  // name were both read out. Not over a label T3 gave it itself.
+  const named = heading.getAttribute("aria-label");
+  if (named === null || named === heading.getAttribute("data-t3plus-bot-breadcrumb-label")) setAttr(heading, "aria-label", view.label);
   setAttr(heading, "data-t3plus-bot-breadcrumb", "");
   setAttr(heading, "data-t3plus-bot-breadcrumb-label", view.label);
-  applyAvatarVars(heading, view);
+  paintFace(heading, view, false);
   // "Thread actions for [[t3plus:bot:v1]] Orchestrator" read out the marker: the bot's name instead.
   const button = actionsButton(heading);
   const label = button?.getAttribute("aria-label") ?? "";
@@ -609,14 +773,13 @@ export function decorateBotHoverCards(root, botsByTitle, prefsByKey, textOf = nu
       el.removeAttribute("data-t3plus-bot-hover-label");
       continue;
     }
-    // Re-drawn whenever what it shows changes, not only its title: an open card
-    // follows screenshot mode (the label), and the bot's shape, color and status.
-    const view = resolveBotPresentation(bot, prefsByKey[bot.key]);
-    const signature = `${raw}\u0000${view.label}\u0000${view.shape}\u0000${view.paint}\u0000${view.mood}\u0000${bot.status ?? ""}`;
-    if (el.getAttribute("data-t3plus-hover-raw") === signature && el.hasAttribute("data-t3plus-bot-hover")) continue;
-    el.setAttribute("data-t3plus-hover-raw", signature);
-    el.setAttribute("data-t3plus-bot-hover", "");
-    el.setAttribute("data-t3plus-bot-hover-label", view.label);
-    applyAvatarVars(el, view);
+    // Kept in step with what it shows, not only its title: an open card follows screenshot
+    // mode (the label) and the bot's face (shape, color, status). Only what changed is
+    // written: paintFace compares the whole face.
+    const view = resolveBotPresentation(bot, t3ElementPrefs(prefsByKey[bot.key]));
+    setAttr(el, "data-t3plus-hover-raw", raw);
+    setAttr(el, "data-t3plus-bot-hover", "");
+    setAttr(el, "data-t3plus-bot-hover-label", view.label);
+    paintFace(el, view, false);
   }
 }

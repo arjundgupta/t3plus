@@ -8,25 +8,40 @@
  *   [data-slot="composer-shell"]                   T3's composer shell; its ::before is T3's glass
  *   [data-chat-composer-surface="true"]            T3's composer card
  *   [data-t3plus-surface]                          fallback card tag set by src/composer.js
- * Values arrive as custom properties on <html>, set by src/gradient.js:
+ * <html> carries on/off attributes (data-t3plus-backdrop, -glass, -bubble, ...) and the
+ * dither tile (--t3plus-dither). The values of the open profile's look arrive as custom
+ * properties on the elements that read them (src/gradient.js computes them,
+ * src/composer.js setLook writes them into t3+'s own stylesheet, a rule per set of
+ * elements): on <html> they were inherited by every element, and each profile switch
+ * restyled the whole page.
  *   --t3plus-accent  #rrggbb, or unset to follow T3's --primary
  *   --t3plus-core / --t3plus-halo / --t3plus-fade   accent share per stop (half-circle)
  *   --t3plus-scrim-top / --t3plus-scrim-bottom     share of the page color over the image
  *   --t3plus-image   url(...) of the chosen image
  *   --t3plus-glass-opacity / --t3plus-glass-blur   composer glass
+ * Values for one element sit inline on it, written by the module that owns it:
+ *   --t3plus-composer-x   the glow's center, on the pane (app.js measures the composer)
+ *   --t3plus-bot-*        a face's sprite, clip and color (bots.js applyAvatarVars)
+ *   --t3plus-profile-color   a profile's dot, name and swatches (profiles.js, appearancePanel.js)
+ * A selector's last compound is never a several-argument :is() or a bare `*` (nor a
+ * :not() alone, except right under one of t3+'s own marks): Blink files such a rule
+ * under no attribute or class, and tested it against every element of every style
+ * recalc (about a quarter of each recalc in a long thread).
  *
  * Model (v2): the gradient or image is a BACKGROUND layer behind the
  * conversation and composer. The composer card itself is translucent glass on
  * top of it. Visual layers are pseudo-elements with pointer-events: none, so
  * nothing intercepts clicks, moves the caret, or restyles the editor, chips,
- * attachments, or buttons. Nothing animates.
+ * attachments, or buttons. No CSS animation runs (src/spriteClock.js steps the
+ * faces' frames), and every transition stops under prefers-reduced-motion.
  */
 
 /* ---------- Backdrop layer ---------- */
 
 /* isolation keeps the z-index:-1 layer above the pane's own opaque background
    and below its content (timeline and composer). */
-html[data-t3plus-backdrop] :is([data-workspace-area="conversation"], [data-t3plus-backdrop-host]) {
+html[data-t3plus-backdrop] [data-workspace-area="conversation"],
+html[data-t3plus-backdrop] [data-t3plus-backdrop-host] {
   isolation: isolate;
   /* The glow layers are scaled around the glow center, which pushes them past the
      pane's edges. Where an ancestor scrolls (T3 desktop's chat column), that made the
@@ -34,7 +49,8 @@ html[data-t3plus-backdrop] :is([data-workspace-area="conversation"], [data-t3plu
   overflow: clip;
 }
 
-html[data-t3plus-backdrop] :is([data-workspace-area="conversation"], [data-t3plus-backdrop-host])::before,
+html[data-t3plus-backdrop] [data-workspace-area="conversation"]::before,
+html[data-t3plus-backdrop] [data-t3plus-backdrop-host]::before,
 .t3plus-preview:not([data-backdrop="off"]) .t3plus-preview-pane::before {
   content: "";
   position: absolute;
@@ -52,7 +68,8 @@ html[data-t3plus-backdrop] :is([data-workspace-area="conversation"], [data-t3plu
 /* B. Bottom half-circle: a static elliptical glow anchored to the actual
    composer center, behind the composer. The Bayer tile is a real ordered
    dither, not a blurred/noise approximation. */
-html[data-t3plus-backdrop="half-circle"] :is([data-workspace-area="conversation"], [data-t3plus-backdrop-host])::before,
+html[data-t3plus-backdrop="half-circle"] [data-workspace-area="conversation"]::before,
+html[data-t3plus-backdrop="half-circle"] [data-t3plus-backdrop-host]::before,
 .t3plus-preview[data-backdrop="half-circle"] .t3plus-preview-pane::before {
   background-image:
     var(--t3plus-dither),
@@ -74,7 +91,8 @@ html[data-t3plus-backdrop="half-circle"] :is([data-workspace-area="conversation"
 /* A. Image: the image covers the pane under a scrim of the page's own color.
    The scrim is heavier at the top (where messages are read) than at the
    bottom (around the composer). */
-html[data-t3plus-backdrop="image"] :is([data-workspace-area="conversation"], [data-t3plus-backdrop-host])::before,
+html[data-t3plus-backdrop="image"] [data-workspace-area="conversation"]::before,
+html[data-t3plus-backdrop="image"] [data-t3plus-backdrop-host]::before,
 .t3plus-preview[data-backdrop="image"] .t3plus-preview-pane::before {
   background-image:
     var(--t3plus-dither),
@@ -90,7 +108,8 @@ html[data-t3plus-backdrop="image"] :is([data-workspace-area="conversation"], [da
 }
 
 @media (prefers-contrast: more) {
-  html[data-t3plus-backdrop="image"] :is([data-workspace-area="conversation"], [data-t3plus-backdrop-host])::before,
+  html[data-t3plus-backdrop="image"] [data-workspace-area="conversation"]::before,
+  html[data-t3plus-backdrop="image"] [data-t3plus-backdrop-host]::before,
   .t3plus-preview[data-backdrop="image"] .t3plus-preview-pane::before {
     background-image:
       var(--t3plus-dither),
@@ -110,7 +129,8 @@ html[data-t3plus-backdrop="image"] :is([data-workspace-area="conversation"], [da
    crisp pixels in t3+'s own layer, div.t3plus-glow, the host's first child.
    Moving or resizing the glow restyles only that layer's few elements. While
    it shows, the host's CSS gradient above steps aside. */
-html[data-t3plus-dithered] :is([data-workspace-area="conversation"], [data-t3plus-backdrop-host])::before,
+html[data-t3plus-dithered] [data-workspace-area="conversation"]::before,
+html[data-t3plus-dithered] [data-t3plus-backdrop-host]::before,
 html[data-t3plus-dithered] .t3plus-preview-pane:has(> .t3plus-glow:not([hidden]))::before {
   /* Only once a render is shown: during the first one, and after a failed one, the
      preview keeps the CSS look instead of going blank. */
@@ -219,7 +239,8 @@ html[data-t3plus-glass] [data-slot="composer-shell"] {
 }
 
 /* Fallback: a composer card outside T3's shell gets its own glass surface. */
-html[data-t3plus-glass] :is([data-chat-composer-surface="true"], [data-t3plus-surface]):not([data-slot="composer-shell"] *),
+html[data-t3plus-glass] [data-chat-composer-surface="true"]:not([data-slot="composer-shell"] *),
+html[data-t3plus-glass] [data-t3plus-surface]:not([data-slot="composer-shell"] *),
 .t3plus-preview[data-glass="true"] .t3plus-preview-card {
   background-color: color-mix(in srgb, var(--card, #121212) var(--t3plus-glass-opacity, 52%), transparent);
   -webkit-backdrop-filter: blur(var(--t3plus-glass-blur, 18px)) saturate(1.35);
@@ -231,7 +252,8 @@ html[data-t3plus-glass] :is([data-chat-composer-surface="true"], [data-t3plus-su
    card stays nearly opaque so text over a busy image remains readable. */
 @supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
   html[data-t3plus-glass] [data-slot="composer-shell"],
-  html[data-t3plus-glass] :is([data-chat-composer-surface="true"], [data-t3plus-surface]),
+  html[data-t3plus-glass] [data-chat-composer-surface="true"],
+  html[data-t3plus-glass] [data-t3plus-surface],
   .t3plus-preview .t3plus-preview-card {
     --t3plus-glass-opacity: 94%;
   }
@@ -239,19 +261,22 @@ html[data-t3plus-glass] :is([data-chat-composer-surface="true"], [data-t3plus-su
 
 @media (prefers-reduced-transparency: reduce) {
   html[data-t3plus-glass] [data-slot="composer-shell"],
-  html[data-t3plus-glass] :is([data-chat-composer-surface="true"], [data-t3plus-surface]),
+  html[data-t3plus-glass] [data-chat-composer-surface="true"],
+  html[data-t3plus-glass] [data-t3plus-surface],
   .t3plus-preview .t3plus-preview-card {
     --t3plus-glass-opacity: 96%;
   }
 }
 
 @media (forced-colors: active) {
-  html[data-t3plus-backdrop] :is([data-workspace-area="conversation"], [data-t3plus-backdrop-host])::before,
+  html[data-t3plus-backdrop] [data-workspace-area="conversation"]::before,
+  html[data-t3plus-backdrop] [data-t3plus-backdrop-host]::before,
   .t3plus-preview .t3plus-preview-pane::before,
   .t3plus-glow {
     display: none !important;
   }
-  html[data-t3plus-glass] :is([data-chat-composer-surface="true"], [data-t3plus-surface]),
+  html[data-t3plus-glass] [data-chat-composer-surface="true"],
+  html[data-t3plus-glass] [data-t3plus-surface],
   .t3plus-preview .t3plus-preview-card {
     background-color: Canvas !important;
     -webkit-backdrop-filter: none !important;
@@ -302,23 +327,24 @@ html[data-t3plus-glass] :is([data-chat-composer-surface="true"], [data-t3plus-su
    renders the real title span with its state classes (hidden text, see
    below), so the name copies them. A thread that has been seen recedes to
    75% (font-normal) until it is hovered, focused or open; the slim variant
-   uses secondary-label shades; failed threads are 95%. */
-[data-t3plus-bot]:has([data-t3plus-bot-title].font-normal) [data-t3plus-bot-top]::before {
+   uses secondary-label shades; failed threads are 95%. :where(): the title's
+   classes add no weight, or they outranked hover, focus and the open thread below. */
+[data-t3plus-bot]:where(:has([data-t3plus-bot-title].font-normal)) [data-t3plus-bot-top]::before {
   font-weight: 400;
 }
-[data-t3plus-bot]:has([data-t3plus-bot-title].text-foreground\/75) [data-t3plus-bot-top]::before {
+[data-t3plus-bot]:where(:has([data-t3plus-bot-title].text-foreground\/75)) [data-t3plus-bot-top]::before {
   color: color-mix(in srgb, var(--foreground) 75%, transparent);
 }
-[data-t3plus-bot]:has([data-t3plus-bot-title].text-foreground\/95) [data-t3plus-bot-top]::before {
+[data-t3plus-bot]:where(:has([data-t3plus-bot-title].text-foreground\/95)) [data-t3plus-bot-top]::before {
   color: color-mix(in srgb, var(--foreground) 95%, transparent);
 }
-[data-t3plus-bot]:has([data-t3plus-bot-title].text-muted-foreground) [data-t3plus-bot-top]::before {
+[data-t3plus-bot]:where(:has([data-t3plus-bot-title].text-muted-foreground)) [data-t3plus-bot-top]::before {
   color: var(--muted-foreground);
 }
-[data-t3plus-bot]:has([data-t3plus-bot-title].text-secondary-label) [data-t3plus-bot-top]::before {
+[data-t3plus-bot]:where(:has([data-t3plus-bot-title].text-secondary-label)) [data-t3plus-bot-top]::before {
   color: var(--secondary-label, var(--muted-foreground));
 }
-[data-t3plus-bot]:has([data-t3plus-bot-title].text-secondary-label\/70) [data-t3plus-bot-top]::before {
+[data-t3plus-bot]:where(:has([data-t3plus-bot-title].text-secondary-label\/70)) [data-t3plus-bot-top]::before {
   color: color-mix(in srgb, var(--secondary-label, var(--muted-foreground)) 70%, transparent);
 }
 /* Settled rows dim every child until hovered (rowSurfaceClassName "unsettle"). */
@@ -375,7 +401,7 @@ html[data-t3plus-glass] :is([data-chat-composer-surface="true"], [data-t3plus-su
   grid-area: 2 / 1 / 3 / 3;
 }
 
-/* Line 3, only while a bot runs subagents: one tiny robot each. */
+/* Line 3, only while a bot runs subagents: a small still face for each. */
 [data-t3plus-bot-body="slim"] > [data-t3plus-bot-top]:has(> .t3plus-bot-subs) {
   grid-template-rows: 1.25rem 1.25rem 0.875rem;
 }
@@ -394,16 +420,25 @@ html[data-t3plus-glass] :is([data-chat-composer-surface="true"], [data-t3plus-su
   height: 0.75rem;
   flex: none;
 }
+/* A subagent's face stands still: one frame (botStill). So does a shape in Settings'
+   Subagents picker (.t3plus-face-icon), drawn as the subagents under it would be. */
+.t3plus-bot-sub::before,
+.t3plus-face-icon {
+  background-image: var(--t3plus-bot-fill, none);
+  background-size: 100% 100%;
+  background-repeat: no-repeat;
+  image-rendering: pixelated;
+  clip-path: var(--t3plus-bot-clip, none);
+}
 .t3plus-bot-sub::before {
   content: "";
   position: absolute;
   inset: 0;
-  background-image: var(--t3plus-bot-fill, none);
-  background-size: calc(var(--t3plus-bot-frames, 1) * 100%) 100%;
-  background-position: var(--t3plus-bot-x, 0%) 0;
-  background-repeat: no-repeat;
-  image-rendering: pixelated;
-  clip-path: var(--t3plus-bot-clip, none);
+}
+.t3plus-face-icon {
+  display: block;
+  width: 100%;
+  height: 100%;
 }
 .t3plus-bot-sub[data-done] {
   opacity: 0.45;
@@ -428,9 +463,20 @@ html[data-t3plus-glass] :is([data-chat-composer-surface="true"], [data-t3plus-su
   pointer-events: none;
 }
 
-.t3plus-bot-avatar::before,
+/* t3+'s own avatars (rows, the Status view, Settings) show the face and its badge on
+   two children of their own (bots.js), and spriteClock.js steps those. The avatar holds
+   the face's picture, unpainted, and the face takes it as it is (inherit): a frame step
+   restyles one small child, and the sheet (tens of KB for a blob) is not substituted
+   and parsed again through var() each time. */
+.t3plus-bot-avatar,
+.t3plus-bot-swatch {
+  background-image: var(--t3plus-bot-fill, none);
+  background-size: 0 0;
+  background-repeat: no-repeat;
+}
+
+.t3plus-bot-face,
 .t3plus-swatch-mark,
-.t3plus-bot-swatch,
 [data-t3plus-bot-breadcrumb]::before,
 [data-t3plus-bot-hover]::before {
   background-color: var(--t3plus-bot-edge, var(--primary, #6d7cff));
@@ -447,17 +493,17 @@ html[data-t3plus-glass] :is([data-chat-composer-surface="true"], [data-t3plus-su
   clip-path: var(--t3plus-bot-clip, circle(50% at 50% 50%));
 }
 
-.t3plus-bot-avatar::before {
-  content: "";
+/* Its picture: the one its avatar holds, as it is (not the variable's, above). */
+.t3plus-bot-face {
   position: absolute;
   inset: 0;
+  background-image: inherit;
 }
 
 /* Status badge (botArt.js botBadge): a 9x10 pixel sprite on the face's lower
    right corner, outside the shape's clip, at the face's own pixel size
    (1.875rem / 24 per pixel). Needs-you hops and working ticks, stepped by spriteClock.js. */
-.t3plus-bot-avatar[data-badge]::after {
-  content: "";
+.t3plus-bot-badge {
   position: absolute;
   right: -0.234375rem;
   bottom: -0.17578rem;
@@ -481,7 +527,7 @@ html[data-t3plus-glass] :is([data-chat-composer-surface="true"], [data-t3plus-su
   width: 1.375rem;
   height: 1.375rem;
 }
-[data-sidebar-parent="shelf:settled"] > .t3plus-bot-avatar[data-badge]::after {
+[data-sidebar-parent="shelf:settled"] > .t3plus-bot-avatar > .t3plus-bot-badge {
   right: -0.171875rem;
   bottom: -0.12891rem;
   width: 0.515625rem;
@@ -532,8 +578,10 @@ html[data-t3plus-glass] :is([data-chat-composer-surface="true"], [data-t3plus-su
   height: 1rem;
 }
 
+/* The drawn names are decorative (alt text ""): the breadcrumb's heading is named by its
+   aria-label (bots.js), and a name read out twice was noise. */
 [data-t3plus-bot-hover]::after {
-  content: attr(data-t3plus-bot-hover-label);
+  content: attr(data-t3plus-bot-hover-label) / "";
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -542,7 +590,7 @@ html[data-t3plus-glass] :is([data-chat-composer-surface="true"], [data-t3plus-su
 }
 
 [data-t3plus-bot-breadcrumb]::after {
-  content: attr(data-t3plus-bot-breadcrumb-label);
+  content: attr(data-t3plus-bot-breadcrumb-label) / "";
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -551,7 +599,7 @@ html[data-t3plus-glass] :is([data-chat-composer-surface="true"], [data-t3plus-su
 }
 
 @media (forced-colors: active) {
-  .t3plus-bot-avatar::before,
+  .t3plus-bot-face,
   [data-t3plus-bot-breadcrumb]::before {
     forced-color-adjust: none;
     background: Highlight;
@@ -561,16 +609,20 @@ html[data-t3plus-glass] :is([data-chat-composer-surface="true"], [data-t3plus-su
 /* ---------- Settings -> Appearance section ---------- */
 /* Mirrors T3's SettingsSection/SettingsRow look using T3's theme variables. */
 
+/* No box-sizing rule for everything inside: T3's base styles (Tailwind's preflight)
+   make every element border-box already, and `.t3plus-section *` was tested against
+   every element of the page in every style recalc. */
 .t3plus-section {
   display: block;
   color: var(--foreground);
   font: inherit;
 }
 
-.t3plus-section *,
-.t3plus-section *::before,
-.t3plus-section *::after {
-  box-sizing: border-box;
+/* Hidden stays hidden, whatever display a class gives it (a row's reset, the scope's
+   Clear, a folded Status group): T3's base styles see to it, but not every page has them. */
+.t3plus-section [hidden],
+.t3plus-status-group [hidden] {
+  display: none !important;
 }
 
 .t3plus-section-header {
@@ -612,11 +664,8 @@ html[data-t3plus-glass] :is([data-chat-composer-surface="true"], [data-t3plus-su
   padding: 0.75rem 1rem;
 }
 
-.t3plus-row[hidden] {
-  display: none;
-}
-
-.t3plus-row + .t3plus-row {
+/* A line between rows, once a shown row is above it (a hidden first row left it on the card's top). */
+.t3plus-row:not([hidden]) ~ .t3plus-row {
   border-top: 1px solid color-mix(in srgb, var(--border) 50%, transparent);
 }
 
@@ -801,17 +850,6 @@ html[data-t3plus-glass] :is([data-chat-composer-surface="true"], [data-t3plus-su
   background-color: var(--muted);
   background-size: cover;
   background-position: center;
-}
-
-/* Color */
-.t3plus-color {
-  width: 2rem;
-  height: 1.75rem;
-  padding: 0.125rem;
-  border-radius: 0.375rem;
-  border: 1px solid var(--border);
-  background: var(--background);
-  cursor: pointer;
 }
 
 /* Intensity */
@@ -1113,34 +1151,10 @@ html[data-t3plus-glass] :is([data-chat-composer-surface="true"], [data-t3plus-su
   margin: 0;
 }
 
-.t3plus-bots-empty[hidden] {
-  display: none;
-}
-
-.t3plus-input,
-.t3plus-select {
-  width: 100%;
-  min-width: 0;
-  border-radius: 0.375rem;
-  border: 1px solid var(--border);
-  background: var(--background);
-  color: var(--foreground);
-  font: inherit;
-  font-size: 13px;
-}
-
-.t3plus-input,
-.t3plus-select {
-  height: 1.75rem;
-  padding: 0 0.5rem;
-}
-
-.t3plus-row-control-start {
-  justify-content: flex-start;
-}
-
+/* The container the narrow layout below asks for its width. */
 .t3plus-bots-body {
   margin-top: 0.75rem;
+  container-type: inline-size;
 }
 
 /* Bots: a list on the left, the one picked on the right, at one height. */
@@ -1152,9 +1166,6 @@ html[data-t3plus-glass] :is([data-chat-composer-surface="true"], [data-t3plus-su
   border: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
   border-radius: 0.625rem;
   background: color-mix(in srgb, var(--background) 50%, transparent);
-}
-.t3plus-bots-both[hidden] {
-  display: none;
 }
 .t3plus-bots-side {
   display: flex;
@@ -1194,9 +1205,6 @@ html[data-t3plus-glass] :is([data-chat-composer-surface="true"], [data-t3plus-su
   color: var(--muted-foreground);
   font-size: 12px;
 }
-.t3plus-bots-none[hidden] {
-  display: none;
-}
 
 /* A bot in the list: its face, its name, its latest message. */
 .t3plus-bot-pick {
@@ -1212,9 +1220,6 @@ html[data-t3plus-glass] :is([data-chat-composer-surface="true"], [data-t3plus-su
   font: inherit;
   text-align: left;
   cursor: pointer;
-}
-.t3plus-bot-pick[hidden] {
-  display: none;
 }
 .t3plus-bot-pick:hover {
   background: color-mix(in srgb, var(--foreground) 5%, transparent);
@@ -1246,6 +1251,7 @@ html[data-t3plus-glass] :is([data-chat-composer-surface="true"], [data-t3plus-su
 
 /* 24px: the face sprites' own size, so the pixels stay crisp. */
 .t3plus-bot-swatch {
+  position: relative;
   flex: none;
   width: 1.5rem;
   height: 1.5rem;
@@ -1300,9 +1306,6 @@ html[data-t3plus-glass] :is([data-chat-composer-surface="true"], [data-t3plus-su
 .t3plus-bot-message.is-empty {
   font-style: italic;
 }
-.t3plus-bot-meta[hidden] {
-  display: none;
-}
 .t3plus-bot-hero > .t3plus-button {
   flex: none;
   align-self: flex-start;
@@ -1330,9 +1333,6 @@ html[data-t3plus-glass] :is([data-chat-composer-surface="true"], [data-t3plus-su
     border-right: 0;
     border-bottom: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
   }
-}
-.t3plus-bots-body {
-  container-type: inline-size;
 }
 
 .t3plus-swatches {
@@ -1373,25 +1373,6 @@ html[data-t3plus-glass] :is([data-chat-composer-surface="true"], [data-t3plus-su
   height: 1.25rem;
 }
 
-.t3plus-field {
-  display: flex;
-  flex-direction: column;
-  gap: 0.25rem;
-  font-size: 12px;
-  color: var(--muted-foreground);
-}
-
-.t3plus-inline {
-  display: flex;
-  align-items: center;
-  gap: 0.375rem;
-}
-
-.t3plus-section select:focus-visible {
-  outline: 2px solid var(--ring, var(--primary));
-  outline-offset: 2px;
-}
-
 @media (prefers-reduced-motion: reduce) {
   .t3plus-switch,
   .t3plus-switch-thumb {
@@ -1413,6 +1394,14 @@ html[data-t3plus-glass] :is([data-chat-composer-surface="true"], [data-t3plus-su
   .t3plus-segment:has(input:checked) {
     outline: 2px solid Highlight;
   }
+  /* What is pressed or picked shows with a background or a shadow, both dropped
+     here: outlined instead, unless the focus ring is there. */
+  .t3plus-button[aria-pressed="true"]:not(:focus-visible),
+  .t3plus-bot-pick[aria-selected="true"]:not(:focus-visible),
+  .t3plus-swatch[aria-pressed="true"]:not(:focus-visible) {
+    outline: 2px solid Highlight;
+    outline-offset: -2px;
+  }
 }
 
 /* ---------- New-thread page (T3's draft hero) ---------- */
@@ -1428,8 +1417,10 @@ html[data-t3plus-backdrop] [data-workspace-area="conversation"] > .bg-background
 /* With the home widgets on, the hero is laid out top-down: app.js measures the
    headline, composer and widgets and sets the overlay's padding-top so the whole block
    sits centered (slightly low) in the pane. T3's headline still hangs above
-   the composer stack. */
-html[data-t3plus-home] [data-chat-composer-overlay="true"].items-center {
+   the composer stack. [class~=] rather than .items-center: a class in the last compound
+   decides which elements a data-t3plus-home toggle restyles, and Tailwind's items-center
+   is on hundreds of them. */
+html[data-t3plus-home] [data-chat-composer-overlay="true"][class~="items-center"] {
   align-items: flex-start !important;
   /* app.js sets the measured value inline. */
   padding-top: clamp(7rem, 18vh, 11rem);
@@ -1474,6 +1465,13 @@ html[data-t3plus-home] [data-chat-composer-overlay="true"].items-center {
   grid-column: 1 / -1;
 }
 
+/* One glass for t3+'s cards: these, and T3's thread details card with glass on. */
+.t3plus-w,
+html[data-t3plus-glass] [data-thread-details-card] {
+  --t3plus-card-glass: color-mix(in srgb, var(--card, #111) 74%, transparent);
+  --t3plus-card-blur: blur(14px) saturate(1.3);
+}
+
 /* Cards: T3's rounded-lg border-border/60 panels, as glass over the dither. */
 .t3plus-w {
   display: flex;
@@ -1483,9 +1481,9 @@ html[data-t3plus-home] [data-chat-composer-overlay="true"].items-center {
   padding: 0.625rem 0.75rem;
   border: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
   border-radius: 0.625rem;
-  background-color: color-mix(in srgb, var(--card, #111) 74%, transparent);
-  -webkit-backdrop-filter: blur(14px) saturate(1.3);
-  backdrop-filter: blur(14px) saturate(1.3);
+  background-color: var(--t3plus-card-glass);
+  -webkit-backdrop-filter: var(--t3plus-card-blur);
+  backdrop-filter: var(--t3plus-card-blur);
 }
 
 @supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
@@ -1581,12 +1579,13 @@ html[data-t3plus-home] [data-chat-composer-overlay="true"].items-center {
   flex: none;
   margin-top: auto;
   isolation: isolate;
+  cursor: crosshair;
 }
 
 /* Dither-kit area fill (ditherChart.js): square cells on the backdrop's pixel
    grid, an ordered gradient from sparse under the line to solid at the
-   baseline. It sits under the SVG, which keeps the gridlines, the "now" rule
-   and the hover geometry. */
+   baseline. It sits under the SVG, which keeps the gridlines and the hover
+   geometry. */
 .t3plus-w-dither {
   position: absolute;
   top: 0;
@@ -1624,12 +1623,17 @@ html[data-t3plus-home] [data-chat-composer-overlay="true"].items-center {
   position: relative;
 }
 
-[data-t3plus-usage-plot][data-t3plus-dithered] > svg path {
+/* data-t3plus-painted, not the glow's data-t3plus-dithered: that one is on <html> too,
+   and each of its toggles restyled every <path> of the page (T3's icons). */
+[data-t3plus-usage-plot][data-t3plus-painted] > svg path {
   visibility: hidden;
 }
 
 /* Once the canvas has painted, it is the visible area and line. */
-.t3plus-w-plot[data-t3plus-dithered] .t3plus-w-plot-svg :is(.t3plus-w-area, .t3plus-w-line, path[fill]:not(.t3plus-w-grid), path[stroke]:not(.t3plus-w-grid)) {
+.t3plus-w-plot[data-t3plus-painted] .t3plus-w-plot-svg .t3plus-w-area,
+.t3plus-w-plot[data-t3plus-painted] .t3plus-w-plot-svg .t3plus-w-line,
+.t3plus-w-plot[data-t3plus-painted] .t3plus-w-plot-svg path[fill]:not(.t3plus-w-grid),
+.t3plus-w-plot[data-t3plus-painted] .t3plus-w-plot-svg path[stroke]:not(.t3plus-w-grid) {
   visibility: hidden;
 }
 
@@ -1648,17 +1652,8 @@ html[data-t3plus-home] [data-chat-composer-overlay="true"].items-center {
   stroke-linecap: butt;
 }
 
-.t3plus-w-line-projected {
-  stroke-dasharray: 2 3;
-}
-
 .t3plus-w-area {
   fill: var(--pool-color, var(--primary));
-  fill-opacity: 0.16;
-}
-
-.t3plus-w-area-projected {
-  fill-opacity: 0.07;
 }
 
 /* Dither-kit chart variants. The graph keeps a smooth mathematical path for
@@ -1675,40 +1670,6 @@ html[data-t3plus-home] [data-chat-composer-overlay="true"].items-center {
 
 .t3plus-w-plot-svg[data-t3plus-dither-chart="line"] path[fill]:not(.t3plus-w-grid) {
   fill-opacity: 0.14;
-}
-
-.t3plus-w-now {
-  stroke: var(--muted-foreground);
-  stroke-width: 1;
-  opacity: 0.6;
-}
-
-.t3plus-w-now-label,
-.t3plus-w-refill {
-  position: absolute;
-  top: -0.125rem;
-  transform: translateX(-50%);
-  color: var(--muted-foreground);
-  font-size: 0.625rem;
-  line-height: 1;
-  font-variant-numeric: tabular-nums;
-  white-space: nowrap;
-  pointer-events: none;
-}
-
-.t3plus-w-now-label {
-  top: auto;
-  bottom: calc(100% - 0.375rem);
-  text-transform: uppercase;
-  letter-spacing: 0.02em;
-}
-
-.t3plus-w-refill {
-  top: 0.25rem;
-  padding: 0 0.1875rem;
-  border-radius: 0.1875rem;
-  background: color-mix(in srgb, var(--card, #111) 80%, transparent);
-  color: color-mix(in srgb, var(--foreground) 80%, transparent);
 }
 
 /* T3's chart axes: text-3xs, muted, uppercase, tabular. */
@@ -1811,10 +1772,6 @@ html[data-t3plus-home] [data-chat-composer-overlay="true"].items-center {
 .t3plus-w-heat-day {
   align-self: center;
   line-height: 1;
-}
-
-.t3plus-w-heat-month {
-  grid-column-end: span 3;
 }
 
 .t3plus-w-cell {
@@ -1952,21 +1909,20 @@ html[data-t3plus-home] [data-chat-composer-overlay="true"].items-center {
 }
 
 /* Chart crosshair: T3's hover line (muted, 1px) plus a dot on each series. */
-.t3plus-w-plot {
-  cursor: crosshair;
-}
-
+/* Moved with translate (homeWidgets.js showMarker), not left and top: its glide is then
+   composited, not a layout of the page on every frame. */
 .t3plus-w-hover {
   position: absolute;
   top: 0;
   bottom: 0;
+  left: 0;
   width: 0;
   z-index: 2;
   pointer-events: none;
   opacity: 0;
   transition:
     opacity 150ms ease,
-    left 90ms cubic-bezier(0.22, 1, 0.36, 1);
+    translate 90ms cubic-bezier(0.22, 1, 0.36, 1);
 }
 
 .t3plus-w-hover[data-on] {
@@ -1985,13 +1941,14 @@ html[data-t3plus-home] [data-chat-composer-overlay="true"].items-center {
 
 .t3plus-w-hover-dot {
   position: absolute;
+  top: 0;
   left: -0.25rem;
   width: 0.5rem;
   height: 0.5rem;
   margin-top: -0.25rem;
   border-radius: 999px;
   box-shadow: 0 0 0 2px var(--card, #111);
-  transition: top 90ms cubic-bezier(0.22, 1, 0.36, 1);
+  transition: translate 90ms cubic-bezier(0.22, 1, 0.36, 1);
 }
 
 /* Heatmap: the hovered day gets a ring. */
@@ -1999,8 +1956,16 @@ html[data-t3plus-home] [data-chat-composer-overlay="true"].items-center {
   transition: box-shadow 120ms ease;
 }
 
-.t3plus-w-cell:not([data-future]):hover {
+.t3plus-w-cell:not([data-future]):hover,
+.t3plus-w-cell[data-t3plus-sel] {
   box-shadow: 0 0 0 1.5px color-mix(in srgb, var(--foreground) 70%, transparent);
+}
+
+/* The charts are Tab stops (arrow keys step through their days, homeWidgets.js). */
+.t3plus-w-plot:focus-visible,
+.t3plus-w-heat:focus-visible {
+  outline: 2px solid var(--ring, var(--primary));
+  outline-offset: 2px;
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -2016,8 +1981,9 @@ html[data-t3plus-home] [data-chat-composer-overlay="true"].items-center {
 /* ---------- t3+ settings section ----------
    While the t3+ entry is open, T3's sections on the current settings page are
    hidden, the t3+ panel shows alone, and T3's own active nav item and
-   breadcrumb defer to t3+. */
-html[data-t3plus-settings] [data-settings-page-scroll] > div > :not(#t3plus-appearance) {
+   breadcrumb defer to t3+. app.js marks the page's column and the header's
+   actions (data-t3plus-settings-hide): opening and closing restyle those alone. */
+[data-t3plus-settings-hide="sections"] > :not(#t3plus-appearance) {
   display: none !important;
 }
 html[data-t3plus-settings] [data-settings-section][data-active="true"]:not([data-t3plus-owned]):not(:hover) {
@@ -2039,7 +2005,7 @@ html[data-t3plus-settings] #t3plus-appearance {
 }
 /* The header's page actions (General's "Restore device defaults") act on the
    T3 page underneath, not on t3+: hidden while t3+ is shown. Close stays. */
-html[data-t3plus-settings] nav[aria-label="Settings breadcrumb"] ~ div > :not([aria-label="Close"]) {
+[data-t3plus-settings-hide="actions"] > :not([aria-label="Close"]) {
   display: none !important;
 }
 
@@ -2076,16 +2042,22 @@ html[data-t3plus-settings] nav[aria-label="Settings breadcrumb"] ~ div > :not([a
 .t3plus-advanced-summary:hover {
   color: var(--foreground);
 }
+@media (prefers-reduced-motion: reduce) {
+  .t3plus-advanced-summary::before {
+    transition: none;
+  }
+}
 
 /* ---------- Thread details ----------
    T3's thread details card (dropdown-glass) gets the same material as the
-   home widget cards and the glass composer, so the three read as one set.
-   Only with t3+'s glass on: with "Glass composer" off it keeps T3's own look. */
+   home widget cards (--t3plus-card-*, with them) and the glass composer, so the
+   three read as one set. Only with t3+'s glass on: with "Glass composer" off it
+   keeps T3's own look. */
 html[data-t3plus-glass] [data-thread-details-card] {
   border-color: color-mix(in srgb, var(--border) 60%, transparent) !important;
-  background-color: color-mix(in srgb, var(--card, #111) 74%, transparent) !important;
-  -webkit-backdrop-filter: blur(14px) saturate(1.3) !important;
-  backdrop-filter: blur(14px) saturate(1.3) !important;
+  background-color: var(--t3plus-card-glass) !important;
+  -webkit-backdrop-filter: var(--t3plus-card-blur) !important;
+  backdrop-filter: var(--t3plus-card-blur) !important;
 }
 
 /* Usage limits: the provider's pool chart replaces T3's rows. */
@@ -2093,7 +2065,7 @@ html[data-t3plus-glass] [data-thread-details-card] {
   display: none !important;
 }
 .t3plus-details-pool .t3plus-w {
-  padding: 0.25rem 0.625rem 0.125rem;
+  padding: 0.25rem 0.625rem 0.375rem;
   border: 0;
   border-radius: 0;
   background: none;
@@ -2120,12 +2092,11 @@ html[data-t3plus-home] [data-thread-details-card] section[aria-label="Usage limi
   display: none !important;
 }
 /* The details card is 280 px wide: a smaller number and one tight line. */
+/* Each part keeps to one line (inherited by them), the head wraps between them. */
 .t3plus-details-pool .t3plus-w-pool-head {
   gap: 0.3rem;
   font-size: 0.6875rem;
   flex-wrap: wrap;
-}
-.t3plus-details-pool .t3plus-w-pool-head > * {
   white-space: nowrap;
 }
 .t3plus-details-pool .t3plus-w-reset {
@@ -2136,9 +2107,6 @@ html[data-t3plus-home] [data-thread-details-card] section[aria-label="Usage limi
 }
 .t3plus-details-pool .t3plus-w-plot {
   margin-top: 0.625rem;
-}
-.t3plus-details-pool .t3plus-w {
-  padding-bottom: 0.375rem;
 }
 
 /* ---------- Screenshot mode ----------
@@ -2160,17 +2128,23 @@ html[data-t3plus-demo] img[data-t3plus-demo-badge] {
   overflow-x: clip;
 }
 
-/* A row of small dots at the top of the sidebar footer. */
+/* A row of small dots at the top of the sidebar footer. They stay centered whatever
+   the name's length: the open profile's name has the column to their left. */
 .t3plus-profiles {
   position: relative;
-  display: flex;
-  justify-content: center;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+  align-items: center;
+  column-gap: 0.5rem;
   padding: 0.125rem 0 0.25rem;
 }
 .t3plus-profiles-dots {
   display: flex;
   align-items: center;
   gap: 0.125rem;
+}
+.t3plus-profiles > .t3plus-profiles-dots {
+  grid-column: 2;
 }
 .t3plus-profile-dot {
   position: relative;
@@ -2183,6 +2157,13 @@ html[data-t3plus-demo] img[data-t3plus-demo-badge] {
   border-radius: 999px;
   background: transparent;
   cursor: pointer;
+}
+/* A dot takes the pointer over the bar's whole height and up to the next dot: the
+   dots stay small, their targets need not. */
+.t3plus-profile-dot::after {
+  content: "";
+  position: absolute;
+  inset: -0.3125rem -0.0625rem;
 }
 .t3plus-profile-dot::before {
   content: "";
@@ -2206,7 +2187,7 @@ html[data-t3plus-demo] img[data-t3plus-demo-badge] {
   outline: 2px solid var(--ring, var(--primary));
   outline-offset: 1px;
 }
-/* "+": faint until the pointer is near. */
+/* "+": faint until the pointer is near; in full while a folder is dragged (a drop target then). */
 .t3plus-profile-add::before {
   width: 0.4375rem;
   height: 0.4375rem;
@@ -2222,32 +2203,25 @@ html[data-t3plus-demo] img[data-t3plus-demo-badge] {
     linear-gradient(currentColor, currentColor) center / 1.5px 100% no-repeat;
   color: var(--foreground);
 }
-.t3plus-profiles:not(:hover) .t3plus-profile-add:not(:focus-visible) {
+html:not([data-t3plus-profile-drag]) .t3plus-profiles:not(:hover) .t3plus-profile-add:not(:focus-visible) {
   opacity: 0.35;
 }
 .t3plus-profile-chip {
   display: none;
 }
 
-/* The open profile's name, always beside the dots, in its color. */
-/* The dots stay centered whatever the name's length: the name has the column to their left. */
-.t3plus-profiles {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
-  align-items: center;
-  column-gap: 0.5rem;
-}
-.t3plus-profiles > .t3plus-profiles-dots {
-  grid-column: 2;
-}
+/* The open profile's name on the left, in its color, its text in line with the rows
+   above (T3's "Settled": the row's 2px margin and 8px padding, --sidebar-row-content-inset). */
 .t3plus-profiles-name {
   display: inline-flex;
   align-items: center;
   gap: 0.25rem;
   grid-column: 1;
   grid-row: 1;
-  justify-self: end;
-  max-width: 100%;
+  justify-self: start;
+  /* The pill's own padding (0.5rem) before its text: the pill starts where T3's rows do. */
+  margin-inline-start: calc(var(--sidebar-row-content-inset, 0.625rem) - 0.5rem);
+  max-width: calc(100% - var(--sidebar-row-content-inset, 0.625rem) + 0.5rem);
   overflow: hidden;
   padding: 0.0625rem 0.5rem;
   border-radius: 999px;
@@ -2330,13 +2304,17 @@ html[data-t3plus-profile-drag] .t3plus-profile-dot {
   height: 1.5rem;
   padding: 0 0.5rem;
   border: 1px dashed color-mix(in srgb, var(--foreground) 30%, transparent);
-  opacity: 1;
 }
-html[data-t3plus-profile-drag] .t3plus-profile-dot::before {
+/* A chip is its own target: no dot, and no wider hit area reaching into the next row of chips. */
+html[data-t3plus-profile-drag] .t3plus-profile-dot::before,
+html[data-t3plus-profile-drag] .t3plus-profile-dot::after {
   display: none;
 }
+/* A profile's icon beside its name (T3's base styles make an svg a block of its own). */
 html[data-t3plus-profile-drag] .t3plus-profile-chip {
-  display: block;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
   color: var(--foreground);
   font-size: 0.75rem;
 }
@@ -2345,10 +2323,13 @@ html[data-t3plus-profile-drag] .t3plus-profile-dot[data-over] {
   border-color: var(--primary);
   background: color-mix(in srgb, var(--primary) 18%, transparent);
 }
-html[data-t3plus-profile-drag],
-html[data-t3plus-profile-drag] * {
-  cursor: grabbing !important;
-  user-select: none !important;
+/* Over the whole page while a folder is dragged, under the ghost: the grabbing cursor
+   everywhere (profiles.js finds the dot under it; text selection is blocked there). */
+.t3plus-profile-shield {
+  position: fixed;
+  inset: 0;
+  z-index: 2147482999;
+  cursor: grabbing;
 }
 .t3plus-profile-ghost {
   position: fixed;
@@ -2447,23 +2428,28 @@ html[data-t3plus-profile-drag] * {
   padding: 0.125rem 0.25rem;
 }
 /* Sky swatches: little skies (a rounded square, dark into the color); default is T3's. */
-.t3plus-profile-colors[data-field="sky"] .t3plus-profile-swatch::before {
+.t3plus-profile-colors[data-field="sky"] .t3plus-profile-swatch::before,
+.t3plus-pp-swatches[data-field="sky"] .t3plus-pp-swatch:not(:first-of-type)::before {
   border-radius: 0.125rem;
   background: linear-gradient(135deg, color-mix(in oklab, var(--t3plus-profile-color) 30%, #0b0b1a), color-mix(in oklab, var(--t3plus-profile-color) 75%, #0b0b1a));
+}
+/* Settings' swatches are larger. */
+.t3plus-pp-swatches[data-field="sky"] .t3plus-pp-swatch:not(:first-of-type)::before {
+  border-radius: 0.1875rem;
 }
 .t3plus-profile-colors[data-field="sky"] .t3plus-profile-swatch:first-of-type::before,
 .t3plus-pp-swatches[data-field="sky"] .t3plus-pp-swatch:first-of-type::before {
   background: linear-gradient(135deg, var(--stage-night-mid, #1e1b4b), var(--stage-night-top, #4c2a85));
 }
-/* Dither swatches: the color under t3+'s dither pattern; default is the glow's own color. */
-.t3plus-profile-colors[data-field="dither"] .t3plus-profile-swatch::before,
-.t3plus-pp-swatches[data-field="dither"] .t3plus-pp-swatch::before {
+/* Glow swatches: the color under t3+'s dither pattern. In a profile's editor "Default"
+   is the glow set for all profiles; in Settings the first one is the T3 theme's color. */
+.t3plus-profile-colors[data-field="glow"] .t3plus-profile-swatch::before,
+.t3plus-pp-swatches[data-field="glow"] .t3plus-pp-swatch::before {
   background: var(--t3plus-dither, none) 0 0 / 4px 4px, var(--t3plus-profile-color, var(--t3plus-look-accent, var(--primary, #6d7cff)));
   background-blend-mode: soft-light, normal;
 }
-.t3plus-pp-swatches[data-field="sky"] .t3plus-pp-swatch:not(:first-of-type)::before {
-  border-radius: 0.1875rem;
-  background: linear-gradient(135deg, color-mix(in oklab, var(--t3plus-profile-color) 30%, #0b0b1a), color-mix(in oklab, var(--t3plus-profile-color) 75%, #0b0b1a));
+.t3plus-pp-swatches[data-field="glow"] .t3plus-pp-swatch:first-of-type::before {
+  background: var(--t3plus-dither, none) 0 0 / 4px 4px, var(--primary, #6d7cff);
 }
 
 /* The editor's icons (a grid under the name) and which color the row below picks. */
@@ -2563,8 +2549,40 @@ html[data-t3plus-profile-drag] * {
 
 @media (prefers-reduced-motion: reduce) {
   .t3plus-profiles-name,
-  .t3plus-profile-dot::before {
+  .t3plus-profile-dot::before,
+  html[data-t3plus-sky-ready] .sidebar-stage-backdrop {
     transition: none;
+  }
+}
+
+@media (forced-colors: active) {
+  /* The dots and "+" are drawn with backgrounds alone, which forced colors drop:
+     in the buttons' text color, the open profile's highlighted. */
+  .t3plus-profile-dot::before,
+  .t3plus-profile-dot:hover::before {
+    background: ButtonText;
+  }
+  .t3plus-profile-dot[aria-pressed="true"]::before {
+    background: Highlight;
+  }
+  .t3plus-profile-add::before,
+  .t3plus-profile-add:hover::before {
+    forced-color-adjust: none;
+    background:
+      linear-gradient(ButtonText, ButtonText) center / 100% 1.5px no-repeat,
+      linear-gradient(ButtonText, ButtonText) center / 1.5px 100% no-repeat;
+  }
+  /* A swatch shows its color on purpose. */
+  .t3plus-profile-swatch::before {
+    forced-color-adjust: none;
+  }
+  /* What is picked shows with a background or a shadow, both dropped here: outlined
+     instead, unless the focus ring is there. */
+  .t3plus-profile-icon-pick[aria-checked="true"]:not(:focus-visible),
+  .t3plus-profile-tab[aria-pressed="true"]:not(:focus-visible),
+  .t3plus-profile-editor .t3plus-profile-swatch[aria-checked="true"]:not(:focus-visible) {
+    outline: 2px solid Highlight;
+    outline-offset: -2px;
   }
 }
 
@@ -2864,9 +2882,6 @@ html[data-t3plus-profile-drag] * {
   justify-content: space-between;
   gap: 0.375rem 1rem;
 }
-.t3plus-pp-row[hidden] {
-  display: none;
-}
 .t3plus-pp-row-text {
   display: grid;
 }
@@ -2958,4 +2973,516 @@ html[data-t3plus-profile-drag] * {
 /* Not in use: a color wheel (any color), not the color it starts from. */
 .t3plus-pp-custom:not([data-checked])::-webkit-color-swatch {
   background-image: conic-gradient(from 90deg, #ef4444, #eab308, #22c55e, #14b8a6, #3b82f6, #8b5cf6, #ec4899, #ef4444);
+}
+
+@media (forced-colors: active) {
+  /* The preview's dots are backgrounds alone, which forced colors drop. */
+  .t3plus-pp-dot {
+    background: CanvasText;
+  }
+  .t3plus-pp-dot[data-on] {
+    background: Highlight;
+  }
+  /* A profile's color and the swatches show their colors on purpose. */
+  .t3plus-pp-chip::before,
+  .t3plus-pp-swatch::before {
+    forced-color-adjust: none;
+  }
+  /* What is picked shows with a background or a shadow, both dropped here: outlined
+     instead, unless the focus ring is there. */
+  .t3plus-pp-chip[aria-checked="true"]:not(:focus-visible),
+  .t3plus-pp-icon[aria-checked="true"]:not(:focus-visible),
+  .t3plus-pp-swatch[aria-checked="true"]:not(:focus-visible) {
+    outline: 2px solid Highlight;
+    outline-offset: -2px;
+  }
+}
+
+/* ---------- Chat bubbles (src/bubbles.js) ----------
+   Your messages' bubbles in the color picked (Settings → t3+, or the open profile's),
+   their text white or near-black to read on it. Only user rows: T3's other surfaces
+   that share --message-surface keep it. */
+html[data-t3plus-bubble] [data-message-role="user"] .bg-message {
+  --contrast-message-foreground: var(--t3plus-bubble-ink);
+  background-color: var(--t3plus-bubble);
+}
+html[data-t3plus-bubble] .t3plus-preview-user {
+  border-color: transparent;
+  background: var(--t3plus-bubble);
+  color: var(--t3plus-bubble-ink);
+}
+/* "Default" bubble swatches: T3's own bubble (Settings), or the one set for all
+   profiles (a profile's editor). */
+.t3plus-pp-swatches[data-field="bubble"] .t3plus-pp-swatch:first-of-type::before,
+.t3plus-profile-colors[data-field="bubble"] .t3plus-profile-swatch:first-of-type::before {
+  background: var(--message-surface, var(--card));
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--foreground) 30%, transparent);
+}
+.t3plus-profile-colors[data-field="bubble"] .t3plus-profile-swatch:first-of-type::before {
+  background: var(--t3plus-bubble-own, var(--message-surface, var(--card)));
+}
+
+/* ---------- Scope: "Applying t3+ for [All profiles ▾] on [All devices ▾]" ----------
+   As T3's own Settings bar: muted words, the picks as small buttons. The Subagents
+   row's two pickers (shape and color) share these t3plus-scope-* classes too. */
+.t3plus-scope {
+  position: relative;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.25rem 0.375rem;
+  margin: 0 0 0.75rem;
+  color: var(--muted-foreground);
+  font-size: 0.875rem;
+}
+.t3plus-scope-words {
+  flex: none;
+}
+.t3plus-scope-field {
+  position: relative;
+  display: inline-flex;
+  min-width: 0;
+}
+.t3plus-scope-pick {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.375rem;
+  min-width: 0;
+  max-width: 16rem;
+  height: 1.875rem;
+  padding: 0 0.5rem 0 0.625rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius, 0.5rem);
+  background: color-mix(in srgb, var(--foreground) 3%, var(--background));
+  color: var(--foreground);
+  font: inherit;
+  font-weight: 500;
+  cursor: pointer;
+}
+.t3plus-scope-pick:hover:not(:disabled),
+.t3plus-scope-pick[aria-expanded="true"] {
+  background: color-mix(in srgb, var(--foreground) 7%, var(--background));
+}
+.t3plus-scope-pick:disabled {
+  cursor: default;
+}
+.t3plus-scope-pick:disabled .t3plus-scope-chevron {
+  display: none;
+}
+.t3plus-scope-pick:focus-visible,
+.t3plus-scope-menu:focus-visible {
+  outline: 2px solid var(--ring, var(--primary));
+  outline-offset: 1px;
+}
+.t3plus-scope-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.t3plus-scope-icon,
+.t3plus-scope-chevron,
+.t3plus-scope-check {
+  display: inline-grid;
+  flex: none;
+  place-items: center;
+  width: 0.875rem;
+  height: 0.875rem;
+}
+.t3plus-scope-icon > svg,
+.t3plus-scope-chevron > svg,
+.t3plus-scope-check > svg {
+  width: 100%;
+  height: 100%;
+}
+.t3plus-scope-chevron {
+  color: var(--muted-foreground);
+}
+.t3plus-scope-menu {
+  position: absolute;
+  z-index: 50;
+  top: calc(100% + 0.25rem);
+  left: 0;
+  min-width: max(100%, 12rem);
+  max-width: 20rem;
+  max-height: 18rem;
+  overflow-y: auto;
+  padding: 0.25rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius, 0.5rem);
+  background: var(--popover, var(--background));
+  color: var(--popover-foreground, var(--foreground));
+  box-shadow: 0 8px 24px rgb(0 0 0 / 0.25);
+}
+.t3plus-scope-option {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.375rem 0.5rem;
+  border-radius: calc(var(--radius, 0.5rem) - 0.125rem);
+  cursor: pointer;
+}
+.t3plus-scope-option[data-active] {
+  background: color-mix(in srgb, var(--foreground) 8%, transparent);
+}
+.t3plus-scope-option-text {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.t3plus-scope-hint {
+  flex: none;
+  color: var(--muted-foreground);
+  font-size: 0.75rem;
+}
+.t3plus-scope-summary {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.375rem;
+  font-size: 0.8125rem;
+}
+.t3plus-scope-summary:has(.t3plus-scope-own:empty) {
+  display: none;
+}
+.t3plus-scope-own::before {
+  content: "·";
+  margin-inline-end: 0.375rem;
+}
+.t3plus-scope-clear {
+  height: 1.5rem;
+  padding: 0 0.5rem;
+  font-size: 0.75rem;
+}
+
+/* A setting a profile or machine sets itself: an accent bar on its row, a reset beside
+   its title. Notes under a row: where else a value differs, or that it is shared. */
+.t3plus-row[data-scope-own] {
+  box-shadow: inset 2px 0 0 var(--primary, #6d7cff);
+}
+.t3plus-row-head {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+  min-width: 0;
+}
+.t3plus-row-reset {
+  display: inline-grid;
+  place-items: center;
+  width: 1.25rem;
+  height: 1.25rem;
+  padding: 0;
+  border: 0;
+  border-radius: 0.375rem;
+  background: transparent;
+  color: var(--muted-foreground);
+  cursor: pointer;
+}
+.t3plus-row-reset > svg {
+  width: 0.75rem;
+  height: 0.75rem;
+}
+.t3plus-row-reset:hover {
+  background: color-mix(in srgb, var(--foreground) 8%, transparent);
+  color: var(--foreground);
+}
+.t3plus-row-reset:focus-visible {
+  outline: 2px solid var(--ring, var(--primary));
+  outline-offset: 1px;
+}
+.t3plus-row-scope {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.25rem 0.5rem;
+  margin: 0.125rem 0 0;
+  color: color-mix(in srgb, var(--primary, #6d7cff) 70%, var(--foreground));
+  font-size: 0.75rem;
+}
+.t3plus-row-use-all {
+  height: 1.375rem;
+  padding: 0 0.5rem;
+  font-size: 0.75rem;
+}
+
+@media (forced-colors: active) {
+  /* The option the arrow keys are on (the list keeps the focus) and a row's accent bar:
+     a background and a shadow, both dropped here. */
+  .t3plus-scope-option[data-active] {
+    outline: 2px solid Highlight;
+    outline-offset: -2px;
+  }
+  .t3plus-row[data-scope-own] {
+    border-inline-start: 2px solid Highlight;
+    padding-inline-start: calc(1rem - 2px);
+  }
+}
+
+/* ---------- The Status view (statusView.js) ---------- */
+/* T3's own list while the view shows instead: kept in the page, not on screen. */
+[data-t3plus-status-hidden] {
+  display: none !important;
+}
+/* Its own class: .t3plus-status is Settings' status line, whose margin, size and
+   :empty { display: none } the view took on. */
+.t3plus-status-view {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  min-width: 0;
+}
+/* A group: its heading, then its rows. Each status's color, the same traffic light as
+   bots under Status colors (statusView.js BOT_STATUS_COLORS): orange wants you, red went
+   wrong, amber is running, green is done. Set here, so the heading ("Needs you") is in
+   the color of its rows. */
+.t3plus-status-group {
+  --t3plus-status-needs: #fb923c;
+  --t3plus-status-running: #facc15;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+html:not(.dark) .t3plus-status-group {
+  --t3plus-status-needs: #c2410c;
+  --t3plus-status-running: #a16207;
+}
+/* A group's heading, like T3's shelves ("Settled"): its name, a count, a chevron. */
+.t3plus-status-head {
+  display: flex;
+  align-items: center;
+  gap: 0.375rem;
+  height: 2rem;
+  margin: 0 0.125rem;
+  padding: 0 0.5rem;
+  border: 0;
+  border-radius: 0.375rem;
+  background: transparent;
+  color: var(--muted-foreground);
+  font: inherit;
+  font-size: 0.75rem;
+  font-weight: 500;
+  text-align: start;
+  cursor: pointer;
+}
+.t3plus-status-head:hover {
+  background: var(--sidebar-row-hover, color-mix(in srgb, var(--foreground) 6%, transparent));
+  color: var(--foreground);
+}
+.t3plus-status-head > svg {
+  flex: none;
+  order: 3;
+  width: 0.875rem;
+  height: 0.875rem;
+  margin-inline-start: 0.125rem;
+  transition: transform 160ms ease;
+}
+.t3plus-status-head[aria-expanded="true"] > svg {
+  transform: rotate(90deg);
+}
+.t3plus-status-label {
+  flex: 1;
+  min-width: 0;
+}
+.t3plus-status-count {
+  font-variant-numeric: tabular-nums;
+}
+.t3plus-status-group[data-group="needs"] .t3plus-status-label {
+  color: var(--t3plus-status-needs);
+}
+.t3plus-status-list {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.t3plus-status-item {
+  margin: 0 0.125rem;
+  list-style: none;
+}
+.t3plus-status-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  width: 100%;
+  min-height: 2.75rem;
+  padding: 0.3125rem 0.625rem 0.3125rem 0.5rem;
+  border: 0;
+  border-radius: 0.375rem;
+  background: transparent;
+  color: color-mix(in srgb, var(--foreground) 75%, transparent);
+  font: inherit;
+  text-align: start;
+  cursor: pointer;
+}
+.t3plus-status-row:hover,
+.t3plus-status-row:focus-visible {
+  background: var(--sidebar-row-hover, color-mix(in srgb, var(--foreground) 6%, transparent));
+  color: var(--foreground);
+}
+.t3plus-status-row[aria-current="page"] {
+  background: var(--sidebar-row-active, color-mix(in srgb, var(--foreground) 9%, transparent));
+  color: var(--foreground);
+}
+.t3plus-status-row:focus-visible,
+.t3plus-status-head:focus-visible {
+  outline: 2px solid var(--ring, var(--primary));
+  outline-offset: -2px;
+}
+.t3plus-status-face {
+  position: relative;
+  flex: none;
+  width: 1.875rem;
+  height: 1.875rem;
+}
+/* A bot's face here sits in the row's flow (beside T3's rows it is placed over them). */
+.t3plus-status-face.t3plus-bot-avatar {
+  position: relative;
+  z-index: auto;
+  left: auto;
+  top: auto;
+  transform: none;
+}
+/* Not a bot: a dot in the status's color, where a face would be. */
+.t3plus-status-dot::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  margin: auto;
+  width: 0.5rem;
+  height: 0.5rem;
+  border-radius: 999px;
+  background: var(--t3plus-status-color, var(--muted-foreground));
+}
+.t3plus-status-text {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-width: 0;
+}
+.t3plus-status-title,
+.t3plus-status-project {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.t3plus-status-title {
+  font-size: 0.875rem;
+  line-height: 1.25rem;
+}
+.t3plus-status-project {
+  color: var(--muted-foreground);
+  font-size: 0.75rem;
+  line-height: 1rem;
+}
+.t3plus-status-meta {
+  flex: none;
+  align-self: flex-start;
+  margin-top: 0.125rem;
+  color: var(--muted-foreground);
+  font-size: 0.75rem;
+  font-variant-numeric: tabular-nums;
+}
+.t3plus-status-meta[data-status]:not([data-status=""]) {
+  color: var(--t3plus-status-color);
+  font-weight: 500;
+}
+/* A row in its status's color (the group's traffic light, above). */
+.t3plus-status-row:is([data-status="approval"], [data-status="input"], [data-status="request"], [data-status="limited"], [data-status="woke"]) {
+  --t3plus-status-color: var(--t3plus-status-needs);
+}
+.t3plus-status-row[data-status="failed"] {
+  --t3plus-status-color: var(--error-foreground, #ef4444);
+}
+.t3plus-status-row:is([data-status="preparing"], [data-status="working"], [data-status="goal"], [data-status="waiting"]) {
+  --t3plus-status-color: var(--t3plus-status-running);
+}
+.t3plus-status-row[data-status="done"] {
+  --t3plus-status-color: var(--success-foreground, #22c55e);
+}
+.t3plus-status-empty {
+  margin: 0.5rem 0.75rem;
+  color: var(--muted-foreground);
+  font-size: 0.75rem;
+}
+
+/* The button that switches the sidebar between T3's list and the Status view: at the
+   right of the profile dots' row, or on a row of its own. */
+.t3plus-status-toggle {
+  display: inline-grid;
+  place-items: center;
+  width: 1.5rem;
+  height: 1.5rem;
+  padding: 0;
+  border: 0;
+  border-radius: 0.375rem;
+  background: transparent;
+  color: var(--sidebar-icon-color, var(--muted-foreground));
+  cursor: pointer;
+}
+.t3plus-status-toggle > svg {
+  width: 0.875rem;
+  height: 0.875rem;
+}
+.t3plus-status-toggle:hover {
+  background: var(--sidebar-row-hover, color-mix(in srgb, var(--foreground) 8%, transparent));
+  color: var(--foreground);
+}
+.t3plus-status-toggle[aria-pressed="true"] {
+  background: color-mix(in srgb, var(--primary, #6d7cff) 18%, transparent);
+  color: var(--foreground);
+}
+.t3plus-status-toggle:focus-visible {
+  outline: 2px solid var(--ring, var(--primary));
+  outline-offset: 1px;
+}
+.t3plus-profiles > .t3plus-status-toggle {
+  grid-column: 3;
+  grid-row: 1;
+  justify-self: end;
+  margin-inline-end: calc(var(--sidebar-row-content-inset, 0.625rem) - 0.5rem);
+}
+.t3plus-status-toggle-row {
+  display: flex;
+  justify-content: flex-end;
+  padding: 0.125rem calc(var(--sidebar-row-content-inset, 0.625rem) - 0.5rem) 0.25rem;
+}
+/* Dragging a project: the dots open into named chips; the button steps aside. */
+html[data-t3plus-profile-drag] .t3plus-status-toggle {
+  display: none;
+}
+@media (prefers-reduced-motion: reduce) {
+  .t3plus-status-head > svg {
+    transition: none;
+  }
+}
+@media (forced-colors: active) {
+  /* A status dot is a background alone, which forced colors drop. The pressed button and
+     the open thread show with backgrounds too: outlined instead, unless the focus ring is. */
+  .t3plus-status-dot::before {
+    background: CanvasText;
+  }
+  .t3plus-status-toggle[aria-pressed="true"]:not(:focus-visible),
+  .t3plus-status-row[aria-current="page"]:not(:focus-visible) {
+    outline: 2px solid Highlight;
+    outline-offset: -2px;
+  }
+}
+
+/* T3's own back/forward swipe arrow (a round 3.5rem bubble in a fixed, hidden-from-
+   assistive-tech frame), while a swipe over the sidebar switches profiles instead. The
+   bubble itself: the frame's common classes (and :has()) made each swipe's start and end
+   restyle every element carrying them. */
+html[data-t3plus-profile-swipe] .pointer-events-none.fixed.overflow-hidden[aria-hidden="true"] > .size-14.rounded-full {
+  visibility: hidden !important;
+}
+
+/* Settings → Subagents: two pickers side by side; a shape option shows the face
+   (.t3plus-face-icon, with the subagents' faces). */
+.t3plus-subagent-picks {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.375rem;
 }

@@ -1,6 +1,22 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { BOT_GRID, botArt, botEdgeColor, botFillUrl, defaultBotColor, ditherIndex, eyeCells, eyeOutline, skinMarks } from "../src/botArt.js";
+import {
+  assignBotShapes,
+  BOT_GRID,
+  botArt,
+  botClipPath,
+  botEdgeColor,
+  botFillUrl,
+  botStill,
+  defaultBotColor,
+  defaultBotShape,
+  ditherIndex,
+  eyeCells,
+  eyeOutline,
+  setBotArtEncoder,
+  setBotStyle,
+  skinMarks,
+} from "../src/botArt.js";
 import { bayerMatrix, DITHER_STYLES, ditherLevel, ditherRgbInPlace, glowPixelArt, glowStrength, glowTones, grainThreshold, GLOW_SHAPE } from "../src/ditherMath.js";
 import { ditherGrid } from "../src/backdropRenderer.js";
 import { botPreviewText, createBotFeed, parseBotFeedText, threadIdFromKey } from "../src/botFeed.js";
@@ -9,13 +25,16 @@ import {
   createBotStore,
   decorateBotRows,
   normalizeBotPrefs,
+  normalizeKnownBots,
   parseBotTitle,
   parseRowStatus,
   resolveBotPresentation,
+  subagentFace,
 } from "../src/bots.js";
-import { BOT_COLORS, BOT_SHAPES, BOT_SKINS, BOT_STYLES as STYLES, DEFAULT_BOT_MARKER, STORAGE_KEYS, T3PLUS } from "../src/config.js";
+import { BOT_COLORS, BOT_SHAPES, BOT_SKINS, BOT_STYLES as STYLES, DEFAULT_BOT_MARKER, PICKABLE_BOT_COLORS, STORAGE_KEYS, T3PLUS } from "../src/config.js";
 import { BOT_FEED_ENDPOINT } from "../src/hosts.js";
 import { findSidebarInner, scanSidebar } from "../src/sidebar.js";
+import { setSprite } from "../src/spriteClock.js";
 import {
   BOT_TITLE,
   createApp,
@@ -26,6 +45,7 @@ import {
   sidebarHtml,
   T3_APPEARANCE_HTML,
   threadRowHtml,
+  virtualClock,
 } from "./helpers.js";
 
 test("parseBotTitle matches the exact marker token only (first or last word)", () => {
@@ -114,7 +134,15 @@ test("every color is a fixed three-stop ordered-dither gradient with white pixel
   assert.equal(ditherIndex(BOT_GRID - 1, BOT_GRID - 1), 2);
   const row = Array.from({ length: BOT_GRID }, (_, x) => ditherIndex(x, 12));
   assert.ok(new Set(row).size >= 2, "a middle row mixes stops");
-  assert.equal(botFillUrl("blue", "star"), botFillUrl("blue", "star"), "cached");
+  let drawn = 0;
+  setBotArtEncoder(() => ((drawn += 1), "data:image/png;base64,AAAA"));
+  try {
+    botFillUrl("blue", "star");
+    botFillUrl("blue", "star");
+    assert.equal(drawn, 1, "drawn once, then cached");
+  } finally {
+    setBotArtEncoder(null);
+  }
   assert.equal(botFillUrl("nope", "nope"), botFillUrl("blue", "circle"));
 });
 
@@ -327,7 +355,7 @@ test("app: bot rows show the feed preview, and Settings edits shape and color", 
   const botFeed = createBotFeed({ area: storage.area, fetchRemote: createFakeRemote({ ok: true, status: 200, text: feedText }) });
   const sidebar = createDom("/env1/a1", sidebarHtml({ currentKey: "env1:a1" }));
   const sdoc = sidebar.window.document;
-  const sideApp = createApp(sidebar, storage, { remote: createFakeRemote({ ok: false, status: 404 }), botFeed }).app;
+  const sideApp = createApp(sidebar, storage, { botFeed }).app;
   await sideApp.start();
   await settle();
   sideApp.watcher.flush();
@@ -343,7 +371,7 @@ test("app: bot rows show the feed preview, and Settings edits shape and color", 
 
   // Settings tab lists the known bot with shape and color pickers, and nothing else to edit.
   const settings = createDom("/settings/appearance", T3_APPEARANCE_HTML);
-  const settingsApp = createApp(settings, storage, { remote: createFakeRemote({ ok: false, status: 404 }), botFeed }).app;
+  const settingsApp = createApp(settings, storage, { botFeed }).app;
   await settingsApp.start();
   await settle();
   const sdocSettings = settings.window.document;
@@ -365,7 +393,7 @@ test("app: bot rows show the feed preview, and Settings edits shape and color", 
   const shapeButtons = editor.querySelectorAll('[data-field="shape"] button');
   const colorButtons = editor.querySelectorAll('[data-field="color"] button');
   assert.equal(shapeButtons.length, Object.keys(BOT_SHAPES).length, "every shape, once");
-  assert.equal(colorButtons.length, Object.keys(BOT_COLORS).length + 1, "the named colors plus Project");
+  assert.equal(colorButtons.length, PICKABLE_BOT_COLORS.length + 1, "the named colors plus Project (not Status colors' own)");
   assert.equal(editor.querySelector('[data-field="color"] button[data-value="project"]').getAttribute("aria-pressed"), "true", "a new bot follows its project");
 
   editor.querySelector('[data-field="shape"] button[data-value="diamond"]').click();
@@ -443,7 +471,8 @@ test("bots feature off removes every bot decoration", async () => {
   assert.ok(doc.querySelector(`[${T3PLUS.botAttr}]`));
   await app.actions.setSidebarFeature("bots", false);
   app.watcher.flush();
-  assert.equal(doc.querySelectorAll(`[${T3PLUS.botAttr}], [${T3PLUS.ownedAttr}], [${T3PLUS.botTitleAttr}]`).length, 0);
+  // (In the page: t3+'s look stylesheet in <head> is no decoration.)
+  assert.equal(doc.body.querySelectorAll(`[${T3PLUS.botAttr}], [${T3PLUS.ownedAttr}], [${T3PLUS.botTitleAttr}]`).length, 0);
   app.stop();
 });
 
@@ -466,7 +495,8 @@ test("bot moods: closed eyes when idle, animated sprites when working or needing
   // Unknown status -> the neutral face; the row decoration marks animated avatars.
   const view = resolveBotPresentation({ key: "env1:bot1", titleLabel: "Ops", status: "working" }, { color: "red" });
   assert.equal(view.mood, "working");
-  assert.equal(view.frames, working.frames === botArt("red", "circle", "working").frames ? view.frames : -1);
+  assert.ok(view.frames > 1, "a working bot's row animates");
+  assert.equal(view.frames, botArt(view.paint, view.shape, "working").frames, "its face's own sprite sheet");
   assert.equal(resolveBotPresentation({ key: "k:1", titleLabel: "x" }, {}).mood, "awake");
 });
 
@@ -642,8 +672,9 @@ test("status badge: one glyph per state, a question differs from an approval, an
   assert.equal(parseRowStatusLabel("Sync, acme", "Sync"), "");
   const [bot] = classifyBots({ threads: [{ key: "env1:a", title: "Sync", parent: null, ariaLabel: "Sync, Input, acme" }] }, DEFAULT_BOT_MARKER, { "env1:a": true });
   assert.deepEqual([bot.status, bot.statusLabel], ["attention", "Input"]);
-  assert.equal(resolveBotPresentation(bot, null).badge.frames, 4);
-  assert.equal(resolveBotPresentation({ key: "env1:a" }, null).badge, null, "no status (a Settings swatch): no badge");
+  assert.equal(resolveBotPresentation(bot, { badges: true }).badge.frames, 4);
+  assert.equal(resolveBotPresentation(bot, null).badge, null, "Status badges off (the default): no badge");
+  assert.equal(resolveBotPresentation({ key: "env1:a" }, { badges: true }).badge, null, "no status (a Settings swatch): no badge");
 });
 
 test("sprite clock: steps a face and its badge only when a frame is due, and sleeps when nothing moves", async () => {
@@ -687,8 +718,6 @@ test("sprite clock: steps a face and its badge only when a frame is due, and sle
 });
 
 test("quick successive bot toggles all land (no lost update)", async () => {
-  const { createBotStore } = await import("../src/bots.js");
-  const { createFakeChromeStorage } = await import("./helpers.js");
   const storage = createFakeChromeStorage();
   const store = createBotStore(storage.area, storage.onChanged);
   const a = "env1:thread-a";
@@ -701,8 +730,6 @@ test("quick successive bot toggles all land (no lost update)", async () => {
 });
 
 test("every thread is a bot by default; Option-click turns one off and on, and only the exception is stored", async () => {
-  const { createBotStore, classifyBots } = await import("../src/bots.js");
-  const { createFakeChromeStorage } = await import("./helpers.js");
   const scan = { threads: [{ key: "env1:a", title: "Fix login", parent: null, ariaLabel: "Fix login" }, { key: "env1:b", title: "Docs", parent: null, ariaLabel: "Docs" }] };
   assert.deepEqual(classifyBots(scan, DEFAULT_BOT_MARKER, {}, true).map((b) => b.key), ["env1:a", "env1:b"]);
   assert.deepEqual(classifyBots(scan, DEFAULT_BOT_MARKER, {}, false).map((b) => b.key), []);
@@ -715,19 +742,58 @@ test("every thread is a bot by default; Option-click turns one off and on, and o
   assert.deepEqual(manual, {});
 });
 
-test("bot styles: every style's shapes exist and draw, and unpicked bots take the current style", async () => {
-  const { BOT_STYLES, BOT_SHAPES: shapes } = await import("../src/config.js");
-  const { botArt, setBotStyle, defaultBotShape } = await import("../src/botArt.js");
-  for (const [name, style] of Object.entries(BOT_STYLES)) {
-    for (const shape of style.shapes ?? []) {
-      assert.ok(Object.hasOwn(shapes, shape), `${name}: ${shape}`);
-      assert.match(botArt("blue", shape, "working").url, /^url\(/);
+test("bot styles: every style's shapes exist and draw, and unpicked bots take the current style", () => {
+  try {
+    for (const [name, style] of Object.entries(STYLES)) {
+      for (const shape of style.shapes ?? []) {
+        assert.ok(Object.hasOwn(BOT_SHAPES, shape), `${name}: ${shape}`);
+        assert.match(botArt("blue", shape, "working").url, /^url\(/);
+      }
+      setBotStyle(name);
+      const picked = defaultBotShape("env1:some-thread");
+      if (style.shapes) assert.ok(style.shapes.includes(picked), `${name} picks from its set (${picked})`);
     }
-    setBotStyle(name);
-    const picked = defaultBotShape("env1:some-thread");
-    if (style.shapes) assert.ok(style.shapes.includes(picked), `${name} picks from its set (${picked})`);
+  } finally {
+    setBotStyle("classic"); // the style is the module's: the tests after this one draw Classic faces
   }
-  setBotStyle("classic");
+});
+
+test("bots on screen get different shapes while the style has enough; each keeps its own as others come, go and come back", () => {
+  // Two bots whose own (hashed) shape is the same: dealt together, the second gets another.
+  const own = new Map();
+  let pair = null;
+  for (let i = 0; !pair; i += 1) {
+    const key = `env1:deal-${i}`;
+    const shape = defaultBotShape(key);
+    if (own.has(shape)) pair = [own.get(shape), key].sort();
+    else own.set(shape, key);
+  }
+  const [a, b] = pair;
+  const others = ["env1:deal-x", "env1:deal-y", "env1:deal-z"];
+  try {
+    assignBotShapes([a, b, ...others]);
+    const dealt = [a, b, ...others].map(defaultBotShape);
+    assert.equal(new Set(dealt).size, dealt.length, `all different: ${dealt}`);
+    assignBotShapes([a, b, ...others, "env1:deal-new"]);
+    assert.deepEqual([a, b, ...others].map(defaultBotShape), dealt, "another bot came: no one else's face changed");
+    assignBotShapes([a, ...others]); // b's row goes (its folder closed)...
+    assignBotShapes(others); // ...and a's
+    assignBotShapes([b, ...others]);
+    assert.equal(defaultBotShape(b), dealt[1], "back, b has its shape again, not its own hashed one (free now)");
+    // More bots than shapes (named to sort before b): faces repeat, b's among them.
+    const crowd = Array.from({ length: 80 }, (_, i) => `env1:crowd-${i}`);
+    assignBotShapes([b, ...others, ...crowd]);
+    assert.deepEqual([b, ...others].map(defaultBotShape), dealt.slice(1), "in a crowd, those that had a shape keep it");
+    assert.ok(crowd.some((key) => defaultBotShape(key) === dealt[1]), "b's face repeats in the crowd");
+    assignBotShapes([b, ...others, ...crowd, "env1:deal-new"]);
+    assert.equal(defaultBotShape(b), dealt[1], "and keeps it when the crowd is dealt again, shared or not");
+    setBotStyle("fruit");
+    assignBotShapes(others);
+    assert.ok(others.every((key) => STYLES.fruit.shapes.includes(defaultBotShape(key))), "another style: dealt from its set");
+    assert.equal(new Set(others.map(defaultBotShape)).size, others.length, "different again");
+  } finally {
+    setBotStyle("classic");
+  }
 });
 
 test("project color: T3's monogram badge (an svg colored by a class, no filled rect) gives its computed color", async () => {
@@ -742,9 +808,6 @@ test("project color: T3's monogram badge (an svg colored by a class, no filled r
 });
 
 test("remembered bots from another window or an import are normalized: a null entry cannot break Settings", async () => {
-  const { createBotStore, normalizeKnownBots } = await import("../src/bots.js");
-  const { STORAGE_KEYS } = await import("../src/config.js");
-  const { createFakeChromeStorage } = await import("./helpers.js");
   assert.deepEqual(normalizeKnownBots({ "env:a": null, "env:b": { title: "B", seenAt: "5", projectColor: "red" }, "env:c": 3 }), { "env:b": { title: "B", seenAt: 5 } });
   assert.deepEqual(normalizeKnownBots([1, 2]), {});
   const storage = createFakeChromeStorage();
@@ -833,4 +896,86 @@ test("blobs: a flat fill in the bot's color and black capsule eyes, a frame per 
   assert.ok(["pink", "green", "orange", "red"].some((c) => first(c) !== first("blue")), "not all in step");
   assert.notEqual(botArt("blue", "drop", "done").url, botArt("blue", "drop", "awake").url, "the mood shows");
   assert.notEqual(botArt("blue", "drop").url, botArt("pink", "drop").url, "the color shows");
+});
+
+test("subagents under a bot: its shape and color by default, still; Settings can give them their own", () => {
+  const dom = createDom("/", sidebarHtml());
+  const doc = dom.window.document;
+  const scan = scanSidebar(findSidebarInner(doc));
+  const bots = classifyBots(scan, DEFAULT_BOT_MARKER);
+  const prefs = { "env1:bot1": { shape: "drop", color: "teal" } };
+  const subs = [{ title: "Search", status: "running" }, { title: "Lint", status: "completed" }];
+  const strip = () => doc.querySelector('[data-sidebar-row="env1:bot1"] .t3plus-bot-subs');
+  const minis = () => [...strip().querySelectorAll(".t3plus-bot-sub")];
+
+  decorateBotRows(doc, scan, bots, prefs, () => "", () => subs);
+  const [working, done] = minis();
+  assert.equal(working.style.getPropertyValue("--t3plus-bot-fill"), botStill("teal", "drop", "awake").url, "its bot's blob, in its bot's teal");
+  assert.equal(working.style.getPropertyValue("--t3plus-bot-clip"), botClipPath("drop"));
+  assert.equal(done.style.getPropertyValue("--t3plus-bot-fill"), botStill("teal", "drop", "done").url, "a finished one: happy eyes, same color");
+  assert.ok(done.hasAttribute("data-done"), "and dimmed");
+  for (const mini of minis()) {
+    assert.equal(mini.style.getPropertyValue("--t3plus-bot-frames"), "", "one frame: no sprite sheet");
+    assert.equal(mini.hasAttribute("data-animated"), false, "not stepped by the sprite clock");
+  }
+  assert.equal(strip().title, "1 of 2 subagents working\n• Search\n✓ Lint");
+
+  // Settings: robots in purple for every bot's subagents.
+  decorateBotRows(doc, scan, bots, prefs, () => "", () => subs, { shape: "robot", color: "purple" });
+  assert.equal(minis()[0].style.getPropertyValue("--t3plus-bot-fill"), botStill("purple", "robot", "awake").url);
+  assert.equal(minis()[0].style.getPropertyValue("--t3plus-bot-clip"), botClipPath("robot"));
+  // Only the color set: the bot's shape, the color picked.
+  decorateBotRows(doc, scan, bots, prefs, () => "", () => subs, { shape: "same", color: "red" });
+  assert.equal(minis()[0].style.getPropertyValue("--t3plus-bot-fill"), botStill("red", "drop", "awake").url);
+  // The bot changes: its subagents follow.
+  decorateBotRows(doc, scan, bots, { "env1:bot1": { shape: "hexagon", color: "green" } }, () => "", () => subs);
+  assert.equal(minis()[0].style.getPropertyValue("--t3plus-bot-fill"), botStill("green", "hexagon", "awake").url);
+  // No subagents left: the strip goes.
+  decorateBotRows(doc, scan, bots, prefs, () => "", () => []);
+  assert.equal(strip(), null);
+
+  // A face's look: the bot's unless set; an unknown value is the bot's too.
+  const view = { shape: "pebble", paint: "#123456" };
+  assert.deepEqual(subagentFace(view), { shape: "pebble", color: "#123456", clip: botClipPath("pebble") }, "a project color follows too");
+  assert.deepEqual(subagentFace(view, { shape: "nope", color: "nope" }), subagentFace(view));
+
+  // Balls, planets and fruit keep their own colors, under a ball or in a color picked: no ring, their own clip.
+  const ball = { shape: "soccer", paint: "blue" };
+  assert.deepEqual(subagentFace(ball), { shape: "soccer", color: BOT_SKINS.soccer.stops[1], clip: botClipPath("soccer") }, "under a ball: the same ball");
+  assert.deepEqual(subagentFace(ball, { shape: "saturn", color: "red" }), { shape: "saturn", color: "red", clip: botClipPath("saturn") }, "a planet with sky in its own clip");
+  decorateBotRows(doc, scan, bots, { "env1:bot1": { shape: "soccer", color: "teal" } }, () => "", () => subs, { shape: "same", color: "purple" });
+  const mini = minis()[0];
+  assert.equal(mini.style.getPropertyValue("--t3plus-bot-fill"), botStill("purple", "soccer", "awake").url, "the ball as it is");
+  assert.equal(mini.hasAttribute("data-t3plus-ring"), false, "no ring in the color picked");
+  assert.equal(mini.style.getPropertyValue("--t3plus-bot-edge"), "");
+});
+
+// The test above ends with a working face on its window, so the sprite clock waits on that
+// window when it closes: closed under the clock, it wedged it for every test after.
+test("the sprite clock still steps faces once a window with working faces on it has closed", async () => {
+  const dom = createDom("/", "<span></span>");
+  const clock = virtualClock(dom.window);
+  const face = dom.window.document.querySelector("span");
+  setSprite(face, { frames: 8, duration: 1.6 }, null); // a frame every 200 ms
+  await clock.advance(16);
+  assert.equal(face.style.getPropertyValue("--t3plus-bot-x"), "0.000%", "drawn");
+  await clock.advance(200);
+  assert.equal(face.style.getPropertyValue("--t3plus-bot-x"), "14.286%", "and stepped");
+});
+
+test("a still face is one frame, for every shape and mood; a blob at rest in its color", () => {
+  for (const shape of Object.keys(BOT_SHAPES)) {
+    for (const mood of ["awake", "done", "working", "idle"]) {
+      const svg = decodeURIComponent(botStill("orange", shape, mood).url);
+      assert.match(svg, /^url\("data:/);
+      assert.match(svg, /viewBox="0 0 24 24"/, `${shape} ${mood}: one 24px frame, not a sprite sheet`);
+    }
+  }
+  const blob = decodeURIComponent(botStill("orange", "drop").url);
+  assert.ok(blob.includes(`fill="${BOT_COLORS.orange.stops[1]}"`), "the color's middle stop");
+  assert.equal(botStill("orange", "drop"), botStill("orange", "drop"), "cached");
+  // The mood shows (a finished subagent's happy eyes); a moving one stands still with open eyes.
+  for (const shape of ["drop", "circle"]) assert.notEqual(botStill("orange", shape, "done").url, botStill("orange", shape, "awake").url, shape);
+  assert.equal(botStill("orange", "circle", "done").url, botArt("orange", "circle", "done").url);
+  assert.equal(botStill("orange", "circle", "working").url, botArt("orange", "circle", "awake").url);
 });

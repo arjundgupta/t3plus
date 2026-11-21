@@ -1,10 +1,12 @@
-import { BOT_LIMITS, CONFIG_LIMITS, STORAGE_KEYS } from "./config.js";
-import { BOT_FEED_ENDPOINT } from "./hosts.js";
+import { BOT_LIMITS, STORAGE_KEYS } from "./config.js";
+import { BOT_FEED_ENDPOINT, CONFIG_LIMITS } from "./hosts.js";
+import { createCachedFeed } from "./runtimeFetch.js";
 
 // t3plus-bots.json: the latest message of each bot thread, published by
-// server/publish_bot_feed.py (read-only on T3's database). Format v1:
+// server/publish_bot_feed.py, or in the desktop app by inject/feeds-worker.js (both
+// read-only on T3's database). Format v1, as read here (other fields are ignored):
 //   { version: 1, generatedAt, environmentId,
-//     bots: { "<threadId>": { text, role, at, model?, effort?, computer?,
+//     bots: { "<threadId>": { text, role, at, model?, computer?,
 //                              subagents?: [{ title, status }] } } }
 // subagents: the latest run's subagents while any of them is still working.
 // Keyed by thread id (the part of the sidebar key after "<environmentId>:").
@@ -83,38 +85,9 @@ export function botMetaText(feed, key) {
 }
 
 /**
- * Loads the feed through the background worker, falling back to the cached
- * copy. load() resolves to the parsed feed or null.
+ * The bot feed, loaded through the background worker (or the desktop loader's copy),
+ * with a stored copy to fall back to (runtimeFetch.js createCachedFeed). load() resolves
+ * to the parsed feed or null; an unchanged feed is the same object.
  */
-export function createBotFeed({ area, fetchRemote, endpoint = BOT_FEED_ENDPOINT }) {
-  let cachedText = null; // what this copy last wrote to the cache
-  async function readCache() {
-    const value = (await area.get(STORAGE_KEYS.botFeedCache))?.[STORAGE_KEYS.botFeedCache];
-    return typeof value?.text === "string" ? parseBotFeedText(value.text) : null;
-  }
-  return {
-    endpoint,
-    readCache,
-    async load() {
-      let response;
-      try {
-        response = await fetchRemote(endpoint);
-      } catch {
-        response = null;
-      }
-      const parsed = response?.ok ? parseBotFeedText(response.text) : null;
-      if (parsed) {
-        // The cache is a convenience: a failed write (storage full) must not throw
-        // away the fresh feed it was copying. Written only when the text changed: on
-        // the desktop it is T3's own localStorage, read and written on its main thread.
-        if (response.text !== cachedText) {
-          await Promise.resolve(area.set({ [STORAGE_KEYS.botFeedCache]: { text: response.text } }))
-            .then(() => (cachedText = response.text))
-            .catch(() => {});
-        }
-        return parsed;
-      }
-      return readCache();
-    },
-  };
-}
+export const createBotFeed = ({ area, fetchRemote, endpoint = BOT_FEED_ENDPOINT, readLocal }) =>
+  createCachedFeed({ area, key: STORAGE_KEYS.botFeedCache, fetchRemote, endpoint, parse: parseBotFeedText, readLocal });

@@ -1,10 +1,37 @@
-import { botClipPath, botEdgeColor, botFillUrl, botShapeHasOwnColors } from "./botArt.js";
+import { botArt, botClipPath, botEdgeColor, botFillUrl, botShapeHasOwnColors, botStill } from "./botArt.js";
 import { WHATS_NEW, renderNotes } from "./whatsNew.js";
 import { PROFILE_COLORS, profileHex } from "./profiles.js";
 import { PROFILE_ICONS, profileIconSvg } from "./profileIcons.js";
-import { applyAvatarVars, botPaintColor, PROJECT_COLOR, resolveBotPresentation } from "./bots.js";
-import { APPEARANCE_ROUTE, BOT_COLORS, BOT_SHAPES, BOT_STYLES, DEFAULT_BOT_MARKER, IMAGE_LIMITS, T3_SELECTORS, T3PLUS } from "./config.js";
-import { createBuilder, setText, uniqueId as id } from "./dom.js";
+import { applyAvatarVars, botPaintColor, PROJECT_COLOR, resolveBotPresentation, shownBotPrefs, subagentFace } from "./bots.js";
+import { APPEARANCE_ROUTE, BOT_COLORS, BOT_SHAPES, BOT_STYLES, DEFAULT_BOT_MARKER, IMAGE_LIMITS, PICKABLE_BOT_COLORS, SAME_AS_BOT, T3_SELECTORS, T3PLUS } from "./config.js";
+import { createBuilder, setAttr, setHidden, setText, uniqueId as id } from "./dom.js";
+import { ALL, isBaseScope } from "./settingsScopes.js";
+
+// lucide icons (T3's set) for the scope bar.
+const SVG = 'xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"';
+const ICONS = {
+  layers: `<svg ${SVG}><path d="m12.83 2.18a2 2 0 0 0-1.66 0L2.6 6.08a1 1 0 0 0 0 1.83l8.58 3.91a2 2 0 0 0 1.66 0l8.58-3.9a1 1 0 0 0 0-1.83Z"/><path d="m22 17.65-9.17 4.16a2 2 0 0 1-1.66 0L2 17.65"/><path d="m22 12.65-9.17 4.16a2 2 0 0 1-1.66 0L2 12.65"/></svg>`,
+  devices: `<svg ${SVG}><path d="M18 8V6a2 2 0 0 0-2-2H4a2 2 0 0 0-2 2v7a2 2 0 0 0 2 2h8"/><path d="M10 19v-3.96 3.15"/><path d="M7 19h5"/><rect width="6" height="10" x="16" y="12" rx="2"/></svg>`,
+  laptop: `<svg ${SVG}><path d="M20 16V7a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v9m16 0H4m16 0 1.28 2.55a1 1 0 0 1-.9 1.45H3.62a1 1 0 0 1-.9-1.45L4 16"/></svg>`,
+  desktop: `<svg ${SVG}><rect width="20" height="14" x="2" y="3" rx="2"/><line x1="8" x2="16" y1="21" y2="21"/><line x1="12" x2="12" y1="17" y2="21"/></svg>`,
+  server: `<svg ${SVG}><rect width="20" height="8" x="2" y="2" rx="2" ry="2"/><rect width="20" height="8" x="2" y="14" rx="2" ry="2"/><line x1="6" x2="6.01" y1="6" y2="6"/><line x1="6" x2="6.01" y1="18" y2="18"/></svg>`,
+  chevron: `<svg ${SVG}><path d="m6 9 6 6 6-6"/></svg>`,
+  check: `<svg ${SVG}><path d="M20 6 9 17l-5-5"/></svg>`,
+  same: `<svg ${SVG}><path d="M5 9h14"/><path d="M5 15h14"/></svg>`,
+  reset: `<svg ${SVG}><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/></svg>`,
+};
+const machineIcon = (kind) => ICONS[kind === "desktop" ? "desktop" : kind === "server" ? "server" : "laptop"];
+
+// Bots A to Z whatever the case. One collator for every sort: localeCompare with options
+// builds one per comparison, about 30 times slower.
+const BY_NAME = new Intl.Collator(undefined, { sensitivity: "base" });
+
+/** url(#id) in an attribute: what comes before the id ("url(" and a quote), the id, and what closes it. */
+const URL_REF = /(url\(\s*['"]?)#([^'")\s]+)(['"]?\s*\))/g;
+
+/** Two pickers' option lists that draw the same menu (a memoized list is the same array). */
+const sameOptions = (a, b) =>
+  a === b || (a.length === b.length && a.every((o, i) => o.value === b[i].value && o.label === b[i].label && o.icon === b[i].icon && (o.hint ?? "") === (b[i].hint ?? "")));
 
 /**
  * Finds where the t3+ section goes on Settings -> Appearance: the container of
@@ -33,26 +60,48 @@ export function ensurePanelMounted(container, panel) {
  * so focus and an in-progress slider drag survive re-renders.
  *
  * state: {
- *   settings, image, imageUrl, message,
- *   bots: [{ key, title, titleLabel, prefs: { shape, color }, view, preview }], botMessage,
+ *   settings, image, imageUrl, message, health,
+ *   bots: [{ key, title, titleLabel, prefs: { shape, color }, view, preview }], botMessage, botMarker,
+ *   profiles: { list, active, sky } | null, profileAccents: { profileId: accent },
+ *   scope: { edit, name, live, profiles, devices, own, elsewhere },
  * }
  */
 export function createAppearancePanel(doc, actions, { desktop = false, version = null, whatsNew = false } = {}) {
   // The desktop build keeps everything in T3's own storage on this computer, not a browser's.
   const where = desktop ? "on this computer" : "in this browser";
   const h = createBuilder(doc);
-  const row = ({ title, description, control, extra }) => {
+  // A setting's row. `paths`: the settings it shows ("group.name"): in a profile's or a
+  // machine's scope it says when that scope sets them itself (and offers to follow the
+  // wider one again); `shared`: it is the same everywhere.
+  const settingRows = []; // { el, paths, shared, title, note, reset, useAll }
+  const row = ({ title, description, control, extra, paths = null, shared = false }) => {
     const titleId = id("row-title");
-    return h("div", { class: "t3plus-row", role: "group", "aria-labelledby": titleId }, [
+    const titleEl = h("h3", { class: "t3plus-row-title", id: titleId, text: title });
+    const noteText = paths || shared ? h("span", { class: "t3plus-row-scope-text" }) : null;
+    // For All profiles: the profiles and machines that keep their own value (so a change
+    // here does not show in them), and a way to make this one apply everywhere.
+    const useAll = paths ? button("Use for all", () => actions.clearEverywhere?.(paths), "t3plus-button-ghost t3plus-row-use-all") : null;
+    if (useAll) useAll.hidden = true;
+    const note = noteText ? h("p", { class: "t3plus-row-scope", hidden: "" }, [noteText, useAll]) : null;
+    let reset = null;
+    if (paths) {
+      reset = h("button", { type: "button", class: "t3plus-row-reset", hidden: "" });
+      reset.innerHTML = ICONS.reset;
+      reset.addEventListener("click", () => actions.clearScope?.(paths));
+    }
+    const el = h("div", { class: "t3plus-row", role: "group", "aria-labelledby": titleId }, [
       h("div", { class: "t3plus-row-main" }, [
         h("div", { class: "t3plus-row-text" }, [
-          h("h3", { class: "t3plus-row-title", id: titleId, text: title }),
+          h("div", { class: "t3plus-row-head" }, [titleEl, reset]),
           description ? h("p", { class: "t3plus-row-desc", text: description }) : null,
+          note,
         ]),
         control ? h("div", { class: "t3plus-row-control" }, control) : null,
       ]),
       extra ?? null,
     ]);
+    if (paths || shared) settingRows.push({ el, paths, shared, title, note, noteText, reset, useAll });
+    return el;
   };
   const switchButton = (label, onToggle) => {
     const el = h("button", { type: "button", role: "switch", class: "t3plus-switch", "aria-label": label }, [
@@ -71,7 +120,7 @@ export function createAppearancePanel(doc, actions, { desktop = false, version =
     const output = h("output", { class: "t3plus-output", for: inputId });
     const input = h("input", { type: "range", min: String(min), max: String(max), step: String(step), id: inputId, class: "t3plus-slider", "aria-label": label });
     const paint = () => {
-      output.textContent = format(Number(input.value));
+      setText(output, format(Number(input.value)));
       input.style.setProperty("--t3plus-slider-progress", `${((Number(input.value) - min) / (max - min)) * 100}%`);
     };
     input.addEventListener("input", () => {
@@ -85,6 +134,58 @@ export function createAppearancePanel(doc, actions, { desktop = false, version =
       set(value) {
         if (doc.activeElement !== input) input.value = String(value);
         paint();
+      },
+    };
+  };
+
+  // Arrow keys move and pick within a row of choices; one Tab stop each.
+  const rovingRow = (group) =>
+    group.addEventListener("keydown", (e) => {
+      if (e.altKey || e.ctrlKey || e.metaKey) return; // T3's (and the system's) with a modifier
+      const step = { ArrowLeft: -1, ArrowUp: -1, ArrowRight: 1, ArrowDown: 1 }[e.key];
+      if (!step) return;
+      e.preventDefault();
+      const all = [...group.querySelectorAll("[role=radio]")];
+      const next = all[(all.indexOf(doc.activeElement) + step + all.length) % all.length];
+      next.focus();
+      next.click();
+    });
+  const checkIn = (group, isOn) => {
+    const all = [...group.querySelectorAll("[role=radio]")];
+    const picked = all.map(isOn);
+    for (const [i, el] of all.entries()) {
+      setAttr(el, "aria-checked", String(picked[i]));
+      // One Tab stop: the picked one, or the first when none is (a custom color in use).
+      const stop = picked[i] || (i === 0 && !picked.includes(true)) ? 0 : -1;
+      if (el.tabIndex !== stop) el.tabIndex = stop;
+    }
+  };
+
+  // A row of colors: the theme's or T3's own (first), the nine presets, or your own (the
+  // last button: a color picker; dragging previews, letting go saves).
+  const colorRow = ({ title, description, aria, field, ownName, ownTitle, start, paths, onPick, onPreview }) => {
+    const swatches = h("div", { class: "t3plus-pp-swatches", role: "radiogroup", "aria-label": aria, "data-field": field },
+      Object.entries(PROFILE_COLORS).map(([value, hex]) => {
+        const name = value === "default" ? ownName : value[0].toUpperCase() + value.slice(1);
+        const b = h("button", { type: "button", class: "t3plus-pp-swatch", role: "radio", "data-value": value, "aria-label": name, title: value === "default" ? ownTitle : name });
+        if (hex) b.style.setProperty("--t3plus-profile-color", hex);
+        b.addEventListener("click", () => onPick(hex ?? "theme"));
+        return b;
+      }));
+    rovingRow(swatches);
+    const custom = h("input", { type: "color", class: "t3plus-pp-custom", "aria-label": `Custom ${aria.toLowerCase()}`, title: "A color of your own" });
+    custom.addEventListener("input", () => onPreview(custom.value.toLowerCase()));
+    custom.addEventListener("change", () => onPick(custom.value.toLowerCase()));
+    const el = row({ title, description, paths, control: h("div", { class: "t3plus-pp-row-picks" }, [swatches, custom]) });
+    return {
+      row: el,
+      /** value: "theme" (the first swatch) or "#rrggbb" (a preset, or the color picker's). */
+      update(value) {
+        const preset = value === "theme" ? "default" : (Object.entries(PROFILE_COLORS).find(([, hex]) => hex === value)?.[0] ?? null);
+        checkIn(swatches, (b) => b.dataset.value === preset);
+        custom.toggleAttribute("data-checked", preset === null);
+        // The picker starts from the color shown (it cannot show "theme").
+        if (doc.activeElement !== custom) custom.value = value === "theme" ? start : value;
       },
     };
   };
@@ -119,15 +220,21 @@ export function createAppearancePanel(doc, actions, { desktop = false, version =
     description: `Stored only ${where}. Large images are resized and saved as WebP.`,
     control: [thumb, uploadButton, sampleButton, removeButton, fileInput],
     extra: imageCaption,
+    paths: ["composerGradient.imageSource"],
   });
 
-  const colorInput = h("input", { type: "color", class: "t3plus-color", "aria-label": "Accent color" });
-  colorInput.addEventListener("input", () => actions.previewAccent(colorInput.value));
-  colorInput.addEventListener("change", () => actions.setAccent(colorInput.value));
-  const themeButton = button("Theme", () => actions.setAccent("theme"));
-  const ACCENT_TEXT = "Color of the glow. Theme follows your T3 theme's primary color.";
-  const accentRow = row({ title: "Accent", description: ACCENT_TEXT, control: [colorInput, themeButton] });
-  const accentDesc = accentRow.querySelector(".t3plus-row-desc");
+  const glow = colorRow({
+    title: "Glow color",
+    description: "The glow behind the chat and composer. Theme follows your T3 theme's own color.",
+    aria: "Glow color",
+    field: "glow",
+    ownName: "Theme",
+    ownTitle: "Your T3 theme's color",
+    start: "#6d7cff",
+    paths: ["composerGradient.accent"],
+    onPick: (value) => actions.setAccent(value),
+    onPreview: (value) => actions.previewAccent(value),
+  });
 
   const ditherSizeName = id("dither-size");
   const ditherSizeInputs = {};
@@ -153,15 +260,255 @@ export function createAppearancePanel(doc, actions, { desktop = false, version =
     title: "Look",
     description: "Pixel art like the bot avatars: Bayer crosshatch, scattered Grain, or hue-drifting Spectrum. Smooth is a plain gradient.",
     control: lookGroup,
+    paths: ["composerGradient.dither", "composerGradient.ditherStyle"],
   });
-  const ditherSizeRow = row({ title: "Pixel size", description: "Size of each dither dot, the same on every screen.", control: ditherSizeGroup });
+  const ditherSizeRow = row({ title: "Pixel size", description: "Size of each dither dot, the same on every screen.", control: ditherSizeGroup, paths: ["composerGradient.ditherSize"] });
   const intensity = slider("Intensity", (v) => actions.previewIntensity(v), (v) => actions.setIntensity(v));
 
   const glassToggle = switchButton("Glass composer", (on) => actions.setGlass(on));
   const glassStrength = slider("Glass strength", (v) => actions.previewGlassStrength(v), (v) => actions.setGlassStrength(v));
-  const glassStrengthRow = row({ title: "Glass composer", description: "How much of the background shows through the composer card.", control: [glassStrength.output, glassStrength.input] });
+  const glassStrengthRow = row({ title: "Glass composer", description: "How much of the background shows through the composer card.", control: [glassStrength.output, glassStrength.input], paths: ["glass.strength"] });
 
   const resetButton = button("Reset", () => actions.reset(), "t3plus-button-ghost");
+  const RESET_TEXT = "Restore appearance defaults. A stored upload is kept until you remove it.";
+  const resetRow = row({ title: "Reset", description: RESET_TEXT, control: resetButton });
+  const resetDesc = resetRow.querySelector(".t3plus-row-desc");
+
+  // ---------- Scope: "Applying t3+ for [All profiles ▾] on [All devices ▾]" ----------
+  // As in T3's own Settings: which profile and machine the settings below are for.
+  // A picker is a button and a listbox under it (arrow keys, type-ahead, Enter, Escape);
+  // the Subagents row has two more (the t3plus-scope-* classes are theirs too).
+  const picker = (label, onPick) => {
+    const win = doc.defaultView;
+    const icon = h("span", { class: "t3plus-scope-icon" });
+    const text = h("span", { class: "t3plus-scope-text" });
+    const chevron = h("span", { class: "t3plus-scope-chevron" });
+    chevron.innerHTML = ICONS.chevron;
+    const trigger = h("button", { type: "button", class: "t3plus-scope-pick", "aria-haspopup": "listbox", "aria-expanded": "false" }, [icon, text, chevron]);
+    const menuId = id("picker");
+    const menu = h("div", { class: "t3plus-scope-menu", id: menuId, role: "listbox", "aria-label": label, tabindex: "-1", hidden: "" });
+    const wrap = h("span", { class: "t3plus-scope-field" }, [trigger, menu]);
+    // [{ value, label, icon, hint }]: icon is markup, or a function that draws it when it is
+    // first shown (a face: a closed list of 48 drew them all on every first visit).
+    let options = [];
+    let value = null; // the one picked
+    let shownIcon = "";
+    let items = []; // the menu's option elements, one per option
+    let stale = true; // items do not show the options and value set last
+    let active = null;
+    const iconOf = (o) => (typeof o.icon === "function" ? o.icon() : o.icon);
+    // Keys and opening scroll it into view, the pointer does not: the list ran away under it.
+    const setActive = (el, { scroll = true } = {}) => {
+      active?.removeAttribute("data-active");
+      active = el ?? null;
+      if (!active) {
+        menu.removeAttribute("aria-activedescendant");
+        return;
+      }
+      active.setAttribute("data-active", "");
+      menu.setAttribute("aria-activedescendant", active.id);
+      if (scroll) active.scrollIntoView?.({ block: "nearest" });
+    };
+    const draw = () => {
+      stale = false;
+      items = options.map((o) => {
+        const mark = h("span", { class: "t3plus-scope-icon" });
+        mark.innerHTML = iconOf(o);
+        const check = h("span", { class: "t3plus-scope-check" });
+        if (o.value === value) check.innerHTML = ICONS.check;
+        // Its id follows its value: drawn again, the option active keeps it (and is not announced again).
+        return h("div", { class: "t3plus-scope-option", role: "option", id: `${menuId}-${encodeURIComponent(o.value)}`, "data-value": o.value, "aria-selected": String(o.value === value) }, [
+          mark,
+          h("span", { class: "t3plus-scope-option-text", text: o.label }),
+          o.hint ? h("span", { class: "t3plus-scope-hint", text: o.hint }) : null,
+          check,
+        ]);
+      });
+      menu.replaceChildren(...items);
+    };
+    // Type-ahead, as a native select has: what is typed within half a second moves to the
+    // next option whose name starts with it (one letter again and again steps through them).
+    let typed = "";
+    let typedTimer = null;
+    const forgetTyped = () => {
+      win.clearTimeout(typedTimer);
+      typedTimer = null;
+      typed = "";
+    };
+    const typeAhead = (key) => {
+      win.clearTimeout(typedTimer);
+      typedTimer = win.setTimeout(forgetTyped, 500);
+      typed += key.toLowerCase();
+      const prefix = [...typed].every((c) => c === typed[0]) ? typed[0] : typed;
+      // One letter: from the option after the active one. More: the active one may still match.
+      const at = items.indexOf(active);
+      const from = prefix.length === 1 ? at + 1 : Math.max(at, 0);
+      for (let i = 0; i < items.length; i += 1) {
+        const k = (from + i) % items.length;
+        if (options[k].label.toLowerCase().startsWith(prefix)) return items[k];
+      }
+      return null;
+    };
+    const outside = (event) => {
+      if (!wrap.contains(event.target)) close();
+    };
+    function open() {
+      if (stale) draw();
+      menu.hidden = false;
+      trigger.setAttribute("aria-expanded", "true");
+      doc.addEventListener("pointerdown", outside, true);
+      setActive(items.find((o) => o.dataset.value === value) ?? items[0]);
+      menu.focus();
+    }
+    function close(refocus = false) {
+      if (menu.hidden) return;
+      menu.hidden = true;
+      trigger.setAttribute("aria-expanded", "false");
+      doc.removeEventListener("pointerdown", outside, true);
+      forgetTyped();
+      if (refocus) trigger.focus();
+    }
+    const choose = (el) => {
+      if (!el) return;
+      close(true);
+      if (el.dataset.value !== value) onPick(el.dataset.value);
+    };
+    trigger.addEventListener("click", () => (menu.hidden ? open() : close()));
+    trigger.addEventListener("keydown", (event) => {
+      if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
+      event.preventDefault();
+      open();
+    });
+    menu.addEventListener("keydown", (event) => {
+      const at = items.indexOf(active);
+      const to = { ArrowDown: at + 1, ArrowUp: at - 1, Home: 0, End: items.length - 1 }[event.key];
+      if (to !== undefined) {
+        event.preventDefault();
+        setActive(items[Math.max(0, Math.min(items.length - 1, to))]);
+      } else if (event.key === "Enter" || (event.key === " " && !typed)) {
+        event.preventDefault();
+        choose(active);
+      } else if (event.key === "Escape") {
+        // Kept from T3: its Escape leaves Settings.
+        event.preventDefault();
+        event.stopPropagation();
+        close(true);
+      } else if (event.key === "Tab") close();
+      else if (event.key.length === 1 && !event.altKey && !event.ctrlKey && !event.metaKey && !event.isComposing) {
+        // A character (a space too, while a name is being typed).
+        event.preventDefault();
+        const found = typeAhead(event.key);
+        if (found) setActive(found);
+      }
+    });
+    menu.addEventListener("click", (event) => choose(event.target.closest?.("[role=option]")));
+    menu.addEventListener("pointermove", (event) => {
+      const o = event.target.closest?.("[role=option]");
+      if (o && o !== active) setActive(o, { scroll: false });
+    });
+    return {
+      el: wrap,
+      close,
+      /** options: [{ value, label, icon, hint? }], the first the fallback (All, or the bot's own); value: the one picked. */
+      set(nextOptions, nextValue) {
+        const picked = nextOptions.find((o) => o.value === nextValue) ?? nextOptions[0];
+        // Every update hands the same ones again: an open menu drawn again each time lost
+        // its active option's id (announced again) and jumped back to it under the wheel.
+        if (picked.value !== value || !sameOptions(nextOptions, options)) stale = true;
+        options = nextOptions;
+        value = picked.value;
+        const shown = iconOf(picked);
+        if (shownIcon !== shown) {
+          shownIcon = shown;
+          icon.innerHTML = shown;
+        }
+        setText(text, picked.label);
+        setAttr(trigger, "aria-label", `${label}: ${picked.label}`);
+        // One option only (profiles off, one machine): shown, not offered.
+        const alone = options.length < 2;
+        if (trigger.disabled !== alone) trigger.disabled = alone;
+        if (alone) close();
+        else if (stale && !menu.hidden) {
+          const was = active?.dataset.value;
+          draw();
+          setActive(items.find((o) => o.dataset.value === was) ?? null, { scroll: false });
+        }
+      },
+    };
+  };
+  let scope = null; // the last scope state from the app
+  const pickScope = (patch) => actions.setEditScope?.({ ...(scope?.edit ?? { profile: ALL, device: ALL }), ...patch });
+  const profilePick = picker("Profile", (value) => pickScope({ profile: value }));
+  const devicePick = picker("Device", (value) => pickScope({ device: value }));
+  const scopeOwn = h("span", { class: "t3plus-scope-own" });
+  const scopeClear = button("Clear", () => actions.clearScope?.(), "t3plus-button-ghost t3plus-scope-clear");
+  const scopeBar = h("div", { class: "t3plus-scope", role: "group", "aria-label": "Which settings you change" }, [
+    h("span", { class: "t3plus-scope-words", text: "Applying t3+ for" }),
+    profilePick.el,
+    h("span", { class: "t3plus-scope-words", text: "on" }),
+    devicePick.el,
+    h("span", { class: "t3plus-scope-summary" }, [scopeOwn, scopeClear]),
+  ]);
+  const dotIcon = (hex) => `<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="5" fill="${hex ?? "currentColor"}"/></svg>`;
+  const listNames = (names) =>
+    names.length === 1 ? names[0] : names.length <= 3 ? `${names.slice(0, -1).join(", ")} and ${names.at(-1)}` : `${names.slice(0, 2).join(", ")} and ${names.length - 2} more`;
+  /** The scope bar and every setting's row: what the scope edited sets itself, and where else a value differs. */
+  function paintScope(next) {
+    scope = next;
+    const base = isBaseScope(next.edit);
+    profilePick.set(
+      [
+        { value: ALL, label: "All profiles", icon: ICONS.layers },
+        ...next.profiles.map((p) => ({ value: p.id, label: p.name, icon: p.icon ? profileIconSvg(p.icon, 14) : dotIcon(p.color), hint: p.id === next.live.profile ? "Open" : "" })),
+      ],
+      next.edit.profile,
+    );
+    devicePick.set(
+      [
+        { value: ALL, label: "All devices", icon: ICONS.devices },
+        ...next.devices.map((d) => ({ value: d.id, label: d.label, icon: machineIcon(d.kind), hint: d.id === next.live.device ? "Open" : "" })),
+      ],
+      next.edit.device,
+    );
+    const own = Object.keys(next.own).length;
+    setText(scopeOwn, base ? "" : own ? `${own} setting${own === 1 ? "" : "s"} of its own` : "Nothing of its own yet: change a setting below.");
+    setHidden(scopeClear, base || own === 0);
+    setAttr(scopeClear, "aria-label", `Clear ${next.name}'s own settings`);
+    for (const r of settingRows) {
+      let note = "";
+      let mine = false;
+      let others = false;
+      if (r.shared) note = base ? "" : "The same for every profile and device.";
+      else if (base) {
+        const names = [...new Set(r.paths.flatMap((path) => next.elsewhere[path] ?? []))];
+        others = names.length > 0;
+        if (others) note = `${listNames(names)} ${names.length === 1 ? "keeps its" : "keep their"} own, so a change here does not show there.`;
+      } else if (r.paths.some((path) => Object.hasOwn(next.own, path))) {
+        mine = true;
+        note = `Set for ${next.name}.`;
+      }
+      r.el.toggleAttribute("data-scope-own", mine);
+      if (r.note) {
+        setText(r.noteText, note);
+        setHidden(r.note, !note);
+      }
+      if (r.useAll) {
+        setHidden(r.useAll, !others);
+        // Its words first (voice control says them), and none that depend on the title's
+        // number ("Use this subagents").
+        setAttr(r.useAll, "aria-label", `Use for all: ${r.title}, for every profile and device`);
+      }
+      if (r.reset) {
+        setHidden(r.reset, !mine);
+        const label = `Clear ${next.name}'s own ${r.title.toLowerCase()}`;
+        if (r.reset.getAttribute("aria-label") !== label) {
+          r.reset.setAttribute("aria-label", label);
+          r.reset.title = label;
+        }
+      }
+    }
+    setText(resetDesc, base ? RESET_TEXT : `Clear ${next.name}'s own appearance (background and glass): it follows the wider settings again.`);
+  }
   const exportButton = button("Export…", () => actions.exportSettings());
   const importFile = h("input", { type: "file", accept: "application/json,.json", class: "t3plus-sr-only", tabindex: "-1", "aria-hidden": "true" });
   importFile.addEventListener("change", () => {
@@ -218,19 +565,25 @@ export function createAppearancePanel(doc, actions, { desktop = false, version =
     { key: "sample:orchestrator", titleLabel: "Orchestrator", preview: "Spawned 3 sub-threads for tonight's sync.", prefs: { shape: "circle", color: "blue" } },
     { key: "sample:inbox", titleLabel: "Inbox triage", preview: "Archived 14 threads older than a week.", prefs: { shape: "hexagon", color: "purple" } },
   ];
+  // What the preview's faces show. Forgotten when Settings is left (leave()): the
+  // sprite clock lets go of a face taken off the page, so the working one stood still on
+  // its last frame when Settings was opened again. Drawn anew, it is stepped again.
   let previewBotsSignature = "";
-  function updatePreviewBots(bots) {
+  function updatePreviewBots(bots, sidebar) {
     const list = (bots.length ? bots : SAMPLE_PREVIEW_BOTS).slice(0, 2);
     // The bot style and the project color change a face too: switching to Sports
     // left the preview on the old shapes, and preview bots ignored their project.
-    const signature = JSON.stringify(list.map((b) => [b.key, b.titleLabel, b.preview, b.prefs, b.projectColor ?? null, b.view?.shape ?? null]));
+    // Status badges too, the tile on each face. Not Status colors: the preview is T3's
+    // list, where bots wear their own colors (they paint the Status view only).
+    const signature = JSON.stringify([sidebar.statusBadges, list.map((b) => [b.key, b.titleLabel, b.preview, b.prefs, b.projectColor ?? null, b.view?.shape ?? null])]);
     if (signature === previewBotsSignature) return;
     previewBotsSignature = signature;
     previewBots.replaceChildren(
       ...list.map((bot, index) => {
         // First bot: open and working (animated, full-strength name). Second: idle and receded.
         const status = index === 0 ? "working" : "idle";
-        const view = resolveBotPresentation({ key: bot.key, titleLabel: bot.titleLabel, status, projectColor: bot.projectColor ?? null }, bot.prefs);
+        const prefs = shownBotPrefs(bot.prefs, { badges: sidebar.statusBadges });
+        const view = resolveBotPresentation({ key: bot.key, titleLabel: bot.titleLabel, status, projectColor: bot.projectColor ?? null }, prefs);
         const avatar = h("span", { class: "t3plus-bot-avatar t3plus-preview-avatar", "data-status": status });
         applyAvatarVars(avatar, view);
         return h("div", { class: `t3plus-preview-bot${index === 0 ? " is-active" : ""}` }, [
@@ -249,18 +602,35 @@ export function createAppearancePanel(doc, actions, { desktop = false, version =
 
   const status = h("p", { class: "t3plus-status", role: "status", "aria-live": "polite" });
 
+  // Your messages' bubbles: T3's, one of the nine, or your own.
+  const bubbles = colorRow({
+    title: "Chat bubbles",
+    description: "The color of your messages in the chat.",
+    aria: "Chat bubble color",
+    field: "bubble",
+    ownName: "T3's",
+    ownTitle: "T3's own",
+    start: "#3b82f6",
+    paths: ["chat.bubble"],
+    onPick: (value) => actions.setBubble(value),
+    onPreview: (value) => actions.previewBubble(value),
+  });
+
   const lookCard = h("div", { class: "t3plus-card" }, [
     row({
       title: "Background",
       description: "A pixel-art glow (or your own image) behind the conversation and composer.",
       control: backgroundToggle,
       extra: preview,
+      paths: ["composerGradient.enabled"],
     }),
-    row({ title: "Style", description: "A glow rising behind the composer, or an image.", control: modeGroup }),
+    row({ title: "Style", description: "A glow rising behind the composer, or an image.", control: modeGroup, paths: ["composerGradient.mode"] }),
     imageRow,
     lookRow,
-    row({ title: "Intensity", description: "How strongly the background shows.", control: [intensity.output, intensity.input] }),
+    glow.row,
+    row({ title: "Intensity", description: "How strongly the background shows.", control: [intensity.output, intensity.input], paths: ["composerGradient.intensity"] }),
     glassStrengthRow,
+    bubbles.row,
     status,
   ]);
 
@@ -279,22 +649,42 @@ export function createAppearancePanel(doc, actions, { desktop = false, version =
     }),
   );
   const homeToggle = switchButton("Usage widgets", (on) => actions.setHomeWidgets(on));
+  const statusColorsToggle = switchButton("Status colors", (on) => actions.setSidebarFeature("statusColors", on));
+  const statusBadgesToggle = switchButton("Status badges", (on) => actions.setSidebarFeature("statusBadges", on));
+  // Subagents' faces: their bot's shape and color unless picked here.
+  const subagentShapePick = picker("Subagent shape", (value) => actions.setSidebarFeature("subagentShape", value));
+  const subagentColorPick = picker("Subagent color", (value) => actions.setSidebarFeature("subagentColor", value));
   const demoToggle = switchButton("Screenshot mode", (on) => actions.setDemo(on));
   // What t3+ could not find in this T3 version (src/health.js).
   const healthText = h("p", { class: "t3plus-row-desc t3plus-health", role: "status", "aria-live": "polite" });
   const featuresCard = h("div", { class: "t3plus-card" }, [
     row({ title: "Status", extra: healthText }),
-    row({ title: "Bot rows", description: "Bots get a face, their name, their latest message, and mini robots while they run subagents.", control: botsToggle }),
-    row({ title: "Every thread is a bot", description: `On: every thread is a bot. Off: only threads whose title starts with ${DEFAULT_BOT_MARKER}.`, control: botsDefaultToggle }),
-    row({ title: "Profiles", description: "Dots at the bottom of the sidebar, like Dia's profiles: each shows its own projects. Swipe sideways with two fingers on the sidebar, click a dot, or press Ctrl+Shift+1–9 to switch; drag a project folder onto a profile to move it; right-click a dot to rename or delete it.", control: profilesToggle }),
-    row({ title: "Bot style", description: "What bots look like when you have not picked a shape for one: Classic shapes in the project's color, Sports balls, Space planets, Fruit, or Blobs (soft shapes with two eyes).", control: botStyleGroup }),
+    row({ title: "Bot rows", description: "Bots get a face, their name, their latest message, and a small face for each subagent they run.", control: botsToggle, paths: ["sidebar.bots"] }),
+    row({ title: "Every thread is a bot", description: `On: every thread is a bot. Off: only threads whose title starts with ${DEFAULT_BOT_MARKER}.`, control: botsDefaultToggle, paths: ["sidebar.botsDefault"] }),
+    // "Move to profile" is in T3's native folder menu, which only the desktop app's loader can add to.
+    row({ title: "Profiles", description: `Dots at the bottom of the sidebar, like Dia's profiles: each shows its own projects. Swipe sideways with two fingers on the sidebar, click a dot, or press Ctrl+Shift+1–9 to switch; drag a project folder onto a profile${desktop ? ", or right-click it → Move to profile," : ""} to move it; right-click a dot to rename or delete it.`, control: profilesToggle, shared: true }),
+    row({ title: "Bot style", description: "What bots look like when you have not picked a shape for one: Classic shapes in the project's color, Sports balls, Space planets, Fruit, or Blobs (soft shapes with two eyes).", control: botStyleGroup, paths: ["sidebar.botStyle"] }),
+    row({
+      title: "Status colors",
+      description: "The button beside the profile dots groups your threads by status (Needs you, Working, Done, Idle). With this on, every bot in that Status view wears its status's color: orange when it needs you, red failed, amber working, green done, blue idle. Everywhere else (your projects in the sidebar, the thread's header, hover cards, the preview above) bots keep their own colors, and balls, planets and fruit always do.",
+      control: statusColorsToggle,
+      paths: ["sidebar.statusColors"],
+    }),
+    row({ title: "Status badges", description: "A small tile on each bot's face that shows what the thread is doing.", control: statusBadgesToggle, paths: ["sidebar.statusBadges"] }),
+    row({
+      title: "Subagents",
+      description: "The small faces under a bot while it runs subagents: in its shape and its color, or the ones picked here. Balls, planets and fruit keep their own colors. They stay still; one that has ended is dimmed, and a failed one has x eyes.",
+      control: h("div", { class: "t3plus-subagent-picks" }, [subagentShapePick.el, subagentColorPick.el]),
+      paths: ["sidebar.subagentShape", "sidebar.subagentColor"],
+    }),
     row({
       title: "Screenshot mode",
       description:
         "Swap thread titles, projects, branches, machine names and message text for believable stand-ins: in the sidebar, the header, the chat, the composer, hover cards, menus and ⌘K. Terminals, diffs, file views and Settings pages still show real content, so keep them out of the shot. Widgets stay real. Nothing in T3 changes.",
       control: demoToggle,
+      shared: true,
     }),
-    row({ title: "Usage widgets", description: "Pools, activity and usage under the new-thread composer, and the current provider's pool in thread details (Usage limits).", control: homeToggle }),
+    row({ title: "Usage widgets", description: "Pools, activity and usage under the new-thread composer, and the current provider's pool in thread details (Usage limits).", control: homeToggle, paths: ["home.widgets"] }),
   ]);
 
   // What changed in the installed version (the notes of the latest one, in a build
@@ -313,11 +703,10 @@ export function createAppearancePanel(doc, actions, { desktop = false, version =
   const advanced = h("details", { class: "t3plus-advanced" }, [
     h("summary", { class: "t3plus-advanced-summary", text: "Advanced" }),
     h("div", { class: "t3plus-card" }, [
-      accentRow,
       ditherSizeRow,
-      row({ title: "Glass", description: "Turn the translucent composer card off. Falls back to a solid card when the browser cannot blur.", control: glassToggle }),
+      row({ title: "Glass", description: "Turn the translucent composer card off. Falls back to a solid card when the browser cannot blur.", control: glassToggle, paths: ["glass.enabled"] }),
       row({ title: "Backup", description: "Save your t3+ settings, profiles, bots and uploaded image to a file, to keep a copy or move them to another computer.", control: [exportButton, importButton, importFile] }),
-      row({ title: "Reset", description: "Restore appearance defaults. A stored upload is kept until you remove it.", control: resetButton }),
+      resetRow,
     ]),
   ]);
 
@@ -336,12 +725,14 @@ export function createAppearancePanel(doc, actions, { desktop = false, version =
   const botStatus = h("p", { class: "t3plus-status", role: "status", "aria-live": "polite" });
   const botsBoth = h("div", { class: "t3plus-bots-both" }, [h("div", { class: "t3plus-bots-side" }, [botsSearch, botsList, botsNone]), botSlot]);
   const botsCard = h("div", { class: "t3plus-card" }, [
-    row({ title: "Bots", description: "Pick one to change its shape or color.", extra: h("div", { class: "t3plus-bots-body" }, [botsEmpty, botsBoth, botStatus]) }),
+    row({ title: "Bots", description: "Pick one to change its shape or color.", extra: h("div", { class: "t3plus-bots-body" }, [botsEmpty, botsBoth, botStatus]), shared: true }),
   ]);
 
-  const botEntries = new Map(); // key -> { chip, avatar, name, line, editor, bot }
+  const botEntries = new Map(); // key -> { chip, avatar, name, line, bot }
   let botOrder = []; // keys, A to Z
   let openBot = null; // the bot picked (shown on the right)
+  let botEditor = null; // made when a bot is first picked
+  let botsWearStatus = false; // Status colors, in the scope edited
 
   // Shapes in their sets: Sports, Space and Fruit as Bot style has them, Classic the rest.
   const SHAPE_SETS = (() => {
@@ -350,13 +741,48 @@ export function createAppearancePanel(doc, actions, { desktop = false, version =
     return [["Classic", Object.keys(BOT_SHAPES).filter((k) => !inSet.has(k))], ...themed.map(([, s]) => [s.label, s.shapes.filter((k) => Object.hasOwn(BOT_SHAPES, k))])];
   })();
 
-  function createBotEditor(bot) {
+  // The Subagents row's pickers: the bot's own first, in words of its own for each (two
+  // "Same as bot" buttons side by side read the same), then each shape (its set as the
+  // hint) or each color.
+  const cap = (w) => w[0].toUpperCase() + w.slice(1);
+  const attr = (text) => text.replaceAll("&", "&amp;").replaceAll('"', "&quot;");
+  /** `draw()` the first time it is asked for, the same markup after that. */
+  const once = (draw) => {
+    let markup = null;
+    return () => (markup ??= draw());
+  };
+  // A shape as the sidebar draws a subagent under a bot of that shape (bots.js subagentFace):
+  // in the color picked for subagents (gray for the bot's own), a ball, a planet or a fruit
+  // in its own colors.
+  const faceIcon = (color, shape) => {
+    const face = subagentFace({ shape, paint: "gray" }, { shape, color });
+    return `<i class="t3plus-face-icon" style="${attr(`--t3plus-bot-fill: ${botStill(face.color, face.shape).url}; --t3plus-bot-clip: ${face.clip}`)}"></i>`;
+  };
+  const SAME_SHAPE = Object.freeze({ value: SAME_AS_BOT, label: "Bot's shape", icon: ICONS.same });
+  const SAME_COLOR = Object.freeze({ value: SAME_AS_BOT, label: "Bot's color", icon: ICONS.same });
+  const SUBAGENT_COLOR_OPTIONS = Object.freeze([SAME_COLOR, ...PICKABLE_BOT_COLORS.map((name) => ({ value: name, label: BOT_COLORS[name].label, icon: dotIcon(BOT_COLORS[name].stops[1]) }))]);
+  // One list per subagent color (the bot's own, or a pickable one), its faces drawn when
+  // first shown: the picked one on the button, the rest once the list is opened.
+  const shapeOptionsByColor = new Map();
+  const subagentShapeOptions = (color) => {
+    if (!shapeOptionsByColor.has(color)) {
+      shapeOptionsByColor.set(color, [SAME_SHAPE, ...SHAPE_SETS.flatMap(([set, shapes]) => shapes.map((shape) => ({ value: shape, label: cap(shape), icon: once(() => faceIcon(color, shape)), hint: set })))]);
+    }
+    return shapeOptionsByColor.get(color);
+  };
+
+  // The one picked, on the right: one editor, shown for whichever bot is picked.
+  function createBotEditor() {
+    let bot = null; // the bot shown
     const forget = button("Forget", () => actions.forgetBot(bot.key), "t3plus-button-ghost");
     forget.title = "Forget this bot's shape and color";
 
+    // A toolbar of swatches with one Tab stop (the pressed one, else the first): arrow
+    // keys, Home and End move within it, Enter or Space picks. Each a stop, the editor's
+    // 58 swatches were 58 Tab presses to get past.
     const swatchGroup = (label, entries, field, paint) => {
       const buttons = new Map();
-      const group = h("div", { class: "t3plus-swatches", role: "group", "aria-label": label, "data-field": field },
+      const group = h("div", { class: "t3plus-swatches", role: "toolbar", "aria-label": label, "data-field": field },
         entries.map(([value, text]) => {
           const mark = h("span", { class: "t3plus-swatch-mark", "aria-hidden": "true" });
           paint(mark, value);
@@ -365,73 +791,116 @@ export function createAppearancePanel(doc, actions, { desktop = false, version =
           buttons.set(value, el);
           return el;
         }));
+      const all = [...buttons.values()];
+      const stopAt = (stop) => {
+        for (const el of all) {
+          const index = el === stop ? 0 : -1;
+          if (el.tabIndex !== index) el.tabIndex = index;
+        }
+        return stop;
+      };
+      stopAt(all[0]);
+      group.addEventListener("keydown", (e) => {
+        if (e.altKey || e.ctrlKey || e.metaKey || e.shiftKey) return; // T3's (and the system's) with a modifier
+        const at = all.indexOf(doc.activeElement);
+        const to = at < 0 ? undefined : { ArrowLeft: at - 1, ArrowUp: at - 1, ArrowRight: at + 1, ArrowDown: at + 1, Home: 0, End: all.length - 1 }[e.key];
+        if (to === undefined) return;
+        e.preventDefault();
+        stopAt(all[(to + all.length) % all.length]).focus();
+      });
+      let pressed = null; // the value shown pressed
       return {
         group,
         buttons,
         name(botName) {
-          group.setAttribute("aria-label", `${label} for ${botName}`);
+          setAttr(group, "aria-label", `${label} for ${botName}`);
         },
         set(value) {
-          for (const [v, el] of buttons) el.setAttribute("aria-pressed", String(v === value));
+          if (value === pressed) return;
+          pressed = value;
+          for (const [v, el] of buttons) setAttr(el, "aria-pressed", String(v === value));
+          stopAt(buttons.get(value) ?? all[0]);
         },
       };
     };
-    const cap = (w) => w[0].toUpperCase() + w.slice(1);
     const shapeSets = SHAPE_SETS.map(([label, keys]) => ({
       label,
       group: swatchGroup(`${label} shapes`, keys.map((k) => [k, cap(k)]), "shape", (mark, shape) => mark.style.setProperty("--t3plus-bot-clip", botClipPath(shape))),
     }));
     // "Project" first: the bot follows its project's badge color.
-    const colors = swatchGroup("Color", [[PROJECT_COLOR, "Project color"], ...Object.entries(BOT_COLORS).map(([k, v]) => [k, v.label])], "color", (mark, color) => {
+    const colors = swatchGroup("Color", [[PROJECT_COLOR, "Project color"], ...PICKABLE_BOT_COLORS.map((k) => [k, BOT_COLORS[k].label])], "color", (mark, color) => {
       mark.style.setProperty("--t3plus-bot-edge", botEdgeColor(color));
     });
-    const colorField = h("div", { class: "t3plus-bot-set", "data-set": "color" }, [h("span", { class: "t3plus-bot-set-label", text: "Color" }), colors.group]);
+    // Status colors on (the switch above, in the scope edited): bots wear their status's
+    // color, and the one picked here shows once it is off.
+    const colorNote = h("p", { class: "t3plus-row-desc", id: id("bot-color-note"), hidden: "", text: "Status colors is on, so in the Status view bots wear their status's color: this one shows everywhere else." });
+    const colorField = h("div", { class: "t3plus-bot-set", "data-set": "color" }, [h("span", { class: "t3plus-bot-set-label", text: "Color" }), colors.group, colorNote]);
     const face = h("span", { class: "t3plus-bot-swatch t3plus-bot-hero-face", "aria-hidden": "true" });
     const title = h("h4", { class: "t3plus-bot-hero-name" });
     // Its latest message: tells two bots with the same name apart.
     const message = h("p", { class: "t3plus-bot-message" });
     const meta = h("p", { class: "t3plus-bot-meta" });
 
-    const element = h("div", { class: "t3plus-bot-editor", "data-bot-key": bot.key }, [
+    const element = h("div", { class: "t3plus-bot-editor" }, [
       h("div", { class: "t3plus-bot-hero" }, [face, h("div", { class: "t3plus-bot-hero-text" }, [title, message, meta]), forget]),
       ...shapeSets.map((s) => h("div", { class: "t3plus-bot-set", "data-set": s.label }, [h("span", { class: "t3plus-bot-set-label", text: s.label }), s.group.group])),
       colorField,
     ]);
+
+    // Each swatch is the bot's face as it would look: shape buttons in the bot's color,
+    // color buttons in the bot's shape (eyes follow the shape). Drawn again only when that
+    // changes: every update (each step of a slider drag) re-sent 58 faces to be parsed.
+    let shapesDrawn = null; // the color the shape swatches show
+    let colorsDrawn = null; // the shape (and project color) the color swatches show
+    function drawSwatches(next) {
+      const { paint, shape, clip } = next.view;
+      if (paint !== shapesDrawn) {
+        shapesDrawn = paint;
+        for (const s of shapeSets) {
+          for (const [value, el] of s.group.buttons) {
+            const mark = el.firstElementChild;
+            mark.style.setProperty("--t3plus-bot-fill", botFillUrl(paint, value));
+            mark.style.setProperty("--t3plus-bot-edge", botEdgeColor(paint, value));
+          }
+        }
+      }
+      // The "Project" swatch shows what the project gives this bot.
+      const project = botPaintColor(next, { color: PROJECT_COLOR });
+      const drawn = `${shape}\n${clip}\n${project}`;
+      if (drawn === colorsDrawn) return;
+      colorsDrawn = drawn;
+      for (const [value, el] of colors.buttons) {
+        const mark = el.firstElementChild;
+        const shown = value === PROJECT_COLOR ? project : value;
+        mark.style.setProperty("--t3plus-bot-fill", botFillUrl(shown, shape));
+        mark.style.setProperty("--t3plus-bot-edge", botEdgeColor(shown, shape));
+        mark.style.setProperty("--t3plus-bot-clip", clip);
+      }
+    }
     return {
       element,
       update(next) {
-        const current = next.prefs;
-        setText(title, next.view.label);
+        bot = next;
+        const { view } = next;
+        setAttr(element, "data-bot-key", next.key);
+        setText(title, view.label);
         setText(message, next.preview || "No messages yet");
         message.classList.toggle("is-empty", !next.preview);
         setText(meta, next.meta ?? "");
-        meta.hidden = !next.meta;
-        applyAvatarVars(face, next.view);
-        for (const s of shapeSets) s.group.name(next.view.label);
-        colors.name(next.view.label);
-        const shape = next.view.shape; // the bot's own pick, or the one it was given
+        setHidden(meta, !next.meta);
+        // 48px: a blob from its SVG sheet (the drawn ones are made for faces up to 32px).
+        applyAvatarVars(face, { ...view, fill: botArt(view.paint, view.shape, view.mood, { vector: true }).url });
+        for (const s of shapeSets) s.group.name(view.label);
+        colors.name(view.label);
+        const shape = view.shape; // the bot's own pick, or the one it was given
         for (const s of shapeSets) s.group.set(shape);
-        colors.set(current.color);
+        colors.set(next.prefs.color);
         // Ball shapes (football, basketball) bring their own colors: no color to pick.
         colorField.style.display = botShapeHasOwnColors(shape) ? "none" : "";
-        // Each swatch is the bot's face as it would look: shape buttons in the
-        // bot's color, color buttons in the bot's shape (eyes follow the shape).
-        const paint = next.view.paint;
-        for (const s of shapeSets) {
-          for (const button of s.group.group.querySelectorAll(".t3plus-swatch")) {
-            const mark = button.firstElementChild;
-            mark.style.setProperty("--t3plus-bot-fill", botFillUrl(paint, button.dataset.value));
-            mark.style.setProperty("--t3plus-bot-edge", botEdgeColor(paint, button.dataset.value));
-          }
-        }
-        for (const button of colors.group.querySelectorAll(".t3plus-swatch")) {
-          const mark = button.firstElementChild;
-          // The "Project" swatch shows what the project gives this bot.
-          const shown = button.dataset.value === PROJECT_COLOR ? botPaintColor(next, { color: PROJECT_COLOR }) : button.dataset.value;
-          mark.style.setProperty("--t3plus-bot-fill", botFillUrl(shown, shape));
-          mark.style.setProperty("--t3plus-bot-edge", botEdgeColor(shown, shape));
-          mark.style.setProperty("--t3plus-bot-clip", next.view.clip);
-        }
+        setHidden(colorNote, !botsWearStatus);
+        if (botsWearStatus) setAttr(colors.group, "aria-describedby", colorNote.id);
+        else colors.group.removeAttribute("aria-describedby");
+        drawSwatches(next);
       },
     };
   }
@@ -444,7 +913,7 @@ export function createAppearancePanel(doc, actions, { desktop = false, version =
       avatar,
       h("span", { class: "t3plus-bot-pick-text" }, [name, line]),
     ]);
-    const entry = { chip, avatar, name, line, editor: null, bot };
+    const entry = { chip, avatar, name, line, bot };
     chip.addEventListener("click", () => setOpenBot(bot.key));
     return entry;
   }
@@ -484,10 +953,10 @@ export function createAppearancePanel(doc, actions, { desktop = false, version =
     let any = false;
     for (const e of botEntries.values()) {
       const hide = Boolean(q) && !e.bot.view.label.toLowerCase().includes(q);
-      if (e.chip.hidden !== hide) e.chip.hidden = hide;
+      setHidden(e.chip, hide);
       any ||= !hide;
     }
-    botsNone.hidden = any || !botEntries.size;
+    setHidden(botsNone, any || !botEntries.size);
     // The Tab stop is the picked bot; searched out, the first one shown (else none to reach).
     const pickedChip = openBot ? botEntries.get(openBot)?.chip : null;
     const stop = pickedChip && !pickedChip.hidden ? pickedChip : botsList.querySelector(".t3plus-bot-pick:not([hidden])");
@@ -500,24 +969,22 @@ export function createAppearancePanel(doc, actions, { desktop = false, version =
   function setOpenBot(key) {
     const entry = key ? botEntries.get(key) : null;
     openBot = entry ? key : null;
-    for (const [k, e] of botEntries) {
-      const on = String(k === openBot);
-      if (e.chip.getAttribute("aria-selected") !== on) e.chip.setAttribute("aria-selected", on);
-    }
+    for (const [k, e] of botEntries) setAttr(e.chip, "aria-selected", String(k === openBot));
     filterBots(); // the Tab stop (the one picked, unless the search hides it)
     if (!entry) {
       botSlot.replaceChildren();
       return;
     }
-    entry.editor ??= createBotEditor(entry.bot);
-    entry.editor.update(entry.bot);
-    if (botSlot.firstElementChild !== entry.editor.element) botSlot.replaceChildren(entry.editor.element);
+    // One for them all: kept per bot ever picked, they held ~145 elements each.
+    botEditor ??= createBotEditor();
+    botEditor.update(entry.bot);
+    if (botSlot.firstElementChild !== botEditor.element) botSlot.replaceChildren(botEditor.element);
   }
 
   function updateBots(list) {
-    const bots = [...list].sort((a, b) => a.view.label.localeCompare(b.view.label, undefined, { sensitivity: "base" }) || a.key.localeCompare(b.key));
+    const bots = [...list].sort((a, b) => BY_NAME.compare(a.view.label, b.view.label) || (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
     const order = bots.map((b) => b.key);
-    botsBoth.hidden = !bots.length;
+    setHidden(botsBoth, !bots.length);
     if (order.join("\n") !== botOrder.join("\n")) {
       // Moving an item (a rename re-sorts them) would drop its focus: put it back.
       const focused = botsList.contains(doc.activeElement) ? doc.activeElement : null;
@@ -558,28 +1025,28 @@ export function createAppearancePanel(doc, actions, { desktop = false, version =
     // Always one picked: the first, until another is.
     if (!openBot && order.length) setOpenBot(order[0]);
     else if (openBot) {
-      const entry = botEntries.get(openBot);
-      entry.editor?.update(entry.bot); // the picked one's details, up to date
+      botEditor?.update(botEntries.get(openBot).bot); // the picked one's details, up to date
       filterBots();
     } else filterBots();
   }
 
   // ---------- Profiles: an icon and three colors each ----------
-  // Pick a profile, then its icon and the colors of its dot, the sidebar's sky and the
-  // dither glow: one of the nine (as in the sidebar), or a color of your own. The
-  // preview shows them together, as you pick (a custom color while you drag it).
+  // Pick a profile, then its icon and the colors of its dot and the sidebar's sky: one of
+  // the nine (as in the sidebar), or a color of your own. The preview shows them with the
+  // profile's own glow (its glow color is a setting: the scope bar above picks the profile).
   const PROFILE_FIELDS = [
     ["color", "Dot", "The dot and the name beside it."],
     ["sky", "Sky", "The night sky at the top of the sidebar."],
-    ["dither", "Dither", "The dithered glow behind the chat."],
   ];
   let profiles = null; // { list, active, sky }
   let editing = null; // the profile shown
   let draft = {}; // { field: "#rrggbb" } while a custom color is dragged
   let profilesSignature = "";
+  let ppNameShown = ""; // the preview's name as last built (icon and text)
+  let ppDotsShown = ""; // and its dots
   let demoNames = false;
-  let globalAccent = "theme";
-  let glowOn = true; // the background is the glow (not off, not an image): a dither color shows
+  let profileAccents = {}; // each profile's glow color ("theme" or "#rrggbb"), from the app
+  let glowOn = true; // the background is the glow (not off, not an image): the preview shows it
   const ppChips = h("div", { class: "t3plus-pp-chips", role: "radiogroup", "aria-label": "Profile" });
   const ppSky = h("div", { class: "t3plus-pp-sky" });
   const ppName = h("span", { class: "t3plus-profiles-name t3plus-pp-name" });
@@ -593,26 +1060,6 @@ export function createAppearancePanel(doc, actions, { desktop = false, version =
     ]),
     ppPane,
   ]);
-  // Arrow keys move and pick within a row of choices; one Tab stop each.
-  const rovingRow = (group) =>
-    group.addEventListener("keydown", (e) => {
-      const step = { ArrowLeft: -1, ArrowUp: -1, ArrowRight: 1, ArrowDown: 1 }[e.key];
-      if (!step) return;
-      e.preventDefault();
-      const all = [...group.querySelectorAll("[role=radio]")];
-      const next = all[(all.indexOf(doc.activeElement) + step + all.length) % all.length];
-      next.focus();
-      next.click();
-    });
-  const checkIn = (group, isOn) => {
-    const all = [...group.querySelectorAll("[role=radio]")];
-    const picked = all.map(isOn);
-    for (const [i, el] of all.entries()) {
-      if (el.getAttribute("aria-checked") !== String(picked[i])) el.setAttribute("aria-checked", String(picked[i]));
-      // One Tab stop: the picked one, or the first when none is (a custom color in use).
-      el.tabIndex = picked[i] || (i === 0 && !picked.includes(true)) ? 0 : -1;
-    }
-  };
   function setProfile(patch) {
     if (!profiles || !editing) return;
     profiles = { ...profiles, list: profiles.list.map((p) => (p.id === editing ? { ...p, ...patch } : p)) };
@@ -632,7 +1079,7 @@ export function createAppearancePanel(doc, actions, { desktop = false, version =
     const swatches = h("div", { class: "t3plus-pp-swatches", role: "radiogroup", "aria-label": `${label} color`, "data-field": field },
       Object.entries(PROFILE_COLORS).map(([value, hex]) => {
         const name = value === "default" ? "Default" : value[0].toUpperCase() + value.slice(1);
-        const title = value !== "default" ? name : field === "sky" ? "Default (T3's sky)" : field === "dither" ? "Default (the glow's color above)" : name;
+        const title = value !== "default" ? name : field === "sky" ? "Default (T3's sky)" : name;
         const b = h("button", { type: "button", class: "t3plus-pp-swatch", role: "radio", "data-value": value, "aria-label": name, title });
         if (hex) b.style.setProperty("--t3plus-profile-color", hex);
         b.addEventListener("click", () => setProfile({ [field]: value }));
@@ -640,18 +1087,18 @@ export function createAppearancePanel(doc, actions, { desktop = false, version =
       }));
     rovingRow(swatches);
     // A color of your own: the preview follows while you drag, and it is kept on letting go.
+    // Only this card's preview shows a draft (painted here): the app has nothing to redraw
+    // for it, and asking it to ran a whole page check on every step of the drag.
     const custom = h("input", { type: "color", class: "t3plus-pp-custom", "aria-label": `Custom ${label.toLowerCase()} color`, title: "A color of your own" });
     custom.addEventListener("input", () => {
       draft = { ...draft, [field]: custom.value.toLowerCase() };
       paintProfiles();
-      actions.previewProfile?.();
     });
     custom.addEventListener("blur", () => {
       if (!(field in draft)) return; // saved by "change" already
       const { [field]: _dropped, ...rest } = draft;
       draft = rest;
       paintProfiles();
-      actions.previewProfile?.();
     });
     custom.addEventListener("change", () => {
       const value = custom.value.toLowerCase();
@@ -668,7 +1115,8 @@ export function createAppearancePanel(doc, actions, { desktop = false, version =
   const profilesCard = h("div", { class: "t3plus-card", hidden: "" }, [
     row({
       title: "Profiles",
-      description: "Each profile's icon, and the colors of its dot, the sidebar's sky and the dither glow: one of these, or your own (the last button in a row). Right-click a dot in the sidebar for the same.",
+      description: "Each profile's icon, and the colors of its dot and the sidebar's sky: one of these, or your own (the last button in a row). Its glow, bubbles and everything else: pick it in \"Applying t3+ for\" at the top. Right-click a dot in the sidebar for the same.",
+      shared: true,
       extra: h("div", { class: "t3plus-pp-body" }, [
         ppChips,
         ppPreview,
@@ -685,22 +1133,31 @@ export function createAppearancePanel(doc, actions, { desktop = false, version =
   /** The sidebar's night art, copied for the preview (its gradients given ids of their own). */
   function ensureSkyArt() {
     if (ppSky.querySelector("svg")) return;
-    const art = doc.querySelector('.sidebar-stage-backdrop svg[data-stage-art="nightly"]');
+    const art = doc.querySelector(T3_SELECTORS.nightSky);
     if (!art) return;
     const copy = art.cloneNode(true);
     copy.removeAttribute("data-stage-art");
-    const renamed = [];
+    const renamed = new Map(); // T3's id -> the copy's
     for (const el of copy.querySelectorAll("[id]")) {
-      renamed.push([el.id, `t3plus-pp-${el.id}`]);
-      el.id = `t3plus-pp-${el.id}`;
+      renamed.set(el.id, `t3plus-pp-${el.id}`);
+      el.id = renamed.get(el.id);
     }
-    renamed.sort((a, b) => b[0].length - a[0].length); // the longest first: one id can start another
+    // Only what points at an id: url(#id) (a gradient, a filter, a clip) and an href of
+    // "#id". Replaced as text in anything with a "#", an id like "a" also rewrote a color
+    // ("#abcdef" became "#t3plus-pp-abcdef").
+    const pointer = (ref) => (renamed.has(ref) ? `#${renamed.get(ref)}` : null);
+    const retarget = (attr) => {
+      if (attr.localName === "href") return (attr.value.startsWith("#") && pointer(attr.value.slice(1))) || attr.value;
+      return attr.value.replace(URL_REF, (whole, open, ref, close) => {
+        const to = pointer(ref);
+        return to ? `${open}${to}${close}` : whole;
+      });
+    };
     for (const el of [copy, ...copy.querySelectorAll("*")]) {
-      for (const attr of [...el.attributes]) {
+      for (const attr of el.attributes) {
         if (!attr.value.includes("#")) continue;
-        let value = attr.value;
-        for (const [from, to] of renamed) value = value.split(`#${from}`).join(`#${to}`);
-        if (value !== attr.value) el.setAttribute(attr.name, value);
+        const value = retarget(attr);
+        if (value !== attr.value) attr.value = value;
       }
     }
     ppSky.append(copy);
@@ -729,7 +1186,7 @@ export function createAppearancePanel(doc, actions, { desktop = false, version =
     const value = (field) => draft[field] ?? p[field] ?? "default";
     checkIn(ppChips, (el) => el.dataset.profile === editing);
     checkIn(ppIcons, (el) => el.dataset.icon === (p.icon ?? ""));
-    ppRows.sky.row.hidden = !profiles.sky;
+    setHidden(ppRows.sky.row, !profiles.sky);
     for (const [field] of PROFILE_FIELDS) {
       const v = value(field);
       const custom = /^#/.test(v);
@@ -738,23 +1195,31 @@ export function createAppearancePanel(doc, actions, { desktop = false, version =
       // Seeded with the color shown, so a custom one starts from it.
       if (doc.activeElement !== ppRows[field].custom) ppRows[field].custom.value = profileHex(v) ?? "#6d7cff";
     }
-    // The preview: the name and dots, the sky, the glow.
+    // The preview: the name and dots, the sky, the glow. The name and dots are built again
+    // only when what they show changes: every update rebuilt them (the icon parsed again).
     const dot = profileHex(value("color"));
     const nameText = demoNames ? `Profile ${index + 1}` : p.name;
-    ppName.replaceChildren(h("span", { class: "t3plus-profiles-name-text", text: nameText }));
-    if (p.icon) ppName.insertAdjacentHTML("afterbegin", profileIconSvg(p.icon, 11));
+    const nameShown = `${p.icon ?? ""}|${nameText}`;
+    if (nameShown !== ppNameShown) {
+      ppNameShown = nameShown;
+      ppName.replaceChildren(h("span", { class: "t3plus-profiles-name-text", text: nameText }));
+      if (p.icon) ppName.insertAdjacentHTML("afterbegin", profileIconSvg(p.icon, 11));
+    }
     if (dot) ppName.style.setProperty("--t3plus-profile-color", dot);
     else ppName.style.removeProperty("--t3plus-profile-color");
-    ppDots.replaceChildren(
-      ...profiles.list.map((q) => {
-        const d = h("span", { class: "t3plus-pp-dot" });
-        const hex = q.id === editing ? dot : profileHex(q.color);
-        if (hex) d.style.setProperty("--t3plus-profile-color", hex);
-        if (q.id === editing) d.setAttribute("data-on", "");
-        return d;
-      }),
-    );
-    ppSky.hidden = !profiles.sky;
+    const dots = profiles.list.map((q) => (q.id === editing ? { hex: dot, on: true } : { hex: profileHex(q.color), on: false }));
+    const dotsShown = JSON.stringify(dots);
+    if (dotsShown !== ppDotsShown) {
+      ppDotsShown = dotsShown;
+      ppDots.replaceChildren(
+        ...dots.map(({ hex, on }) => {
+          const d = h("span", { class: "t3plus-pp-dot", "data-on": on });
+          if (hex) d.style.setProperty("--t3plus-profile-color", hex);
+          return d;
+        }),
+      );
+    }
+    setHidden(ppSky, !profiles.sky);
     if (profiles.sky) {
       ensureSkyArt();
       const turn = actions.profileSkyTurn?.(value("sky")) ?? null;
@@ -762,20 +1227,23 @@ export function createAppearancePanel(doc, actions, { desktop = false, version =
       ppSky.style.setProperty("--t3plus-sky-turn", (turn ?? 0).toFixed(1));
       ppSky.style.setProperty("--t3plus-sky-mix", turn === null ? "0" : "1");
     }
-    // With the background off or an image, a dither color has nothing to color.
+    // The profile's own glow color (with the background off or an image, none shows).
     ppPane.toggleAttribute("data-glow-off", !glowOn);
-    ppRows.dither.row.querySelector(".t3plus-pp-row-hint").textContent = glowOn ? "The dithered glow behind the chat." : "The glow behind the chat (shown when Background is on and is the glow).";
-    const dither = profileHex(value("dither"));
-    ppPane.style.setProperty("--t3plus-accent", dither ?? (globalAccent === "theme" ? "var(--primary, #6d7cff)" : globalAccent));
+    const accent = profileAccents[editing] ?? "theme";
+    ppPane.style.setProperty("--t3plus-accent", accent === "theme" ? "var(--primary, #6d7cff)" : accent);
   }
 
   function updateProfiles(next, demo) {
     profiles = next;
-    profilesCard.hidden = !next;
+    setHidden(profilesCard, !next);
     if (!next) return;
-    if (!next.list.some((p) => p.id === editing)) editing = next.active;
+    if (editing !== next.active && !next.list.some((p) => p.id === editing)) {
+      // Another profile shown (the first time, or the one shown was deleted): its glow.
+      editing = next.active;
+      actions.previewProfile?.();
+    }
     const signature = JSON.stringify([next.list.map((p) => [p.id, p.name, p.icon ?? null, p.color]), demo]);
-    if (signature !== profilesSignature || demo !== demoNames) {
+    if (signature !== profilesSignature) {
       profilesSignature = signature;
       demoNames = demo;
       // Rebuilt (a name, an icon or a color changed): the focus stays on its chip.
@@ -791,6 +1259,7 @@ export function createAppearancePanel(doc, actions, { desktop = false, version =
     h("div", { class: "t3plus-section-header" }, [
       h("h2", { class: "t3plus-section-title", id: titleId }, ["t3+", h("span", { class: "t3plus-badge", text: desktop ? "Desktop" : "Extension" })]),
     ]),
+    scopeBar,
     lookCard,
     h("h3", { class: "t3plus-subsection-title", text: "Features" }),
     featuresCard,
@@ -803,20 +1272,22 @@ export function createAppearancePanel(doc, actions, { desktop = false, version =
   function update(state) {
     const { settings, image, imageUrl, message } = state;
     const g = settings.composerGradient;
-    backgroundToggle.setAttribute("aria-checked", String(g.enabled));
+    setAttr(backgroundToggle, "aria-checked", String(g.enabled));
     for (const [value, input] of Object.entries(modeInputs)) input.checked = g.mode === value;
-    imageRow.hidden = g.mode !== "image";
-    accentRow.hidden = g.mode === "image";
-    globalAccent = g.accent;
+    setHidden(imageRow, g.mode !== "image");
+    // The glow's color has nothing to color under an image.
+    setHidden(glow.row, g.mode === "image");
+    glow.update(g.accent);
+    bubbles.update(settings.chat.bubble);
+    profileAccents = state.profileAccents ?? {};
     glowOn = g.enabled && g.mode !== "image";
-    // The open profile may have its own dither color: then that one shows, not this.
-    setText(accentDesc, state.ditherAccent ? `${ACCENT_TEXT} The open profile has its own dither color (Profiles, below).` : ACCENT_TEXT);
     updateProfiles(state.profiles ?? null, Boolean(settings.demo?.enabled));
+    if (state.scope) paintScope(state.scope);
 
     const usingUpload = g.imageSource === "upload" && image;
     thumb.style.backgroundImage = imageUrl ? `url("${imageUrl.replace(/"/g, '\\"')}")` : "";
-    sampleButton.setAttribute("aria-pressed", String(!usingUpload));
-    removeButton.disabled = !image;
+    setAttr(sampleButton, "aria-pressed", String(!usingUpload));
+    if (removeButton.disabled !== !image) removeButton.disabled = !image;
     // Screenshot mode: a file name can be personal ("passport-scan.png").
     const fileName = settings.demo.enabled ? "your image" : image?.name;
     setText(imageCaption, usingUpload
@@ -825,22 +1296,19 @@ export function createAppearancePanel(doc, actions, { desktop = false, version =
         ? `Using the packaged sample. Your upload ${fileName} is still stored.`
         : "Using the packaged sample image.");
 
-    themeButton.setAttribute("aria-pressed", String(g.accent === "theme"));
-    // A color input cannot show "theme"; seed it with a neutral blue to pick from.
-    if (doc.activeElement !== colorInput) colorInput.value = g.accent === "theme" ? "#6d7cff" : g.accent;
     intensity.set(g.intensity);
     const look = g.dither ? g.ditherStyle : "smooth";
     for (const [value, input] of Object.entries(lookInputs)) input.checked = look === value;
     for (const [value, input] of Object.entries(ditherSizeInputs)) input.checked = g.ditherSize === value;
-    ditherSizeRow.hidden = !g.dither;
+    setHidden(ditherSizeRow, !g.dither);
 
-    glassToggle.setAttribute("aria-checked", String(settings.glass.enabled));
+    setAttr(glassToggle, "aria-checked", String(settings.glass.enabled));
     glassStrength.set(settings.glass.strength);
-    glassStrengthRow.hidden = !settings.glass.enabled;
+    setHidden(glassStrengthRow, !settings.glass.enabled);
 
-    preview.dataset.backdrop = g.enabled ? g.mode : "off";
-    updatePreviewBots(state.bots ?? []);
-    preview.dataset.glass = String(settings.glass.enabled);
+    setAttr(preview, "data-backdrop", g.enabled ? g.mode : "off");
+    updatePreviewBots(state.bots ?? [], settings.sidebar);
+    setAttr(preview, "data-glass", String(settings.glass.enabled));
     setText(status, settings.demo.enabled && image?.name && message ? message.split(image.name).join("your image") : message);
 
     // Sidebar
@@ -849,19 +1317,24 @@ export function createAppearancePanel(doc, actions, { desktop = false, version =
       ? `Not found in this T3 version, so these are off until t3+ is updated: ${problems.map((p) => `${p.feature} (${p.missing.join(", ")})`).join("; ")}.`
       : "Everything t3+ needs was found in this T3 version.");
     healthText.toggleAttribute("data-problem", problems.length > 0);
-    botsToggle.setAttribute("aria-checked", String(settings.sidebar.bots));
-    botsDefaultToggle.setAttribute("aria-checked", String(settings.sidebar.botsDefault));
-    profilesToggle.setAttribute("aria-checked", String(settings.sidebar.profiles));
+    setAttr(botsToggle, "aria-checked", String(settings.sidebar.bots));
+    setAttr(botsDefaultToggle, "aria-checked", String(settings.sidebar.botsDefault));
+    setAttr(profilesToggle, "aria-checked", String(settings.sidebar.profiles));
     for (const [value, input] of Object.entries(botStyleInputs)) input.checked = settings.sidebar.botStyle === value;
-    homeToggle.setAttribute("aria-checked", String(settings.home.widgets));
-    demoToggle.setAttribute("aria-checked", String(settings.demo.enabled));
+    setAttr(homeToggle, "aria-checked", String(settings.home.widgets));
+    setAttr(statusColorsToggle, "aria-checked", String(settings.sidebar.statusColors));
+    setAttr(statusBadgesToggle, "aria-checked", String(settings.sidebar.statusBadges));
+    subagentShapePick.set(subagentShapeOptions(settings.sidebar.subagentColor), settings.sidebar.subagentShape);
+    subagentColorPick.set(SUBAGENT_COLOR_OPTIONS, settings.sidebar.subagentColor);
+    setAttr(demoToggle, "aria-checked", String(settings.demo.enabled));
     // Bots
     const bots = state.bots ?? [];
     const marker = state.botMarker;
     setText(botsEmpty, bots.length
       ? ""
       : `No bots yet. Turn on "Every thread is a bot", or put ${marker} at the start of a thread's title.`);
-    botsEmpty.hidden = bots.length > 0;
+    setHidden(botsEmpty, bots.length > 0);
+    botsWearStatus = settings.sidebar.statusColors;
     updateBots(bots);
     setText(botStatus, state.botMessage);
   }
@@ -869,14 +1342,16 @@ export function createAppearancePanel(doc, actions, { desktop = false, version =
   return {
     element: section,
     update,
-    /** The dither color the Profiles preview shows ("#rrggbb"), or null for the glow's own. */
-    profilePreviewAccent: () => {
-      if (!profiles || profilesCard.hidden) return null;
-      const p = profiles.list.find((q) => q.id === editing);
-      return profileHex(draft.dither ?? p?.dither ?? "default");
-    },
-    /** Leaving Settings: the search is cleared (it opens on the whole list next time). */
-    closeBotEditor: () => {
+    /** The glow color of the profile the Profiles card shows ("theme" or "#rrggbb"), or null. */
+    profilePreviewAccent: () => (profiles && !profilesCard.hidden ? (profileAccents[editing] ?? null) : null),
+    /**
+     * Leaving Settings (or t3+ stopping): an open menu closes, with its listener on the
+     * document; the search is cleared (it opens on the whole list next time), and the
+     * preview's faces are drawn anew on the way back (the sprite clock let go of them).
+     */
+    leave: () => {
+      for (const pick of [profilePick, devicePick, subagentShapePick, subagentColorPick]) pick.close();
+      previewBotsSignature = "";
       if (!botsSearch.value) return;
       botsSearch.value = "";
       filterBots();

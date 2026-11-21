@@ -1,31 +1,39 @@
-import { NON_THREAD_ROUTE_SEGMENTS, SIDEBAR_ROW_PREFIX, T3_SELECTORS, T3PLUS } from "./config.js";
+import { NON_THREAD_ROUTE_SEGMENTS, SIDEBAR_ROW_PREFIX, T3_SELECTORS, T3PLUS, selectorParts } from "./config.js";
 
 // Reads T3's sidebar through its stable row hooks. t3+ never moves, re-creates
 // or re-parents T3's rows; bot rows are decorated in place (bots.js).
 
+const INNER_HOOKS = selectorParts(T3_SELECTORS.sidebarInner);
+const ROWS = `${T3_SELECTORS.threadItem}, ${T3_SELECTORS.projectFolderItem}`;
+const holdsRows = (inner) => inner.querySelector(ROWS) !== null;
+const DOCUMENT_POSITION_PRECEDING = 2;
+
 /**
- * The thread sidebar: the sidebar-inner that holds thread rows or project
- * folders. Null on pages where the sidebar shows something else (or nothing),
- * so nothing is read from an unrelated panel.
+ * The thread sidebar: the first sidebar-inner in the page that holds thread rows
+ * or project folders. Null on pages where the sidebar shows something else (or
+ * nothing), so nothing is read from an unrelated panel. Each hook is looked up on
+ * its own (a document-wide query of the list was the slow path, in every check), and
+ * the walk stops at its first match unless that one holds no rows.
  */
 export function findSidebarInner(doc) {
-  for (const inner of doc.querySelectorAll(T3_SELECTORS.sidebarInner)) {
-    if (inner.querySelector(`${T3_SELECTORS.threadItem}, ${T3_SELECTORS.projectFolderItem}`)) return inner;
+  let found = null;
+  for (const hook of INNER_HOOKS) {
+    const first = doc.querySelector(hook);
+    const inner = !first || holdsRows(first) ? first : ([...doc.querySelectorAll(hook)].find(holdsRows) ?? null);
+    if (inner && (!found || found.compareDocumentPosition(inner) & DOCUMENT_POSITION_PRECEDING)) found = inner;
   }
-  return null;
+  return found;
 }
 
 /**
  * Snapshot of the sidebar's rows.
  * threads: [{ key, li, row, parent, folderKey, title, titleEl, ariaLabel, current }]
  * folders: Map<logicalProjectKey, { li, row }>
- * shelves: Map<"shelf:x", li>
  */
 export function scanSidebar(inner, { textOf = null } = {}) {
   const threads = [];
   const folders = new Map();
-  const shelves = new Map();
-  if (!inner) return { threads, folders, shelves, folderMode: false };
+  if (!inner) return { threads, folders };
 
   for (const row of inner.querySelectorAll(T3_SELECTORS.sidebarRow)) {
     const id = row.getAttribute("data-sidebar-row") ?? "";
@@ -36,30 +44,24 @@ export function scanSidebar(inner, { textOf = null } = {}) {
       if (li) folders.set(id.slice(SIDEBAR_ROW_PREFIX.folder.length), { li, row });
       continue;
     }
-    if (id.startsWith(SIDEBAR_ROW_PREFIX.shelf)) {
-      if (li) shelves.set(id, li);
-      continue;
-    }
+    if (id.startsWith(SIDEBAR_ROW_PREFIX.shelf)) continue; // a shelf's heading ("Settled"), not a thread
     const item = row.closest(T3_SELECTORS.threadItem);
     if (!item || item.getAttribute("data-thread-item") !== id) continue;
     const parent = row.getAttribute("data-sidebar-parent");
     const titleInfo = readRowTitle(row, textOf);
-    const ariaParts = (row.getAttribute("aria-label") ?? "").split(", ");
-    const projectKey = row.getAttribute("data-project-key") ?? row.getAttribute("data-project") ?? (ariaParts.length > 1 ? ariaParts.at(-1) : null);
     threads.push({
       key: id,
       li: item,
       row,
       parent,
       folderKey: parent?.startsWith(SIDEBAR_ROW_PREFIX.folder) ? parent.slice(SIDEBAR_ROW_PREFIX.folder.length) : null,
-      projectKey,
       title: titleInfo.title,
       titleEl: titleInfo.titleEl,
       ariaLabel: row.getAttribute("aria-label") ?? "",
       current: row.getAttribute("aria-current") === "page",
     });
   }
-  return { threads, folders, shelves, folderMode: folders.size > 0 };
+  return { threads, folders };
 }
 
 /**

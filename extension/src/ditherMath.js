@@ -21,6 +21,12 @@ export function bayerMatrix(n) {
   return m;
 }
 
+/**
+ * The 8x8 table the CSS dither tile (dither.js) and the chart fills (ditherChart.js) share,
+ * indexed [row][col]: bayerMatrix(8) transposed, the phase both were drawn in.
+ */
+export const BAYER_8 = ((m) => Object.freeze(m.map((row, y) => Object.freeze(row.map((_, x) => m[x][y])))))(bayerMatrix(8));
+
 const BAYER_N = 16;
 const BAYER = bayerMatrix(BAYER_N);
 /** Flat thresholds in (0, 1): 256 distinct levels, so ramps step smoothly. */
@@ -40,7 +46,19 @@ export function ditherLevel(v, levels, threshold) {
 /** Glow geometry, as shares of the pane. The center sits slightly below the bottom edge. */
 export const GLOW_SHAPE = Object.freeze({ coreRx: 0.288, coreRy: 0.216, haloRx: 0.45, haloRy: 0.396, drop: 0.05 });
 
-const mixRgb = (a, b, t) => [0, 1, 2].map((i) => Math.round(a[i] + (b[i] - a[i]) * t));
+/**
+ * Glow strength (0..1) from a pixel's squared distances to the center in the core's
+ * and the halo's radii (1 on each ellipse), `gain` from the intensity. Math.sqrt of the
+ * squares rather than Math.hypot: the same pixels, in half the time; and outside both
+ * ellipses nothing is worked out at all (a fifth of every sprite).
+ */
+function strength(core2, halo2, gain) {
+  if (core2 >= 1 && halo2 >= 1) return 0;
+  const core = core2 < 1 ? (1 - Math.sqrt(core2)) ** 1.2 : 0;
+  const halo = halo2 < 1 ? (1 - Math.sqrt(halo2)) ** 1.6 * 0.7 : 0;
+  // Intensity widens the dense area.
+  return Math.min(1, (1 - (1 - core) * (1 - halo)) * gain);
+}
 
 /**
  * Glow strength (0..1) at pane position u, v (0..1, v = 0 at the top): a wide
@@ -50,13 +68,11 @@ const mixRgb = (a, b, t) => [0, 1, 2].map((i) => Math.round(a[i] + (b[i] - a[i])
 export function glowStrength(u, v, cx, intensity, cy = 1 + GLOW_SHAPE.drop) {
   const du = u - cx;
   const dv = v - cy;
-  const d1 = Math.hypot(du / GLOW_SHAPE.coreRx, dv / GLOW_SHAPE.coreRy);
-  const d2 = Math.hypot(du / GLOW_SHAPE.haloRx, dv / GLOW_SHAPE.haloRy);
-  if (d2 >= 1 && d1 >= 1) return 0;
-  const core = d1 < 1 ? (1 - d1) ** 1.2 : 0;
-  const halo = d2 < 1 ? (1 - d2) ** 1.6 * 0.7 : 0;
-  // Intensity widens the dense area.
-  return Math.min(1, (1 - (1 - core) * (1 - halo)) * (0.6 + 0.8 * intensity));
+  const a1 = du / GLOW_SHAPE.coreRx;
+  const b1 = dv / GLOW_SHAPE.coreRy;
+  const a2 = du / GLOW_SHAPE.haloRx;
+  const b2 = dv / GLOW_SHAPE.haloRy;
+  return strength(a1 * a1 + b1 * b1, a2 * a2 + b2 * b2, 0.6 + 0.8 * intensity);
 }
 
 /**
@@ -134,33 +150,54 @@ export function glowTones(rgb, style, light = false) {
  * capped below 1 so even the core keeps mixing its top two tones: no flat,
  * smooth-looking fill anywhere.
  *
- * @param {{ width: number, height: number, cx: number, rgb: [number, number, number],
- *           intensity: number, style?: "bayer" | "grain" | "spectrum" }} o  cx and intensity are 0..1.
+ * Returns fill(fromRow, toRow), which draws those rows into `out`, so a caller can
+ * spread a large sprite over several short tasks: the tones, alphas and each row's
+ * own terms are worked out once, not again for every few rows (or every pixel).
+ * @param {{ width: number, height: number, cx: number, rgb: [number, number, number], intensity: number,
+ *           style?: "bayer" | "grain" | "spectrum", out: Uint8ClampedArray }} o  cx and intensity are 0..1.
  */
-export function glowPixelArt({ width, height, cx, rgb, intensity, style = "bayer", cy, sprite = null, out = null, fromRow = 0, toRow = height, light = false }) {
-  // out / fromRow / toRow: fill only rows [fromRow, toRow) of an existing buffer,
-  // so a caller can spread a large sprite over several short tasks.
-  out ??= new Uint8ClampedArray(width * height * 4);
-  if (intensity <= 0) return out;
+export function glowRenderer({ width, height, cx, rgb, intensity, style = "bayer", cy, sprite = null, out, light = false }) {
+  if (intensity <= 0) return () => {};
   const tones = glowTones(rgb, style, light);
   const threshold = thresholdFor(style);
   const scale = 0.6 + 0.4 * intensity;
-  for (let y = fromRow; y < Math.min(height, toRow); y += 1) {
-    for (let x = 0; x < width; x += 1) {
-      const m = sprite
-        ? glowStrength(0.5 + ((x + 0.5) / width - 0.5) * sprite.spanX, 0.5 + ((y + 0.5) / height - 0.5) * sprite.spanY, 0.5, intensity, 0.5)
-        : glowStrength((x + 0.5) / width, (y + 0.5) / height, cx, intensity, cy);
-      if (m <= 0) continue;
-      const level = ditherLevel(Math.min(m, 0.9), tones.length, threshold(x, y));
-      if (!level) continue;
-      const [color, a] = tones[level];
-      const i = (y * width + x) * 4;
-      out[i] = color[0];
-      out[i + 1] = color[1];
-      out[i + 2] = color[2];
-      out[i + 3] = Math.round(255 * a * scale);
+  const alphas = tones.map((tone) => (tone ? Math.round(255 * tone[1] * scale) : 0));
+  const gain = 0.6 + 0.8 * intensity;
+  const centerX = sprite ? 0.5 : cx;
+  const centerY = sprite ? 0.5 : (cy ?? 1 + GLOW_SHAPE.drop);
+  const { coreRx, coreRy, haloRx, haloRy } = GLOW_SHAPE;
+  return (fromRow, toRow) => {
+    for (let y = fromRow; y < Math.min(height, toRow); y += 1) {
+      const v = sprite ? 0.5 + ((y + 0.5) / height - 0.5) * sprite.spanY : (y + 0.5) / height;
+      const dv = v - centerY;
+      const b1 = dv / coreRy;
+      const b2 = dv / haloRy;
+      const coreY = b1 * b1;
+      const haloY = b2 * b2;
+      for (let x = 0; x < width; x += 1) {
+        const u = sprite ? 0.5 + ((x + 0.5) / width - 0.5) * sprite.spanX : (x + 0.5) / width;
+        const du = u - centerX;
+        const a1 = du / coreRx;
+        const a2 = du / haloRx;
+        const m = strength(a1 * a1 + coreY, a2 * a2 + haloY, gain);
+        if (m <= 0) continue;
+        const level = ditherLevel(Math.min(m, 0.9), tones.length, threshold(x, y));
+        if (!level) continue;
+        const color = tones[level][0];
+        const i = (y * width + x) * 4;
+        out[i] = color[0];
+        out[i + 1] = color[1];
+        out[i + 2] = color[2];
+        out[i + 3] = alphas[level];
+      }
     }
-  }
+  };
+}
+
+/** The glow as pixel art in one go (glowRenderer's rows [fromRow, toRow); a new buffer unless `out`). */
+export function glowPixelArt({ width, height, out = null, fromRow = 0, toRow = height, ...o }) {
+  out ??= new Uint8ClampedArray(width * height * 4);
+  glowRenderer({ width, height, out, ...o })(fromRow, toRow);
   return out;
 }
 

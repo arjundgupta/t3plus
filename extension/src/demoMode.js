@@ -1,5 +1,5 @@
 import { HOVER_CARD_TITLE, parseRowProject } from "./bots.js";
-import { T3PLUS, T3_SELECTORS } from "./config.js";
+import { T3PLUS, T3_ATTRS, T3_SELECTORS } from "./config.js";
 import { createNameBook, fakeCode, fakeCommand, fakeIdentifier, fakeProse, isNeutral, isPlainBranch, projectInitials } from "./demoText.js";
 
 // Screenshot mode: a read-only cover over T3's visible text. Thread titles,
@@ -12,23 +12,42 @@ import { createNameBook, fakeCode, fakeCommand, fakeIdentifier, fakeProse, isNeu
 // project's initials through CSS `content` on the <img>, never its src.
 
 const SHOW_TEXT = 4;
-const SCHEDULE = /^(daily|weekly|hourly|monthly|every|weekdays|weekends|runs|next|last|paused|at )/i;
+// Text that is never covered: t3+'s own, hidden text, and editable text (the user's own
+// typing, the composer). A contenteditable="false" chip (a citation in a message) is not
+// editable, and is covered like the text around it.
+const NEVER_COVERED = `[${T3PLUS.ownedAttr}], [contenteditable]:not([contenteditable="false"]), .sr-only, script, style, textarea`;
+const TIMELINE_ROW = T3_SELECTORS.timelineRow;
 
 export function createDemoMode(doc) {
   const book = createNameBook();
   const memo = new WeakMap(); // text node -> { real, fake }
+  // Chat text that needs no stand-in (code punctuation and keywords, T3's labels), as it
+  // read then and under its row's rules (its kind and role). Whether chat text needs one
+  // depends only on the text, where it sits and those rules, never on names seen elsewhere,
+  // so it is looked at again only once React changes it or its row turns into another kind
+  // (a running tool's line once it is done: a done work row's longer text is the agent's).
+  let plain = new WeakMap(); // text node -> { value, rules }
+  const isPlain = (node, value, rules) => {
+    const settled = plain.get(node);
+    return settled?.value === value && settled.rules === rules;
+  };
   const touched = new Set();
   const badges = new Set();
   const badgeCache = new Map(); // img src -> { color } | null
   let active = false;
 
-  function swap(node, make) {
+  /**
+   * Covers a text node with make(text). `rules` (chat text): all make() reads besides the
+   * text and where it sits (see plain).
+   */
+  function swap(node, make, rules = null) {
     const value = node.nodeValue ?? "";
     const known = memo.get(node);
-    if (known && value === known.fake) return;
+    if (known?.fake === value || (rules !== null && isPlain(node, value, rules))) return;
     const fake = make(value);
     if (typeof fake !== "string" || fake === value) {
       if (known) memo.delete(node);
+      if (rules !== null) plain.set(node, { value, rules });
       return;
     }
     memo.set(node, { real: value, fake });
@@ -36,19 +55,24 @@ export function createDemoMode(doc) {
     node.nodeValue = fake;
   }
 
+  /** The parent of text node `n` when its text is one to cover (visible, not t3+'s own or editable), else null. */
+  function coverable(n) {
+    const value = n.nodeValue;
+    const parent = n.parentElement;
+    if (!parent || !value.trim()) return null;
+    // Text a pass settled (covered, or plain) passed this test then. Walking up the
+    // ancestors of every node was most of a pass over a long thread, and a pass runs
+    // every frame while T3 streams: the walk is for new and changed text only.
+    if (memo.get(n)?.fake !== value && plain.get(n)?.value !== value && parent.closest(NEVER_COVERED)) return null;
+    return parent;
+  }
   /** Visible text nodes under `root`, skipping t3+'s own nodes and editable text. */
   function eachText(root, fn) {
     if (!root) return;
     const walker = doc.createTreeWalker(root, SHOW_TEXT);
-    const nodes = [];
-    for (let n = walker.nextNode(); n; n = walker.nextNode()) nodes.push(n);
-    for (const n of nodes) {
-      const parent = n.parentElement;
-      // Editable text is the user's own typing (the composer); a contenteditable="false"
-      // chip (a citation in a message) is not, and is covered like the text around it.
-      if (!parent || parent.closest(`[${T3PLUS.ownedAttr}], [contenteditable]:not([contenteditable="false"]), .sr-only, script, style, textarea`)) continue;
-      if (!n.nodeValue?.trim()) continue;
-      fn(n, parent);
+    for (let n = walker.nextNode(); n; n = walker.nextNode()) {
+      const parent = coverable(n);
+      if (parent) fn(n, parent);
     }
   }
 
@@ -136,9 +160,11 @@ export function createDemoMode(doc) {
   function coverBadge(img, project) {
     const info = img?.src ? badgeInfo(img.src) : null;
     if (!info) return;
-    const letters = projectInitials(project);
+    // A name that needs no stand-in keeps its own letters ("<", "–"): escaped for the SVG,
+    // and percent-encoded, not base64 (btoa() throws on a character past Latin-1).
+    const letters = projectInitials(project).replaceAll("&", "&amp;").replaceAll("<", "&lt;");
     const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><rect width="64" height="64" rx="14" fill="${info.color}"/><text x="32" y="32" dy="0.35em" text-anchor="middle" font-family="ui-sans-serif, system-ui, -apple-system, sans-serif" font-size="26" font-weight="600" fill="#ffffff">${letters}</text></svg>`;
-    const value = `url("data:image/svg+xml;base64,${btoa(svg)}")`;
+    const value = `url("data:image/svg+xml,${encodeURIComponent(svg)}")`;
     if (img.style.getPropertyValue("--t3plus-demo-badge") !== value) img.style.setProperty("--t3plus-demo-badge", value);
     if (!img.hasAttribute("data-t3plus-demo-badge")) img.setAttribute("data-t3plus-demo-badge", "");
     badges.add(img);
@@ -152,11 +178,23 @@ export function createDemoMode(doc) {
     }
   }
 
-  // title attributes (native tooltips) swapped while covered: element -> real title.
+  // title attributes (native tooltips) swapped while covered: element -> { real, fake }.
   const titles = new Map();
+  /**
+   * An element's title as T3 wrote it: the stand-in t3+ put there reads back as the real
+   * title it covers. Any other value is T3's own and new: React reuses the element when
+   * the branch changes, and writes the new branch's name over the stand-in.
+   */
+  function realTitle(el) {
+    const value = el.getAttribute("title");
+    const known = titles.get(el);
+    return known && value === known.fake ? known.real : value;
+  }
   function coverTitleAttr(el, fake) {
-    if (!el.hasAttribute("title")) return;
-    if (!titles.has(el)) titles.set(el, el.getAttribute("title"));
+    const real = realTitle(el);
+    if (real === null) return;
+    const known = titles.get(el);
+    if (known?.real !== real || known.fake !== fake) titles.set(el, { real, fake });
     if (el.getAttribute("title") !== fake) el.setAttribute("title", fake);
   }
   // Paths and e-mail addresses inside T3's own sentences (an error line): the
@@ -166,16 +204,15 @@ export function createDemoMode(doc) {
   /**
    * T3's split names (a long branch: a head and a tail span, the whole in a native
    * tooltip, ThreadHoverCard, the composer's branch picker, the details card): one
-   * stand-in for the whole, the tooltip too. The real name comes from the tooltip
-   * the first time, from memory after that (the tooltip holds the stand-in by then).
+   * stand-in for the whole, the tooltip too. The real name is the tooltip's (realTitle).
    */
   function coverSplit(split, kind = "branch") {
-    const real = (titles.get(split) ?? split.getAttribute("title") ?? realText(split)).trim();
+    const real = (realTitle(split) ?? realText(split)).trim();
     const fake = !real || (kind === "branch" && isPlainBranch(real)) || book.isFake(real) || T3_WORDS.has(real) ? real : book.fake(kind, real);
     swapWhole(split, () => fake);
     if (fake) coverTitleAttr(split, fake);
   }
-  const SPLIT = "span[title]:has(> span + span)";
+  const SPLIT = T3_SELECTORS.splitLabel;
 
   /** A name inside one of T3's sentences: the stand-in it already has, or one of `kind`. */
   const coverName = (name, kind) => named(book.kindOf(name.trim()) ?? kind)(name);
@@ -230,11 +267,11 @@ export function createDemoMode(doc) {
   // ---- Regions ----
   function sidebar(inner) {
     if (!inner) return;
-    for (const row of inner.querySelectorAll("[data-sidebar-row]")) {
-      const key = row.getAttribute("data-sidebar-row") ?? "";
+    for (const row of inner.querySelectorAll(T3_SELECTORS.sidebarRow)) {
+      const key = row.getAttribute(T3_ATTRS.sidebarRow) ?? "";
       if (key.startsWith("folder:")) {
         // The name, as one; the monogram's letters are the badge's (initials), not a name.
-        const nameEl = row.querySelector("span.truncate");
+        const nameEl = row.querySelector(T3_SELECTORS.folderTitle);
         let project = "";
         if (nameEl) {
           swapWhole(nameEl, named("project"));
@@ -252,21 +289,21 @@ export function createDemoMode(doc) {
       }
       if (row.getAttribute("role") !== "button") continue;
       // Every row shape (card, slim, folder) shows its title in an aria-hidden [dir] span.
-      if (!row.hasAttribute(T3PLUS.botAttr)) eachText(row.querySelector('span[aria-hidden="true"][dir]') ?? row.querySelector("span[dir]"), (n) => swap(n, named("title")));
+      if (!row.hasAttribute(T3PLUS.botAttr)) eachText(row.querySelector(T3_SELECTORS.rowVisibleDirTitle) ?? row.querySelector(T3_SELECTORS.rowDirTitle), (n) => swap(n, named("title")));
       // Card rows keep their lines in a body; project-grouped rows hold them directly.
-      const body = row.querySelector(":scope > .relative.z-10") ?? row;
-      const top = body.querySelector(":scope > .h-5");
-      const projectEl = top?.querySelector(":scope > .truncate");
+      const body = row.querySelector(T3_SELECTORS.cardRowBody) ?? row;
+      const top = body.querySelector(T3_SELECTORS.rowTopLine);
+      const projectEl = top?.querySelector(T3_SELECTORS.rowLineProject);
       eachText(projectEl, (n) => swap(n, named("project")));
       const project = projectEl?.textContent ?? "";
-      coverBadge(top?.querySelector(":scope > img, :scope > span > img"), project);
+      coverBadge(top?.querySelector(T3_SELECTORS.rowLineBadge), project);
       // Any letter badge on the line (a draft's icon can come first).
       coverSvgBadge(top, project);
       // A slim row (settled, snoozed) carries its project's badge in its one line;
       // its project is named only in the row's label, after the title and status.
       const slot = top ? null : row.querySelector(T3_SELECTORS.slimRowBadgeSlot);
       if (slot?.querySelector("svg text, img")) {
-        const titleEl = row.querySelector('span[aria-hidden="true"][dir]') ?? row.querySelector("span[dir]");
+        const titleEl = row.querySelector(T3_SELECTORS.rowVisibleDirTitle) ?? row.querySelector(T3_SELECTORS.rowDirTitle);
         const real = parseRowProject(row.getAttribute("aria-label"), realText(titleEl).trim());
         if (real) {
           const stand = book.fake("project", real);
@@ -274,7 +311,7 @@ export function createDemoMode(doc) {
           coverBadge(slot.querySelector("img"), stand);
         }
       }
-      const meta = body.querySelector(":scope > .mt-0\\.5");
+      const meta = body.querySelector(T3_SELECTORS.rowMetaLine);
       if (meta) {
         // A leading icon means an environment (machine); otherwise a branch.
         const kind = meta.firstElementChild?.tagName?.toLowerCase() === "svg" ? "machine" : "branch";
@@ -292,19 +329,19 @@ export function createDemoMode(doc) {
   }
 
   function header() {
-    const nav = doc.querySelector('nav[aria-label="Thread breadcrumb"]');
+    const nav = doc.querySelector(T3_SELECTORS.breadcrumbNav);
     if (!nav) return;
     const items = [...nav.querySelectorAll("li")].filter((li) => li.getAttribute("aria-hidden") !== "true");
     items.forEach((li, index) => {
       // "From <machine>": a linked environment's label, next to the title.
-      for (const badge of li.querySelectorAll('[data-slot="badge"]')) coverGeneric(badge);
+      for (const badge of li.querySelectorAll(T3_SELECTORS.badge)) coverGeneric(badge);
       if (li.querySelector("[data-t3plus-bot-breadcrumb]")) return;
-      const label = li.querySelector('[data-slot="workspace-breadcrumb-text"]');
+      const label = li.querySelector(T3_SELECTORS.breadcrumbText);
       // The open thread is the current crumb (a thread without a project has no
       // project crumb); the first one before it is the project, any other a parent thread.
       const isProject = index === 0 && !li.hasAttribute("aria-current");
       if (label) swapWhole(label, named(isProject ? "project" : "title"));
-      else eachText(li, (n, parent) => !parent.closest('[data-slot="badge"], svg') && swap(n, named(isProject ? "project" : "title")));
+      else eachText(li, (n, parent) => !parent.closest(`${T3_SELECTORS.badge}, svg`) && swap(n, named(isProject ? "project" : "title")));
       if (isProject) {
         coverSvgBadge(li, label?.textContent ?? "");
         coverBadge(li.querySelector("img"), label?.textContent ?? "");
@@ -313,7 +350,7 @@ export function createDemoMode(doc) {
   }
 
   function hero() {
-    for (const el of doc.querySelectorAll(".group\\/draft-hero [data-draft-project-trigger], .group\\/draft-hero .font-medium")) {
+    for (const el of doc.querySelectorAll(T3_SELECTORS.draftHero)) {
       eachText(el, (n) => swap(n, named("project")));
     }
   }
@@ -338,19 +375,19 @@ export function createDemoMode(doc) {
       }
       if (!title.hasAttribute("data-t3plus-bot-hover")) eachText(title, (n) => swap(n, named("title")));
       let project = "";
-      for (const line of popup.querySelectorAll(".grid > div")) {
-        const split = line.querySelector("span[title]");
+      for (const line of popup.querySelectorAll(T3_SELECTORS.hoverCardLine)) {
+        const split = line.querySelector(T3_SELECTORS.titledLabel);
         if (split) {
           coverSplit(split);
           continue;
         }
         // The model ("Opus 5.5", "GPT-5.5 · Work"): its provider icon is grayscale. The
         // model stays; an instance name after " · " is the user's own label.
-        if (line.querySelector(".grayscale")) {
+        if (line.querySelector(T3_SELECTORS.modelIcon)) {
           eachText(line, (n) => swap(n, (v) => (v.includes(" · ") ? v.replace(/ · (.+)$/, (_, name) => ` · ${book.fake("machine", name.trim())}`) : v)));
           continue;
         }
-        if (line.querySelector('img, [data-slot="project-monogram"], svg text')) {
+        if (line.querySelector(`img, ${T3_SELECTORS.projectMonogram}, svg text`)) {
           eachText(line, (n, parent) => {
             if (parent.closest("svg")) return;
             swap(n, named("project"));
@@ -362,7 +399,7 @@ export function createDemoMode(doc) {
         }
         // T3's own sentences: the warning, "Handed off from …", the terminal, the error.
         const text = line.textContent.trim();
-        if (line.matches(".text-warning, .text-error, .text-destructive") || /^(Handed off from|You're currently)|terminal process(es)? running/i.test(text)) {
+        if (line.matches(T3_SELECTORS.warningLine) || /^(Handed off from|You're currently)|terminal process(es)? running/i.test(text)) {
           eachText(line, (n) => swap(n, redact));
           continue;
         }
@@ -398,7 +435,7 @@ export function createDemoMode(doc) {
         const thread = leaves.some((el) => AGO.test(el.textContent.trim()));
         const title = thread ? leaves.find((el) => el.textContent.trim() && !el.closest("kbd")) : null;
         // A project item ("New thread in…" lists them with their badge).
-        const projectItem = !thread && Boolean(item.querySelector('[data-slot="project-monogram"], svg text'));
+        const projectItem = !thread && Boolean(item.querySelector(`${T3_SELECTORS.projectMonogram}, svg text`));
         eachText(item, (n, parent) => {
           swap(n, (v) => {
             const core = v.trim();
@@ -411,7 +448,7 @@ export function createDemoMode(doc) {
             if (!thread) return parent.closest("b, strong") || (projectItem && !parent.closest("svg")) ? named("project")(v) : v;
             if (title?.contains(n)) return named("title")(v);
             // The message snippet: its own small spans ("project · machine" is small text too).
-            if (parent.matches(".text-xs") && !core.includes(" · ")) return fakeProse(v);
+            if (parent.matches(T3_SELECTORS.smallText) && !core.includes(" · ")) return fakeProse(v);
             if (core === "Local") return v; // T3's word for this machine
             // "project · machine" in one span, or each in its own span after a "·".
             const afterDot = parent.previousElementSibling?.textContent.trim() === "·";
@@ -435,13 +472,13 @@ export function createDemoMode(doc) {
    * name) and the branch (a split name). T3's own words stay (named()).
    */
   function runContexts(root) {
-    for (const control of root.querySelectorAll("[data-composer-context-control], [aria-label^='Branch: ']")) {
-      const label = control.querySelector("[data-composer-label]");
+    for (const control of root.querySelectorAll(T3_SELECTORS.composerContextControl)) {
+      const label = control.querySelector(T3_SELECTORS.composerLabel);
       if (!label) continue;
       const aria = control.getAttribute("aria-label") ?? "";
-      const shortcut = control.getAttribute("data-composer-shortcut") ?? "";
+      const shortcut = control.getAttribute(T3_ATTRS.composerShortcut) ?? "";
       if (aria.startsWith("Branch: ")) {
-        const split = label.querySelector(SPLIT) ?? label.querySelector("span[title]");
+        const split = label.querySelector(SPLIT) ?? label.querySelector(T3_SELECTORS.titledLabel);
         if (split) coverSplit(split);
         else swapWhole(label, named("branch"));
       } else if (shortcut === "composer.workspace") {
@@ -514,13 +551,12 @@ export function createDemoMode(doc) {
       if (label === "Workspace") {
         runContexts(section);
         coverGeneric(section);
-      } else if (label === "Automations" || section.hasAttribute("data-thread-automations-panel")) {
-        eachText(section, (n, parent) => {
-          const core = n.nodeValue.trim();
-          if (SCHEDULE.test(core) || /\d:\d/.test(core) || isHeading(parent)) return;
-          swap(n, named("automation"));
-        });
-      } else if (label === "Side chats" || label === "Lineage" || section.hasAttribute("data-thread-side-chats-panel")) {
+      } else if (label === "Automations" || section.hasAttribute(T3_ATTRS.automationsPanel)) {
+        // A task's title is a span; its schedule line ("Daily at 09:00 EST · next in 3h") and
+        // the panel's error are T3's <p>s. Told apart by markup, not by wording: a title
+        // starts with "Daily" or holds a time as often as a schedule does.
+        eachText(section, (n, parent) => !isHeading(parent) && swap(n, parent.closest(T3_SELECTORS.automationScheduleLine) ? redact : named("automation")));
+      } else if (label === "Side chats" || label === "Lineage" || section.hasAttribute(T3_ATTRS.sideChatsPanel)) {
         // Other threads' titles.
         eachText(section, (n, parent) => !isHeading(parent) && swap(n, (v) => (AGO.test(v.trim()) ? v : named(book.kindOf(v.trim()) ?? "title")(v))));
       } else {
@@ -546,34 +582,90 @@ export function createDemoMode(doc) {
 
   function timeline() {
     // Every timeline: a side chat in the right panel has its own.
-    for (const list of doc.querySelectorAll(T3_SELECTORS.messageList)) timelineRows(list);
+    for (const list of doc.querySelectorAll(T3_SELECTORS.messageList)) {
+      for (const row of list.querySelectorAll(TIMELINE_ROW)) coverRow(row);
+    }
   }
-  function timelineRows(list) {
-    for (const row of list.querySelectorAll("[data-timeline-row-id]")) {
-      const kind = row.getAttribute("data-timeline-row-kind") ?? "";
-      if (kind === "turn-fold" || kind === "work-toggle") continue;
-      const role = row.getAttribute("data-message-role");
-      if (role === "user") {
-        eachText(row, (n, parent) => swap(n, (v) => (parent.closest("pre") ? fakeCode(v) : parent.closest("code") ? fakeIdentifier(v) : fakeProse(v, "user"))));
+  /** A timeline row's rules: how its text is covered, by its kind and role (`key`: the two as one). */
+  function rulesOf(row) {
+    const kind = row.getAttribute(T3_ATTRS.timelineRowKind) ?? "";
+    const role = row.getAttribute(T3_ATTRS.messageRole);
+    return { kind, role, key: `${kind}\0${role}` };
+  }
+  const skipsRow = (kind) => kind === "turn-fold" || kind === "work-toggle";
+  /** One text node of a timeline row, by the row's rules and where the text sits. */
+  function timelineText(n, parent, { kind, role, key }) {
+    if (role === "user") {
+      swap(n, (v) => (parent.closest("pre") ? fakeCode(v) : parent.closest("code") ? fakeIdentifier(v) : fakeProse(v, "user")), key);
+      return;
+    }
+    swap(n, (v) => {
+      if (parent.closest("pre")) return fakeCode(v);
+      if (parent.closest("code")) return fakeIdentifier(v);
+      if (parent.closest(T3_SELECTORS.chatMarkdown)) return fakeProse(v);
+      const core = v.trim();
+      if (isNeutral(core)) return v;
+      if (parent.closest(T3_SELECTORS.commandExecution)) return fakeCommand(v);
+      // File and folder names (file lists, work rows).
+      if (!/\s/.test(core)) return /[./_-]/.test(core) || parent.closest(T3_SELECTORS.monoText) ? fakeIdentifier(v) : v;
+      // Longer text in a work row is the agent's own (a tool summary, a search);
+      // short phrases elsewhere are T3's labels ("10 changed files", "Open diff").
+      if (kind === "work" && core.split(/\s+/).length > 3) return fakeProse(v);
+      return v;
+    }, key);
+  }
+  // Timeline rows covered since their rules and text last changed: a pass skips them (their
+  // text read whole, not walked node by node). Any new real text changes the row's text.
+  let rowsSeen = new WeakMap(); // row -> "<rules key>\0<text>" once covered
+  function coverRow(row) {
+    const rules = rulesOf(row);
+    if (skipsRow(rules.kind) || rowsSeen.get(row) === `${rules.key}\0${row.textContent}`) return;
+    eachText(row, (n, parent) => timelineText(n, parent, rules));
+    rowsSeen.set(row, `${rules.key}\0${row.textContent}`);
+  }
+
+  /**
+   * What React just changed in a timeline (a streamed token, a row mounted as the list
+   * scrolls), from the DOM watcher's records, in its observer's callback: before paint,
+   * and only those nodes, not a full pass over the page for each token.
+   */
+  let sincePrune = 0;
+  function coverTimelineRecords(records) {
+    let handled = 0;
+    for (const record of records) {
+      const target = record.target;
+      const el = target.nodeType === 1 ? target : target.parentElement;
+      if (!el?.isConnected || !el.closest(T3_SELECTORS.messageList)) continue;
+      handled += 1;
+      const row = el.closest(TIMELINE_ROW);
+      if (!row) {
+        // Above the rows (the list mounted a frame of rows): those rows, whole.
+        for (const added of record.addedNodes) {
+          if (added.nodeType !== 1) continue;
+          if (added.matches(TIMELINE_ROW)) coverRow(added);
+          else for (const r of added.querySelectorAll(TIMELINE_ROW)) coverRow(r);
+        }
         continue;
       }
-      eachText(row, (n, parent) => {
-        swap(n, (v) => {
-          if (parent.closest("pre")) return fakeCode(v);
-          if (parent.closest("code")) return fakeIdentifier(v);
-          if (parent.closest(".chat-markdown")) return fakeProse(v);
-          const core = v.trim();
-          if (isNeutral(core)) return v;
-          if (parent.closest('[data-v2-item-type="command_execution"]')) return fakeCommand(v);
-          // File and folder names (file lists, work rows).
-          if (!/\s/.test(core)) return /[./_-]/.test(core) || parent.closest(".font-mono") ? fakeIdentifier(v) : v;
-          // Longer text in a work row is the agent's own (a tool summary, a search);
-          // short phrases elsewhere are T3's labels ("10 changed files", "Open diff").
-          if (kind === "work" && core.split(/\s+/).length > 3) return fakeProse(v);
-          return v;
-        });
-      });
+      const rules = rulesOf(row);
+      if (skipsRow(rules.kind)) continue;
+      for (const node of record.type === "characterData" ? [target] : record.addedNodes) {
+        if (!node.isConnected) continue;
+        if (node.nodeType === 1) eachText(node, (n, parent) => timelineText(n, parent, rules));
+        else if (node.nodeType === 3) {
+          const parent = coverable(node);
+          if (parent) timelineText(node, parent, rules);
+        }
+      }
+      rowsSeen.delete(row); // read whole again by the next full pass
     }
+    // A long reply leaves the text nodes React replaced in `touched`; full passes (which
+    // prune) are rare while only the timeline changes, so they are dropped here too.
+    if (handled && (sincePrune += handled) > 2000) {
+      sincePrune = 0;
+      for (const node of touched) if (!node.isConnected) touched.delete(node);
+    }
+    return handled;
   }
 
   /**
@@ -581,45 +673,69 @@ export function createDemoMode(doc) {
    * machines), toasts ("Cloned …"), dialogs ("Project settings for …"). Names seen
    * elsewhere get their stand-ins; paths and e-mail addresses are hidden.
    */
-  const PORTALS = '[role="menu"], [role="listbox"], [role="dialog"], [role="alertdialog"], [data-slot$="-popup"], [data-sonner-toast], [role="status"][aria-live], [role="alert"]';
+  const PORTALS = T3_SELECTORS.portals;
+  const NOT_PORTAL = `#${T3_SELECTORS.appRootId}, [${T3PLUS.ownedAttr}], ${T3_SELECTORS.tooltipPopup}, ${T3_SELECTORS.commandPalette}`;
   function portals() {
     const body = doc.body;
     if (!body) return;
-    for (const el of body.querySelectorAll(PORTALS)) {
-      if (el.closest(`#${T3_SELECTORS.appRootId}, [${T3PLUS.ownedAttr}], ${T3_SELECTORS.tooltipPopup}, ${T3_SELECTORS.commandPalette}`)) continue;
-      if (el.querySelector(T3_SELECTORS.commandPalette)) continue; // ⌘K has its own rules (palette)
-      for (const split of el.querySelectorAll(SPLIT)) coverSplit(split);
-      coverGeneric(el);
+    // Portals are <body>'s own children: the app's root (nearly all of the page) is not searched.
+    for (const child of body.children) {
+      if (child.id === T3_SELECTORS.appRootId || child.hasAttribute(T3PLUS.ownedAttr)) continue;
+      for (const el of child.matches(PORTALS) ? [child, ...child.querySelectorAll(PORTALS)] : child.querySelectorAll(PORTALS)) {
+        if (el.closest(NOT_PORTAL)) continue;
+        if (el.querySelector(T3_SELECTORS.commandPalette)) continue; // ⌘K has its own rules (palette)
+        for (const split of el.querySelectorAll(SPLIT)) coverSplit(split);
+        coverGeneric(el);
+      }
+    }
+  }
+
+  // Each region on its own: one that breaks on new T3 markup leaves the others covered
+  // (a throw in the sidebar left the breadcrumb, the chat and the window title real).
+  const failed = new Set(); // regions already reported
+  function coverRegion(name, region, arg) {
+    try {
+      region(arg);
+    } catch (error) {
+      if (failed.has(name)) return;
+      failed.add(name);
+      doc.defaultView?.console?.error?.(`t3+: screenshot mode could not cover the ${name}`, error);
     }
   }
 
   return {
-    book,
     realText,
     get active() {
       return active;
     },
-    /** Covers every region. Cheap when nothing changed: covered nodes are skipped. */
+    /**
+     * Covers every region: their text is walked again, a node covered (or plain) already
+     * skipped as it is reached; a timeline row whose text did not change is not walked.
+     */
     apply({ sidebarInner = null } = {}) {
       active = true;
-      sidebar(sidebarInner);
-      header();
-      hero();
-      popups();
-      details();
-      composer();
-      timeline();
-      palette();
-      portals();
-      windowTitle();
+      coverRegion("sidebar", sidebar, sidebarInner);
+      coverRegion("breadcrumb", header);
+      coverRegion("new-thread headline", hero);
+      coverRegion("popups", popups);
+      coverRegion("thread details", details);
+      coverRegion("composer", composer);
+      coverRegion("timeline", timeline);
+      coverRegion("command palette", palette);
+      coverRegion("menus and dialogs", portals);
+      coverRegion("window title", windowTitle);
       watchTitle(true);
     },
     /** Just the popups: hover cards, tooltips, the command palette, menus (called before paint when one opens). */
     applyPopups() {
       if (!active) return;
-      popups();
-      palette();
-      portals();
+      coverRegion("popups", popups);
+      coverRegion("command palette", palette);
+      coverRegion("menus and dialogs", portals);
+    },
+    /** Just what these mutation records changed in a timeline; how many of them it was. */
+    coverTimelineRecords(records) {
+      return active ? coverTimelineRecords(records) : 0;
     },
     /** A stand-in for labels t3+ draws itself (bots). */
     label(kind, real) {
@@ -630,7 +746,8 @@ export function createDemoMode(doc) {
       active = false;
       watchTitle(false);
       restoreTitle();
-      for (const [el, real] of titles) if (el.isConnected) el.setAttribute("title", real);
+      // Only a stand-in still there: a title T3 changed since is already its real one.
+      for (const [el, { real, fake }] of titles) if (el.isConnected && el.getAttribute("title") === fake) el.setAttribute("title", real);
       titles.clear();
       for (const node of touched) {
         const known = memo.get(node);
@@ -638,6 +755,8 @@ export function createDemoMode(doc) {
         memo.delete(node);
       }
       touched.clear();
+      plain = new WeakMap();
+      rowsSeen = new WeakMap();
       for (const img of badges) {
         img.removeAttribute("data-t3plus-demo-badge");
         img.style.removeProperty("--t3plus-demo-badge");

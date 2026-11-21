@@ -9,7 +9,9 @@
     <string>/bin/sh</string>
     <string>__HOME__/.t3plus/autostart.sh</string>
   </array>
-  <!-- T3 Code rewrites this file every time it starts. -->
+  <!-- T3 Code rewrites this file every time it starts. It is in T3's home: ~/.t3, unless
+       T3CODE_HOME (or t3Home in ~/.t3plus/config.json) puts it elsewhere; then this path
+       goes there too (autostart.mjs itself reads T3's home the way the loader does). -->
   <key>WatchPaths</key>
   <array>
     <string>__HOME__/.t3/userdata/server-runtime.json</string>

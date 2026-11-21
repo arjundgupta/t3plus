@@ -5,7 +5,7 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { test } from "node:test";
 import { T3PLUS } from "../src/config.js";
-import { createApp, createDom } from "./helpers.js";
+import { blocksFor, createApp, createDom, ruleBody } from "./helpers.js";
 
 const css = await readFile(new URL("../src/styles/content.css", import.meta.url), "utf8");
 const attr = (v) => String(v).replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;");
@@ -101,7 +101,7 @@ test("a marked bot row is decorated in place; untagged rows and row order are un
   app.stop();
 });
 
-test("the bot avatar is the only element t3+ adds to the sidebar", async () => {
+test("the bot avatar is the only element t3+ adds to the sidebar's rows (and the Status view's button, in its footer)", async () => {
   const dom = createDom("/env1/a1", cardSidebarHtml());
   const doc = dom.window.document;
   const { app } = createApp(dom);
@@ -111,22 +111,16 @@ test("the bot avatar is the only element t3+ adds to the sidebar", async () => {
   const inner = doc.querySelector('[data-slot="sidebar-inner"]');
   assert.deepEqual([...inner.children].map((el) => el.id), ["t3-topbar", "t3-search", "t3-scroll", "t3-footer"], "T3's own layout, untouched");
   const extras = [...inner.querySelectorAll(`[${T3PLUS.ownedAttr}], [id^="t3plus"], [class*="t3plus"]`)];
-  assert.deepEqual(extras.map((el) => el.className), ["t3plus-bot-avatar"]);
-  for (const el of extras) assert.equal(el.closest("[data-sidebar-row]").getAttribute("data-sidebar-row"), "env1:bot1");
+  const footer = doc.getElementById("t3-footer");
+  assert.deepEqual(extras.filter((el) => !footer.contains(el)).map((el) => el.className), ["t3plus-bot-avatar", "t3plus-bot-face"], "the avatar and its face inside it (no badge: Status badges is off)");
+  assert.deepEqual(extras.filter((el) => footer.contains(el)).map((el) => el.className), ["t3plus-status-toggle-row", "t3plus-status-toggle"], "the view's button: no profile dots to sit beside");
+  for (const el of extras.filter((x) => !footer.contains(x))) assert.equal(el.closest("[data-sidebar-row]").getAttribute("data-sidebar-row"), "env1:bot1");
   assert.equal(inner.querySelectorAll("[hidden]").length, 0, "no row is hidden");
   app.stop();
 });
 
 // ---------- content.css sizes ----------
 
-/** Body of the first rule whose selector list is exactly `selector`. */
-function ruleBody(selector) {
-  for (const [, sel, body] of css.matchAll(/([^{}]+)\{([^{}]*)\}/g)) {
-    const clean = sel.replace(/\/\*[\s\S]*?\*\//g, "").trim();
-    if (clean === selector) return body;
-  }
-  assert.fail(`no rule for ${selector}`);
-}
 const rem = (body, prop) => {
   const match = body.match(new RegExp(`(?:^|[;\\s])${prop}:\\s*([\\d.]+)rem`));
   assert.ok(match, `${prop} in rem`);
@@ -142,7 +136,7 @@ test("bot rows: a 1.875rem avatar, name + a one-line truncated preview, same com
   assert.match(preview, /white-space:\s*nowrap/);
   assert.match(preview, /text-overflow:\s*ellipsis/);
   assert.equal(rem(preview, "line-height"), 1.25, "same height as T3's title line");
-  assert.doesNotMatch(css, /line-clamp:\s*2[^}]*\}[^{]*\[data-t3plus-bot/, "no two-line previews");
+  assert.ok(blocksFor("[data-t3plus-bot").every(({ body }) => !/line-clamp:\s*2/.test(body)), "no two-line previews");
   assert.doesNotMatch(css, /\.t3plus-bot-metaline\s*\{/, "no model/computer line");
   assert.match(ruleBody("[data-t3plus-bot-body]"), /height:\s*auto !important/, "branch or not, bot rows are the same height");
   assert.doesNotMatch(css, /\.t3plus-bot-(chip|shelf)/);
@@ -150,5 +144,5 @@ test("bot rows: a 1.875rem avatar, name + a one-line truncated preview, same com
 
 test("bot rows show one status signal: the face, plus T3's colored label (its status icon and t3+'s dot are gone)", () => {
   assert.match(css, /\[data-t3plus-bot-status\] svg:not\(button svg\)\s*\{\s*display:\s*none !important;/);
-  assert.match(css, /\.t3plus-bot-avatar\[data-badge\]::after\s*\{[^}]*image-rendering:\s*pixelated/, "the status badge is a pixel sprite on the avatar's corner");
+  assert.match(css, /\.t3plus-bot-badge\s*\{[^}]*image-rendering:\s*pixelated/, "the status badge is a pixel sprite on the avatar's corner");
 });

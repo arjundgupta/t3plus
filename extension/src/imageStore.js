@@ -1,9 +1,10 @@
 import { IMAGE_LIMITS, STORAGE_KEYS } from "./config.js";
+import { subscribeKey } from "./settings.js";
 
 /** Returns an error message for a file t3+ should not accept, or null. */
 export function validateImageFile(file, limits = IMAGE_LIMITS) {
   if (!file) return "No file selected.";
-  if (!IMAGE_LIMITS.acceptedTypes.includes(file.type)) {
+  if (!limits.acceptedTypes.includes(file.type)) {
     return "Use a PNG, JPEG, WebP, AVIF, or GIF image.";
   }
   if (file.size > limits.maxInputBytes) {
@@ -35,9 +36,12 @@ export function dataUrlToBlob(dataUrl) {
   return new Blob([bytes], { type });
 }
 
-/** A stored image record as the store keeps it, or null when it is not one (for imports). */
-export function normalizeImageRecord(record) {
-  if (!isValidRecord(record)) return null;
+/**
+ * A stored image record as the store keeps it, or null when it is not one or is larger
+ * than `limits` allows (an import into the desktop app, whose cap is smaller).
+ */
+export function normalizeImageRecord(record, limits = IMAGE_LIMITS) {
+  if (!isValidRecord(record, limits)) return null;
   return {
     dataUrl: record.dataUrl,
     name: String(record.name ?? "image").slice(0, 120),
@@ -47,12 +51,14 @@ export function normalizeImageRecord(record) {
   };
 }
 
-function isValidRecord(record) {
+// The store itself checks the largest cap: an image stored under it (one imported before
+// the desktop's smaller cap applied to imports) is still shown, never dropped.
+function isValidRecord(record, limits = IMAGE_LIMITS) {
   return Boolean(
     record &&
       typeof record.dataUrl === "string" &&
       record.dataUrl.startsWith("data:image/") &&
-      record.dataUrl.length <= IMAGE_LIMITS.maxStoredChars,
+      record.dataUrl.length <= limits.maxStoredChars,
   );
 }
 
@@ -78,13 +84,7 @@ export function createImageStore(area, changedEvent) {
             : "That file is not an image t3+ can store.",
         );
       }
-      const stored = {
-        dataUrl: record.dataUrl,
-        name: String(record.name ?? "image").slice(0, 120),
-        width: Number(record.width) || 0,
-        height: Number(record.height) || 0,
-        savedAt: Number(record.savedAt) || Date.now(),
-      };
+      const stored = normalizeImageRecord(record);
       await area.set({ [key]: stored });
       return stored;
     },
@@ -92,14 +92,7 @@ export function createImageStore(area, changedEvent) {
       await area.remove(key);
     },
     subscribe(listener) {
-      if (!changedEvent) return () => {};
-      const handler = (changes, areaName) => {
-        if (areaName !== "local" || !(key in changes)) return;
-        const next = changes[key].newValue;
-        listener(isValidRecord(next) ? next : null);
-      };
-      changedEvent.addListener(handler);
-      return () => changedEvent.removeListener(handler);
+      return subscribeKey(changedEvent, key, (next) => listener(isValidRecord(next) ? next : null));
     },
   };
 }
@@ -117,7 +110,8 @@ function blobToDataUrl(blob) {
  * Decodes, downscales, and re-encodes an uploaded image so it fits the storage
  * cap. Animated GIFs keep only their first frame, which keeps the page static.
  * Browser-only (needs createImageBitmap and OffscreenCanvas).
- * `limits` defaults to the background image limits; bot icons pass BOT_ICON_LIMITS.
+ * `limits` defaults to the background image limits; the desktop build passes
+ * DESKTOP_IMAGE_LIMITS (its images go into T3's own localStorage).
  */
 export async function prepareImageFile(file, limits = IMAGE_LIMITS) {
   const problem = validateImageFile(file, limits);

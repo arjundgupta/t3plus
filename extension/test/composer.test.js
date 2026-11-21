@@ -1,21 +1,27 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { applyComposerTheme, BACKDROP_HOST_SELECTOR, PAINTED_SURFACE_SELECTOR, syncComposerSurfaces } from "../src/composer.js";
+import { applyComposerTheme, BACKDROP_HOST_SELECTOR, LOOK, lookValue, PAINTED_SURFACE_SELECTOR, syncComposerSurfaces } from "../src/composer.js";
 import { T3PLUS } from "../src/config.js";
 import { createApp, createDom, settle, T3_COMPOSER_HTML } from "./helpers.js";
 
-test("applyComposerTheme sets and clears html attributes and variables", () => {
+test("applyComposerTheme sets and clears html attributes, and the values where they are read (not on <html>)", () => {
   const dom = createDom("/", "");
   const doc = dom.window.document;
-  applyComposerTheme(doc, { mode: "half-circle", glass: true, vars: { "--t3plus-core": "30%", "--t3plus-accent": "#112233" } });
+  applyComposerTheme(doc, { mode: "half-circle", glass: true, vars: { "--t3plus-dither": 'url("data:x")', "--t3plus-core": "30%", "--t3plus-accent": "#112233", "--t3plus-glass-blur": "20px" } });
   assert.equal(doc.documentElement.getAttribute(T3PLUS.modeAttr), "half-circle");
   assert.ok(doc.documentElement.hasAttribute(T3PLUS.glassAttr));
-  assert.equal(doc.documentElement.style.getPropertyValue("--t3plus-accent"), "#112233");
+  assert.equal(lookValue(doc, LOOK.glow, "--t3plus-accent"), "#112233", "on the pane's glow layer");
+  assert.equal(lookValue(doc, LOOK.profilePreview, "--t3plus-core"), "30%", "and the Profiles preview's");
+  assert.equal(lookValue(doc, LOOK.glass, "--t3plus-glass-blur"), "20px", "glass on the composer cards");
+  assert.equal(doc.documentElement.style.getPropertyValue("--t3plus-accent"), "", "inherited from <html>, a change restyled every element");
+  assert.equal(doc.documentElement.style.getPropertyValue("--t3plus-dither"), 'url("data:x")', "the tile, the same in every look, stays there");
 
-  applyComposerTheme(doc, { mode: null, glass: false, vars: { "--t3plus-core": null, "--t3plus-accent": null } });
+  applyComposerTheme(doc, { mode: null, glass: false, vars: { "--t3plus-dither": null, "--t3plus-core": null, "--t3plus-accent": null, "--t3plus-glass-blur": null } });
   assert.equal(doc.documentElement.hasAttribute(T3PLUS.modeAttr), false);
   assert.equal(doc.documentElement.hasAttribute(T3PLUS.glassAttr), false);
-  assert.equal(doc.documentElement.style.getPropertyValue("--t3plus-accent"), "");
+  assert.equal(lookValue(doc, LOOK.glow, "--t3plus-accent"), "");
+  assert.equal(lookValue(doc, LOOK.glass, "--t3plus-glass-blur"), "");
+  assert.equal(doc.documentElement.getAttribute("style") ?? "", "");
 });
 
 test("the backdrop host is the conversation pane, never the composer card, and JS paints nothing inline", async () => {
@@ -39,7 +45,7 @@ test("the current T3 composer surface is painted without any tagging", () => {
   const dom = createDom("/env/thread", T3_COMPOSER_HTML);
   const doc = dom.window.document;
   const result = syncComposerSurfaces(doc, true);
-  assert.deepEqual(result, { surfaces: 1, tagged: 0, orphanEditors: 0 });
+  assert.deepEqual(result, { tagged: 0, orphanEditors: 0 });
   assert.ok(doc.querySelector('[data-chat-composer-surface="true"]').matches(PAINTED_SURFACE_SELECTOR));
 });
 

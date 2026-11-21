@@ -3,15 +3,16 @@
 import { spawnSync } from "node:child_process";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { isPublicPath, needsVisualReview, parseDenyPatterns, privateDetailLocations } from "./publish-policy.mjs";
+import { isMain } from "./isMain.mjs";
+import { isPublicPath, metadataText, needsVisualReview, parseDenyPatterns, privateDetailLocations } from "./publish-policy.mjs";
 
 // The repository root (the desktop layout keeps the extension in extension/).
 const root = dirname(dirname(dirname(fileURLToPath(import.meta.url))));
 
-function git(cwd, args, { input, env, raw = false } = {}) {
-  const result = spawnSync("git", args, { cwd, input, env: { ...process.env, ...env }, encoding: raw ? "buffer" : "utf8", maxBuffer: 64 << 20 });
+function git(cwd, args, { input, env, raw = false, maxBuffer = 64 << 20 } = {}) {
+  const result = spawnSync("git", args, { cwd, input, env: { ...process.env, ...env }, encoding: raw ? "buffer" : "utf8", maxBuffer });
   // stderr may contain remote URLs or private values. Keep failures bounded.
   if (result.status !== 0) throw new Error(`git ${args[0]} failed (exit ${result.status ?? "spawn"}).`);
   return raw ? result.stdout : result.stdout.trim();
@@ -41,9 +42,46 @@ export async function publicSnapshot(cwd, ref) {
   }
 }
 
+/** The blobs' contents, in order, from one git process (one each took about 7 times as long). */
+function readBlobs(cwd, hashes) {
+  // A Buffer: with raw output, a string input would be read in the "buffer" encoding.
+  const out = git(cwd, ["cat-file", "--batch"], { input: Buffer.from(hashes.map((hash) => `${hash}\n`).join("")), raw: true, maxBuffer: 1 << 30 });
+  const blobs = [];
+  let at = 0;
+  for (let i = 0; i < hashes.length; i += 1) {
+    // "<hash> blob <size>\n", the content, "\n".
+    const eol = out.indexOf(10, at);
+    const [, type, size] = out.toString("latin1", at, eol).split(" ");
+    if (type !== "blob") throw new Error("git cat-file returned something other than a file.");
+    blobs.push(out.subarray(eol + 1, eol + 1 + Number(size)));
+    at = eol + 2 + Number(size);
+  }
+  return blobs;
+}
+
+/**
+ * What every public file, its name, its text or a picture's metadata, would make public,
+ * as locations only; and the paths of pictures and binaries, for the visual review. The
+ * contents are released when it returns.
+ */
+function scanFiles(cwd, entries, deny) {
+  const problems = [];
+  const visual = new Set();
+  readBlobs(cwd, entries.map((entry) => entry.hash)).forEach((blob, i) => {
+    const { path } = entries[i];
+    const pathProblems = privateDetailLocations("(path)", path, deny);
+    problems.push(...pathProblems);
+    const where = pathProblems.length ? "(private path)" : path;
+    if (!blob.includes(0)) problems.push(...privateDetailLocations(where, blob.toString("utf8"), deny));
+    else problems.push(...privateDetailLocations(`${where} (metadata)`, metadataText(blob), deny));
+    if (needsVisualReview(path, blob)) visual.add(path);
+  });
+  return { problems, visual };
+}
+
 export async function publishPublic({ cwd = root, ref, push = false, imagesChecked = false, message, denyText, log = console.log } = {}) {
-  // An explicit ref is already present (Actions checks out the triggering SHA).
-  // Do not fetch a newer main and accidentally publish a different commit.
+  // An explicit ref names a commit already here: do not fetch a newer main and
+  // accidentally publish a different commit.
   if (!ref) git(cwd, ["fetch", "-q", "origin"]);
   const src = git(cwd, ["rev-parse", "--verify", `${ref ?? "origin/main"}^{commit}`]);
   const { tree, entries } = await publicSnapshot(cwd, src);
@@ -53,21 +91,15 @@ export async function publishPublic({ cwd = root, ref, push = false, imagesCheck
   const problems = privateDetailLocations("(commit message)", commitMessage, deny);
   // The mirror commit carries this machine's git identity: it must pass the same check.
   for (const ident of ["GIT_AUTHOR_IDENT", "GIT_COMMITTER_IDENT"]) problems.push(...privateDetailLocations(`(${ident.toLowerCase()})`, git(cwd, ["var", ident]).replace(/\s+\d+\s+[+-]\d{4}$/, ""), deny));
-  const blobs = new Map();
-  for (const entry of entries) {
-    const pathProblems = privateDetailLocations("(path)", entry.path, deny);
-    problems.push(...pathProblems);
-    const blob = git(cwd, ["cat-file", "blob", entry.hash], { raw: true });
-    blobs.set(entry.path, blob);
-    if (!blob.includes(0)) problems.push(...privateDetailLocations(pathProblems.length ? "(private path)" : entry.path, blob.toString("utf8"), deny));
-  }
+  const scan = scanFiles(cwd, entries, deny);
+  problems.push(...scan.problems);
   if (problems.length) throw new Error(`Private details found; nothing was pushed. Review: ${problems.join(", ")}`);
 
   git(cwd, ["fetch", "-q", "public"]);
   const previous = git(cwd, ["rev-parse", "--verify", "public/main^{commit}"]);
   const changed = git(cwd, ["diff", "--name-only", "--no-renames", "-z", `${previous}^{tree}`, tree], { raw: true })
     .toString("utf8").split("\0").filter(Boolean);
-  const unreviewed = changed.filter((path) => blobs.has(path) && needsVisualReview(path, blobs.get(path)));
+  const unreviewed = changed.filter((path) => scan.visual.has(path));
   if (unreviewed.length && !imagesChecked) throw new Error(`Changed images/binaries need visual review, then --images-checked: ${unreviewed.join(", ")}`);
   log(`${entries.length} public files checked; ${changed.length} changed file(s). Private paths and history are excluded.`);
   if (!push || !changed.length) {
@@ -77,16 +109,15 @@ export async function publishPublic({ cwd = root, ref, push = false, imagesCheck
   const head = git(cwd, ["commit-tree", tree, "-p", previous, "-F", "-"], { input: commitMessage });
   // A normal push rejects races with another publisher; never force the mirror.
   git(cwd, ["push", "-q", "public", `${head}:refs/heads/main`]);
-  log("Public snapshot pushed. Its Release workflow builds the public download.");
+  log(`Public snapshot pushed (${head}).`);
   return { tree, changed, head };
 }
 
-if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+if (isMain(import.meta.url)) {
   const args = process.argv.slice(2);
   const option = (name) => args.includes(name) ? args[args.indexOf(name) + 1] : undefined;
   try {
     await publishPublic({ ref: option("--ref"), push: args.includes("--push"), imagesChecked: args.includes("--images-checked"), message: option("-m") });
-    if (args.includes("--release")) console.log("--release is now handled automatically by GitHub Actions after publishing.");
   } catch (error) {
     console.error(error.message);
     process.exitCode = 1;

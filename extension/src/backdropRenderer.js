@@ -1,5 +1,5 @@
-import { cssColorBytes } from "./color.js";
-import { DITHER_STYLES, ditherRgbInPlace, glowPixelArt, glowSpriteSpan } from "./ditherMath.js";
+import { cssColorBytes, themeStamp } from "./color.js";
+import { DITHER_STYLES, ditherRgbInPlace, glowRenderer, glowSpriteSpan } from "./ditherMath.js";
 
 export { DITHER_STYLES };
 
@@ -51,7 +51,14 @@ export function ditherGrid(width, height, dpr, cellCss = DITHER_CELL_CSS.medium)
   return { cell, cols: Math.ceil(width / cell), rows: Math.ceil(height / cell) };
 }
 
-export function createBackdropRenderer({ win, doc, delayMs = 120, marksPage = true }) {
+/**
+ * `keep`: how many renders are kept to show again at once. Each profile can have its own
+ * glow, in a thread with or without the details card (two sizes): kept fewer than that,
+ * switching round the profiles drew every glow anew (about 165 ms before it showed). A
+ * render is about 90 KB of PNG. `colorBytes` and `createCanvas`: where colors are turned
+ * into bytes and the renders drawn (color.js and a canvas; stand-ins in tests).
+ */
+export function createBackdropRenderer({ win, doc, delayMs = 120, marksPage = true, keep = 18, colorBytes = cssColorBytes, createCanvas = () => doc.createElement("canvas") }) {
   const root = doc.documentElement;
   // The page's renderer marks <html> while its render shows (the CSS fallback steps
   // aside); a second one (a preview in Settings) leaves that mark to it.
@@ -85,24 +92,28 @@ export function createBackdropRenderer({ win, doc, delayMs = 120, marksPage = tr
     return rgb;
   }
   function paintRgb(cssColor, fallback) {
-    return cssColorBytes(doc, cssColor, fallback)?.slice(0, 3) ?? null;
+    return colorBytes(doc, cssColor, fallback)?.slice(0, 3) ?? null;
   }
   // A theme color (T3's --primary or --background) is read from the computed
   // custom property, which already has any var() resolved; the canvas then
   // turns oklch(), color-mix() or hex into bytes. No probe element: adding one
-  // to the pane was a DOM change of its own.
-  const colorCache = new Map(); // name -> { stamp, at, value }
-  const COLOR_TTL_MS = 3000;
-  function themeColor(name, fallback, el) {
-    // T3 switches palettes with data-theme-id (and its --app-theme-* inline values),
-    // light and dark with .dark: any of them is a new theme.
-    const stamp = `${root.className}|${root.getAttribute("data-theme") ?? ""}|${root.getAttribute("data-theme-id") ?? ""}|${root.style.colorScheme}|${root.style.length}`;
-    const at = win.performance?.now?.() ?? Date.now();
+  // to the pane was a DOM change of its own. Read once per theme: T3 switches palettes
+  // with data-theme-id (and its --app-theme-* inline values), light and dark with .dark,
+  // and its system theme follows the OS (color.js themeStamp). t3+'s own values on <html>
+  // are no theme change: counted as one, a profile switch read both colors again.
+  const darkScheme = win.matchMedia?.("(prefers-color-scheme: dark)") ?? null;
+  const theme = () => `${themeStamp(root)}|${darkScheme?.matches ?? ""}`;
+  const colorCache = new Map(); // name -> { stamp, value, until }
+  const UNSET_COLOR_RETRY_MS = 3000;
+  /** `stamp`: the theme now (theme()), worked out once for the colors one update reads. */
+  function themeColor(name, fallback, el, stamp) {
     const hit = colorCache.get(name);
-    if (hit && hit.stamp === stamp && at - hit.at < COLOR_TTL_MS) return hit.value;
-    const value = win.getComputedStyle(el ?? root).getPropertyValue(name).trim() || fallback;
-    colorCache.set(name, { stamp, at, value });
-    return value;
+    if (hit?.stamp === stamp && (hit.until === Infinity || nowMs() < hit.until)) return hit.value;
+    const read = win.getComputedStyle(el ?? root).getPropertyValue(name).trim();
+    // Not there yet (T3's styles still loading): the fallback is drawn, and read again a
+    // little later. Kept for the whole theme, the glow stayed in it until the theme changed.
+    colorCache.set(name, { stamp, value: read || fallback, until: read ? Infinity : nowMs() + UNSET_COLOR_RETRY_MS });
+    return read || fallback;
   }
 
   // ---- The layer ----
@@ -137,14 +148,26 @@ export function createBackdropRenderer({ win, doc, delayMs = 120, marksPage = tr
     }
     return layer;
   }
+  // What was last written on each of the layer's elements, by property: an unchanged value
+  // is not set again. Read back from the style instead, a value comes as the browser
+  // serializes it ("640px" for "640.00px"), never matched, and every update set them all.
+  const written = new WeakMap(); // element -> Map(property -> value)
   const setStyle = (el, name, value) => {
-    if (el.style.getPropertyValue(name) !== value) el.style.setProperty(name, value);
+    let values = written.get(el);
+    if (!values) written.set(el, (values = new Map()));
+    if (values.get(name) === value) return;
+    values.set(name, value);
+    el.style.setProperty(name, value);
+  };
+  const removeStyle = (el, name) => {
+    written.get(el)?.delete(name);
+    el.style.removeProperty(name);
   };
   const px = (v) => `${v.toFixed(3)}px`;
   function showImages() {
     if (!layer || !shown) return;
     if (layer.hidden) layer.hidden = false;
-    layer.setAttribute("data-kind", shown.mode);
+    if (layer.getAttribute("data-kind") !== shown.mode) layer.setAttribute("data-kind", shown.mode);
     if (shown.mode === "half-circle") {
       setStyle(nearEl, "background-image", `url("${shown.url}")`);
       setStyle(wideEl, "background-image", shown.wideUrl ? `url("${shown.wideUrl}")` : "none");
@@ -155,6 +178,21 @@ export function createBackdropRenderer({ win, doc, delayMs = 120, marksPage = tr
       setStyle(layer, "background-size", `${px(box.w)} ${px(box.h)}`);
     }
     markPage(shown.mode);
+  }
+
+  /**
+   * No pane on this page (a Settings page without the preview, Usage): the layer leaves the
+   * page, and nothing is drawn for a pane that is gone. The renders, the one shown and the
+   * decoded image are kept, so coming back shows the glow at once (cleared, the CSS fallback
+   * showed until it was all drawn, and an upload read and decoded, again).
+   */
+  function detach() {
+    if (timer) win.clearTimeout(timer);
+    timer = null;
+    if (scheduledKey) generation += 1; // stops a render under way
+    scheduledKey = null;
+    markPage(null);
+    layer?.remove();
   }
 
   function clear() {
@@ -232,7 +270,8 @@ export function createBackdropRenderer({ win, doc, delayMs = 120, marksPage = tr
         channel.port2.postMessage(0);
       } else win.setTimeout(resolve, 0);
     });
-  async function inSlices(rows, gen, fill) {
+  /** `live()` turning false between slices stops the render (it resolves false then). */
+  async function inSlices(rows, live, fill) {
     let row = 0;
     while (row < rows) {
       const started = nowMs();
@@ -247,21 +286,21 @@ export function createBackdropRenderer({ win, doc, delayMs = 120, marksPage = tr
       }
       if (row < rows) {
         await yieldTask();
-        if (gen !== generation) return false;
+        if (!live()) return false;
       }
     }
     return true;
   }
 
-  async function glowBlob(job, cols, rows, gen) {
-    const canvas = doc.createElement("canvas");
+  async function glowBlob(job, cols, rows, live) {
+    const canvas = createCanvas();
     canvas.width = cols;
     canvas.height = rows;
     const ctx = canvas.getContext("2d");
     if (!ctx) throw new Error("no 2d canvas");
     const pixels = new Uint8ClampedArray(cols * rows * 4);
-    const options = { width: cols, height: rows, rgb: job.accent, intensity: job.intensity, style: job.style, sprite: job.sprite, out: pixels, light: job.light };
-    if (!(await inSlices(rows, gen, (fromRow, toRow) => glowPixelArt({ ...options, fromRow, toRow })))) return null;
+    const fill = glowRenderer({ width: cols, height: rows, rgb: job.accent, intensity: job.intensity, style: job.style, sprite: job.sprite, out: pixels, light: job.light });
+    if (!(await inSlices(rows, live, fill))) return null;
     ctx.putImageData(new win.ImageData(pixels, cols, rows), 0, 0);
     // No blob is a failed render (out of memory, a canvas too large), not a cancelled
     // one: taken for cancelled, every later check drew it again.
@@ -270,63 +309,78 @@ export function createBackdropRenderer({ win, doc, delayMs = 120, marksPage = tr
     return blob;
   }
 
-  async function render(job, gen) {
+  /** `live()`: whether the render is still wanted (false stops it, and it resolves null). */
+  async function render(job, live) {
     if (job.mode === "half-circle") {
       // Both sprites, so switching pages never waits on a render.
-      const near = await glowBlob(job, job.cols, job.rows, gen);
-      if (!near || gen !== generation) return null;
-      const wide = await glowBlob(job, job.wideCols, job.wideRows, gen);
+      const near = await glowBlob(job, job.cols, job.rows, live);
+      if (!near || !live()) return null;
+      const wide = await glowBlob(job, job.wideCols, job.wideRows, live);
       return near && wide ? { near, wide } : null;
     }
-    const canvas = doc.createElement("canvas");
+    const canvas = createCanvas();
     canvas.width = job.cols;
     canvas.height = job.rows;
     const ctx = canvas.getContext("2d", { willReadFrequently: true });
     if (!ctx) throw new Error("no 2d canvas");
     const img = await loadImage(job.imageSrc);
-    if (gen !== generation) return null;
+    if (!live()) return null;
     drawCoverWithScrim(ctx, img, job.cols, job.rows, job);
     const data = ctx.getImageData(0, 0, job.cols, job.rows);
-    if (!(await inSlices(job.rows, gen, (fromRow, toRow) => ditherRgbInPlace(data.data, job.cols, job.rows, 5, job.style, fromRow, toRow)))) return null;
+    if (!(await inSlices(job.rows, live, (fromRow, toRow) => ditherRgbInPlace(data.data, job.cols, job.rows, 5, job.style, fromRow, toRow)))) return null;
     ctx.putImageData(data, 0, 0);
     const blob = await new Promise((resolve) => canvas.toBlob(resolve, "image/png"));
     if (!blob) throw new Error("the image could not be encoded");
     return { near: blob };
   }
 
-  // The last few renders, by key: a panel toggled back and forth shows the
-  // earlier images again instead of drawing them anew.
+  // The last renders, by key: a profile switched back to, or a panel toggled back and
+  // forth, shows the earlier images again instead of drawing them anew.
   const renders = new Map(); // key -> shown
-  const KEEP_RENDERS = 4;
+  // Let any paint that still uses a render's images finish first.
+  const release = (r) => win.setTimeout(() => [r.url, r.wideUrl].forEach((u) => u && win.URL.revokeObjectURL(u)), 1000);
+  /** A render's images as `shown` and `renders` hold them. */
+  const images = (job, blobs) => ({
+    mode: job.mode,
+    url: win.URL.createObjectURL(blobs.near),
+    wideUrl: blobs.wide ? win.URL.createObjectURL(blobs.wide) : null,
+    w: job.cols * job.cell,
+    h: job.rows * job.cell,
+  });
   function remember(key, result) {
+    const before = renders.get(key);
     renders.delete(key);
     renders.set(key, result);
-    while (renders.size > KEEP_RENDERS) {
+    warmed.delete(key); // shown now: kept like any render shown
+    if (before && before !== result && before !== shown) release(before);
+    trim();
+  }
+  /** Back to `keep` renders: the ones used longest ago go. */
+  function trim() {
+    while (renders.size > keep) {
       const [oldKey, old] = renders.entries().next().value;
       renders.delete(oldKey);
-      if (old === shown) continue;
-      // Let any paint that still uses it finish first.
-      win.setTimeout(() => [old.url, old.wideUrl].forEach((u) => u && win.URL.revokeObjectURL(u)), 1000);
+      warmed.delete(oldKey);
+      if (old !== shown) release(old);
     }
   }
   function forgetRenders() {
     for (const r of renders.values()) for (const u of [r.url, r.wideUrl]) if (u) win.URL.revokeObjectURL(u);
     renders.clear();
+    warmed.clear();
   }
 
+  // The render under way: asked for again meanwhile (a size that lasted a moment, then
+  // back), it is the one waited for, not a second one (whose first was never released).
+  let running = null; // { key, gen }
   function run(job, key) {
     timer = null;
     const gen = (generation += 1);
-    render(job, gen)
+    running = { key, gen };
+    render(job, () => gen === generation)
       .then((blobs) => {
         if (!blobs || gen !== generation) return;
-        shown = {
-          mode: job.mode,
-          url: win.URL.createObjectURL(blobs.near),
-          wideUrl: blobs.wide ? win.URL.createObjectURL(blobs.wide) : null,
-          w: job.cols * job.cell,
-          h: job.rows * job.cell,
-        };
+        shown = images(job, blobs);
         remember(key, shown);
         showImages();
         lastKey = key;
@@ -337,7 +391,7 @@ export function createBackdropRenderer({ win, doc, delayMs = 120, marksPage = tr
         // images go too (put back by a later update, it showed the last render over
         // the fallback until the next one landed), and it stays hidden until one does.
         markPage(null);
-        for (const el of [layer, nearEl, wideEl]) el?.style.removeProperty("background-image");
+        for (const el of [layer, nearEl, wideEl]) if (el) removeStyle(el, "background-image");
         if (layer) layer.hidden = true;
         layer?.remove();
         lastKey = key;
@@ -351,30 +405,61 @@ export function createBackdropRenderer({ win, doc, delayMs = 120, marksPage = tr
       })
       .finally(() => {
         if (scheduledKey === key) scheduledKey = null;
+        if (running?.gen === gen) running = null;
       });
   }
 
+  // ---- Warming: glows drawn ahead, while the page is idle ----
+  // The first switch to a profile whose glow differs from every render kept drew it as the
+  // switch landed (15-30 ms of canvas work then). The app has the other profiles' glows
+  // drawn here beforehand, at the pane's size now, so a switch finds its render kept.
+  // Warmed renders take at most half the cache: the other half keeps the renders really
+  // shown (both sizes of the profiles visited), and the one on screen, the newest of those
+  // when it was shown, is never pushed out (fewer than `keep` renders can come after it).
+  const warmed = new Set(); // keys in `renders` drawn ahead and not shown since
+  const warmRoom = Math.floor(keep / 2);
   /**
-   * @param {{ mode: "half-circle" | "image" | null, settings, imageSrc: string | null,
-   *           host: Element | null, cx: number, cy?: number | null, wide?: boolean,
-   *           composerWidth?: number }} o  cx is 0..1 (composer center across the host);
-   *   cy, when set, centers the glow vertically there (new-thread page); composerWidth is
-   *   the message box's width in CSS px.
+   * Draws the glow `settings` would show at `size` into the cache, without showing it.
+   * `size`: { hostRect, cx, composerWidth } as update() takes them. Only while a glow is
+   * shown and no render of its own is asked for or under way; one asked for meanwhile
+   * stops it (it has the page first), and so does `idle()` turning false between slices
+   * (a profile switch began). Resolves "drawn", "kept" (in the cache already, or nothing
+   * to draw: no glow shown, no room left, a failed render) or "busy" (not now: try again
+   * later).
    */
-  function update({ mode, settings, imageSrc, host, cx, cy = null, wide = false, composerWidth = 0 }) {
-    if (!mode || !host || typeof host.getBoundingClientRect !== "function") {
-      if (lastKey || scheduledKey || layer) clear();
-      return;
-    }
-    const rect = host.getBoundingClientRect();
-    if (rect.width < 2 || rect.height < 2) return; // not laid out: keep what is shown
+  async function warm(settings, { hostRect, cx, composerWidth = 0 }, { idle = () => true } = {}) {
+    if (timer || scheduledKey || running) return "busy";
+    const host = layer?.parentElement;
+    if (!host || shown?.mode !== "half-circle" || !hostRect || hostRect.width < 2 || hostRect.height < 2) return "kept";
+    if (warmed.size >= warmRoom) return "kept";
+    const { job, key } = plan({ mode: "half-circle", settings, host, rect: hostRect, cx, composerWidth });
+    if (!key || key === failedKey || renders.has(key)) return "kept";
+    const gen = generation;
+    const live = () => gen === generation && idle();
+    // A render that fails here is left to a real one (which shows the fallback for it).
+    const blobs = await render(job, live).catch(() => null);
+    if (!live()) return "busy";
+    if (!blobs || renders.has(key)) return "kept";
+    renders.set(key, images(job, blobs));
+    warmed.add(key);
+    trim();
+    return "drawn";
+  }
+
+  /**
+   * What `settings` draw in `host` (its box `rect`): the render's job, its key in `renders`
+   * (null: nothing to draw yet) and, for the glow, how far below the pane its center sits
+   * in a thread. update() and warm() both plan here, so a glow drawn ahead is kept under
+   * the key a real update asks for.
+   */
+  function plan({ mode, settings, imageSrc = null, host, rect, cx, composerWidth }) {
     const dpr = win.devicePixelRatio || 1;
     const g = settings.composerGradient;
     const cellCss = DITHER_CELL_CSS[g.ditherSize] ?? DITHER_CELL_CSS.medium;
     const style = DITHER_STYLES.includes(g.ditherStyle) ? g.ditherStyle : DITHER_STYLES[0];
     const i = g.intensity / 100;
-    ensureLayer(host);
     let job;
+    let drop = 0;
     if (mode === "half-circle") {
       // The glow is a sprite (just its halo's box) placed by a transform: where
       // it sits (composer x, bottom edge in a thread, around the composer on the
@@ -401,41 +486,81 @@ export function createBackdropRenderer({ win, doc, delayMs = 120, marksPage = tr
       const wideCols = even(Math.round(near.cols * HERO_SPREAD));
       const wideRows = even(Math.round(near.rows * HERO_SPREAD));
       job = { mode, style, cell, ...near, wideCols, wideRows, sprite };
-      // Place and size the sprites now. A size change shows the previous image
-      // stretched to the new size for the few milliseconds until the new one is drawn.
-      const snap = (v) => `${(Math.round(v * dpr) / dpr).toFixed(2)}px`;
-      const x = snap(cx * rect.width);
-      const y = snap(cy == null ? rect.height + GLOW_BOX.drop * boxW * fitY : cy * rect.height);
-      setStyle(pos, "transform", `translate(${x}, ${y})`);
-      setStyle(nearEl, "width", px(near.cols * cell));
-      setStyle(nearEl, "height", px(near.rows * cell));
-      setStyle(wideEl, "width", px(wideCols * cell));
-      setStyle(wideEl, "height", px(wideRows * cell));
-      if (layer.hasAttribute("data-wide") !== wide) layer.toggleAttribute("data-wide", wide);
+      drop = GLOW_BOX.drop * boxW * fitY;
     } else {
       const { cell, cols, rows } = ditherGrid(rect.width, rect.height, dpr, cellCss);
       // Spectrum colors the glow's tones; an image keeps its own, so it is Bayer there
       // (and switching between the two draws nothing new).
       job = { mode, style: style === "spectrum" ? "bayer" : style, cell, cols, rows, cx: Math.round(cx * 200) / 200 };
-      imageBox = { w: cols * cell, h: rows * cell };
     }
     // A light page (T3's light theme) takes the glow's tones the other way round, and a
     // stronger scrim over an image: the dark ramp read as dirt on white, and an image under
     // the light scrim quantized to mid greys that muted text could not be read on.
-    const page = toRgb(themeColor("--background", "#0a0a0a", host), "#0a0a0a");
+    const stamp = theme();
+    const page = toRgb(themeColor("--background", "#0a0a0a", host, stamp), "#0a0a0a");
     const light = Boolean(page) && 0.2126 * page[0] + 0.7152 * page[1] + 0.0722 * page[2] > 140;
     if (mode === "half-circle") {
-      job.accent = toRgb(g.accent === "theme" ? themeColor("--primary", "#6d7cff", host) : g.accent, "#6d7cff");
+      job.accent = toRgb(g.accent === "theme" ? themeColor("--primary", "#6d7cff", host, stamp) : g.accent, "#6d7cff");
       job.intensity = i;
       job.light = light;
     } else {
-      if (!imageSrc) return;
+      if (!imageSrc) return { job, key: null, drop };
       job.imageSrc = imageSrc;
       job.background = page;
       Object.assign(job, light ? { scrimTop: 1 - i * 0.3, scrimBottom: 1 - i * 0.5 } : { scrimTop: 1 - i * 0.55, scrimBottom: 1 - i * 0.9 });
     }
-    if (!job.accent && !job.background) return;
-    const key = JSON.stringify({ ...job, imageSrc: imageSrc ? `${imageSrc.length}:${imageSrc.slice(0, 64)}:${imageSrc.slice(-64)}` : null });
+    if (!job.accent && !job.background) return { job, key: null, drop };
+    // An image keys by a digest of its source (a data URL can be megabytes); the glow by
+    // its job alone, as the image it is not drawing changes nothing in it.
+    const key = JSON.stringify(mode === "image" ? { ...job, imageSrc: `${imageSrc.length}:${imageSrc.slice(0, 64)}:${imageSrc.slice(-64)}` } : job);
+    return { job, key, drop };
+  }
+
+  /**
+   * Places and sizes the glow's sprites now, its center at `y` down the pane. A size change
+   * shows the previous image stretched to the new size for the few milliseconds until the
+   * new one is drawn.
+   */
+  function placeSprites(job, rect, cx, y, wide) {
+    const dpr = win.devicePixelRatio || 1;
+    const snap = (v) => `${(Math.round(v * dpr) / dpr).toFixed(2)}px`;
+    setStyle(pos, "transform", `translate(${snap(cx * rect.width)}, ${snap(y)})`);
+    setStyle(nearEl, "width", px(job.cols * job.cell));
+    setStyle(nearEl, "height", px(job.rows * job.cell));
+    setStyle(wideEl, "width", px(job.wideCols * job.cell));
+    setStyle(wideEl, "height", px(job.wideRows * job.cell));
+    if (layer.hasAttribute("data-wide") !== wide) layer.toggleAttribute("data-wide", wide);
+  }
+
+  // When the last render was asked for, and its size: a change of color, strength or style
+  // alone (a profile switch, a click) is drawn at once; one of a new size, or one coming
+  // right after the last (a slider being dragged), settles first.
+  let askedAt = -Infinity;
+  let askedSize = "";
+  /**
+   * @param {{ mode: "half-circle" | "image" | null, settings, imageSrc: string | null,
+   *           host: Element | null, hostRect?: DOMRect | null, cx: number, cy?: number | null,
+   *           wide?: boolean, composerWidth?: number }} o  hostRect: the host's box as just
+   *   measured (else read here); cx is 0..1 (composer center across the host); cy, when
+   *   set, centers the glow vertically there (new-thread page); composerWidth is the
+   *   message box's width in CSS px.
+   */
+  function update({ mode, settings, imageSrc, host, hostRect = null, cx, cy = null, wide = false, composerWidth = 0 }) {
+    if (!mode) {
+      if (lastKey || scheduledKey || layer) clear();
+      return;
+    }
+    if (!host || typeof host.getBoundingClientRect !== "function") {
+      detach();
+      return;
+    }
+    const rect = hostRect ?? host.getBoundingClientRect();
+    if (rect.width < 2 || rect.height < 2) return; // not laid out: keep what is shown
+    ensureLayer(host);
+    const { job, key, drop } = plan({ mode, settings, imageSrc, host, rect, cx, composerWidth });
+    if (mode === "half-circle") placeSprites(job, rect, cx, cy == null ? rect.height + drop : cy * rect.height, wide);
+    else imageBox = { w: job.cols * job.cell, h: job.rows * job.cell };
+    if (!key) return;
     if (key === failedKey) {
       // Hidden, not removed: ensureLayer above put it back, and removing it again
       // would be a DOM change on every check.
@@ -469,11 +594,18 @@ export function createBackdropRenderer({ win, doc, delayMs = 120, marksPage = tr
       showImages();
       return;
     }
-    scheduledKey = key;
     if (timer) win.clearTimeout(timer);
-    // First paint immediately; later changes (resizes, slider drags) settle first.
-    timer = win.setTimeout(() => run(job, key), lastKey ? delayMs : 0);
+    timer = null;
+    scheduledKey = key;
+    if (key === running?.key && running.gen === generation) return; // already being drawn
+    const size = `${job.mode}|${job.cell}|${job.cols}|${job.rows}`;
+    const at = nowMs();
+    // The first glow at once; later changes of size (resizes) and quick runs (drags) settle first.
+    const settle = Boolean(lastKey) && (size !== askedSize || at - askedAt < delayMs);
+    askedAt = at;
+    askedSize = size;
+    timer = win.setTimeout(() => run(job, key), settle ? delayMs : 0);
   }
 
-  return { update, clear };
+  return { update, warm, clear };
 }

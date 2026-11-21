@@ -1,6 +1,6 @@
-import { BOT_COLORS, BOT_SHAPES, BOT_SKINS, BOT_STYLES } from "./config.js";
+import { BOT_COLORS, BOT_SHAPES, BOT_SKINS, BOT_STYLES, PICKABLE_BOT_COLORS } from "./config.js";
 import { bayerThreshold } from "./ditherMath.js";
-import { BLOB_NAMES, blobArt } from "./blobAvatars.js";
+import { BLOB_NAMES, blobArt, setBlobRasterizer as setBlobCanvas } from "./blobAvatars.js";
 
 const isBlob = (shape) => BLOB_NAMES.includes(shape);
 
@@ -10,8 +10,8 @@ const isBlob = (shape) => BLOB_NAMES.includes(shape);
 // threshold decides which (the same technique as the background). Two white
 // pixel eyes sit at the shape's visual center and change with the bot's mood.
 //
-// Animated moods are horizontal sprite sheets; CSS steps through the frames
-// (content.css, @keyframes t3plus-bot-sprite). Static moods are one frame.
+// Animated moods are horizontal sprite sheets; the sprite clock (spriteClock.js) steps
+// through the frames. Static moods are one frame.
 
 export const BOT_GRID = 24;
 
@@ -86,7 +86,7 @@ const EYES = {
   robot: [7, 14, 9, 3, 5], // in the head, under the antenna
   heart: [7, 14, 7, 3, 4], // in the two lobes
   shield: [7, 14, 7, 3, 5],
-  drop: [8, 13, 13, 3, 5], // in the belly
+  teardrop: [8, 13, 13, 3, 5], // in the belly
   octagon: [7, 14, 9, 3, 5],
   pentagon: [7, 14, 10, 3, 5],
   pill: [7, 14, 9, 3, 5],
@@ -378,22 +378,88 @@ export function eyeOutline(eyes) {
   return out;
 }
 
-/** SVG path data with horizontal runs merged ("M x y h n v1 h-n z"), keeping sprites small. */
-function runsPath(rows, offsetX) {
-  let d = "";
-  for (const [y, xs] of rows) {
-    xs.sort((a, b) => a - b);
-    for (let i = 0; i < xs.length; ) {
-      let j = i;
-      while (j + 1 < xs.length && xs[j + 1] === xs[j] + 1) j += 1;
-      d += `M${xs[i] + offsetX} ${y}h${j - i + 1}v1h-${j - i + 1}z`;
-      i = j + 1;
+// A face's pixels are looked up by index: a string key ("x,y") made for every pixel of
+// every frame, and Set and Map lookups with it, were most of a cold face's cost (a
+// profile shown with another bot look drew every bot's anew in one check).
+const CELLS = BOT_GRID * BOT_GRID;
+/** A grid of "x,y" cells (those outside it left out): 1 for each one. */
+function cellMask(cells) {
+  const mask = new Uint8Array(CELLS);
+  for (const cell of cells) {
+    const [x, y] = cell.split(",").map(Number);
+    if (x >= 0 && x < BOT_GRID && y >= 0 && y < BOT_GRID) mask[y * BOT_GRID + x] = 1;
+  }
+  return mask;
+}
+const NO_MARK = -1;
+const SKY_MARK = -2; // "t": see-through
+const markGrids = new Map(); // shape -> its markings by cell (skinMarks): a layer, NO_MARK or SKY_MARK
+function markGrid(shape) {
+  let grid = markGrids.get(shape);
+  if (!grid) {
+    grid = new Int8Array(CELLS).fill(NO_MARK);
+    for (const [cell, layer] of skinMarks(shape)) {
+      const [x, y] = cell.split(",").map(Number);
+      grid[y * BOT_GRID + x] = layer === "t" ? SKY_MARK : layer;
+    }
+    markGrids.set(shape, grid);
+  }
+  return grid;
+}
+
+/**
+ * SVG path data per layer for a sprite sheet's pixels, horizontal runs merged
+ * ("M x y h n v1 h-n z"), keeping sprites small: frame by frame, row by row.
+ */
+function sheetPaths(pixels, width, layers) {
+  const d = Array.from({ length: layers }, () => "");
+  for (let f = 0; f < width; f += BOT_GRID) {
+    for (let y = 0; y < BOT_GRID; y += 1) {
+      const row = y * width + f;
+      for (let x = 0; x < BOT_GRID; ) {
+        const index = pixels[row + x];
+        let n = 1;
+        while (x + n < BOT_GRID && pixels[row + x + n] === index) n += 1;
+        d[index] += `M${f + x} ${y}h${n}v1h-${n}z`;
+        x += n;
+      }
     }
   }
   return d;
 }
 
-const cache = new Map();
+// Faces drawn, by color, shape and mood, the most recently used last. Bounded by the size
+// of their pictures: project colors are any #rrggbb and a blob's sheet is a picture of up
+// to a hundred frames (tens of KB), so a window open for days held every face it had ever
+// drawn. The bound is several times what a sidebar and Settings show at once: the faces
+// on screen, asked for in every check, are never the ones let go.
+const ART_CACHE_CHARS = 16 * 1024 * 1024;
+const cache = new Map(); // key -> { url, frames, duration }
+let cachedChars = 0;
+/** The face cached under `key`, now the most recently used, or undefined. */
+function cachedArt(key) {
+  const art = cache.get(key);
+  if (art !== undefined) {
+    cache.delete(key);
+    cache.set(key, art);
+  }
+  return art;
+}
+/** Caches `art` under `key` (a new key), letting the least recently used faces go past the bound. */
+function keepArt(key, art) {
+  cache.set(key, art);
+  cachedChars += art.url.length;
+  while (cachedChars > ART_CACHE_CHARS && cache.size > 1) {
+    const [oldKey, old] = cache.entries().next().value;
+    cache.delete(oldKey);
+    cachedChars -= old.url.length;
+  }
+  return art;
+}
+function clearArt() {
+  cache.clear();
+  cachedChars = 0;
+}
 
 // In the browser the sprites are encoded as tiny PNGs (about 1-2 KB, against
 // up to ~40 KB of per-pixel SVG paths for an 8-frame animation): the content
@@ -402,22 +468,41 @@ const cache = new Map();
 let pixelEncoder = null;
 export function setBotArtEncoder(encode) {
   pixelEncoder = typeof encode === "function" ? encode : null;
-  cache.clear();
+  clearArt();
   badgeCache.clear();
+}
+/** How blob sheets are drawn into pictures (blobAvatars.js setBlobRasterizer); null: as SVG. */
+export function setBlobRasterizer(fn) {
+  setBlobCanvas(fn);
+  clearArt();
 }
 
 const HEX_COLOR = /^#[0-9a-f]{6}$/i;
 const mixHex = (hex, toward, t) =>
   `#${[1, 3, 5].map((i) => Math.round(Number.parseInt(hex.slice(i, i + 2), 16) * (1 - t) + toward * t).toString(16).padStart(2, "0")).join("")}`;
 
+// The ramps built around project colors: asked for per bot in every check, built once each.
+const hexStops = new Map(); // "#rrggbb" -> frozen ramp
 /**
  * The light -> mid -> dark ramp for a bot color: one of the named ramps
  * (BOT_COLORS), or one built around any #rrggbb (a project's badge color).
  */
 export function botStops(color) {
   if (Object.hasOwn(BOT_COLORS, color ?? "")) return BOT_COLORS[color].stops;
-  if (typeof color === "string" && HEX_COLOR.test(color)) return [mixHex(color, 255, 0.55), color.toLowerCase(), mixHex(color, 0, 0.62)];
-  return BOT_COLORS.blue.stops;
+  if (typeof color !== "string" || !HEX_COLOR.test(color)) return BOT_COLORS.blue.stops;
+  let stops = hexStops.get(color);
+  if (!stops) {
+    if (hexStops.size >= 64) hexStops.clear();
+    stops = Object.freeze([mixHex(color, 255, 0.55), color.toLowerCase(), mixHex(color, 0, 0.62)]);
+    hexStops.set(color, stops);
+  }
+  return stops;
+}
+
+/** A bot color as art is cached under: a BOT_COLORS name, a lowercase #rrggbb, else "blue". */
+function botColorKey(color) {
+  if (Object.hasOwn(BOT_COLORS, color ?? "")) return color;
+  return typeof color === "string" && HEX_COLOR.test(color) ? color.toLowerCase() : "blue";
 }
 
 /** Whether `shape` brings its own colors (BOT_SKINS), so the bot's color is unused. */
@@ -429,51 +514,46 @@ export function botShapeHasOwnColors(shape) {
  * The face for (color, shape, mood). Ball shapes (BOT_SKINS) ignore `color`.
  * @returns {{ url: string, frames: number, duration: number }} url is a CSS url("data:...").
  */
-export function botArt(color, shape = "circle", mood = "awake") {
+export function botArt(color, shape = "circle", mood = "awake", { vector = false } = {}) {
   const s = Object.hasOwn(BOT_SHAPES, shape) ? shape : "circle";
   if (isBlob(s)) {
     // Blobs: a flat fill in the color's middle stop, black capsule eyes (blobAvatars.js).
-    const c = Object.hasOwn(BOT_COLORS, color ?? "") ? color : typeof color === "string" && HEX_COLOR.test(color) ? color.toLowerCase() : "blue";
+    // `vector`: an SVG sheet even where sheets are drawn as pictures (a face shown large).
+    const c = botColorKey(color);
     const m = Object.hasOwn(MOODS, mood) ? mood : "awake";
-    const key = `blob:${c}:${s}:${m}`;
-    if (!cache.has(key)) cache.set(key, blobArt(botStops(c)[1], s, m));
-    return cache.get(key);
+    const key = `blob:${c}:${s}:${m}${vector ? ":v" : ""}`;
+    return cachedArt(key) ?? keepArt(key, blobArt(botStops(c)[1], s, m, { vector }));
   }
   const skin = Object.hasOwn(BOT_SKINS, s) ? BOT_SKINS[s] : null;
   // A ball shape has its own colors: the bot's color does not change it.
-  const c = skin ? "" : Object.hasOwn(BOT_COLORS, color ?? "") ? color : typeof color === "string" && HEX_COLOR.test(color) ? color.toLowerCase() : "blue";
+  const c = skin ? "" : botColorKey(color);
   const m = Object.hasOwn(MOODS, mood) ? mood : "awake";
   const key = `${c}:${s}:${m}`;
-  if (cache.has(key)) return cache.get(key);
+  const hit = cachedArt(key);
+  if (hit) return hit;
   const stops = skin ? skin.stops : botStops(c);
-  const marks = skinMarks(s);
+  const marks = markGrid(s);
   const { frames, duration } = MOODS[m];
   // Palette: 3 stops, white (eyes), a skin's extra colors, and transparent (sky around a ringed planet).
-  const hasSky = [...marks.values()].includes("t");
+  const hasSky = marks.includes(SKY_MARK);
   const fills = [...stops, "#ffffff", ...(skin?.extra ?? []), ...(hasSky ? ["transparent"] : [])];
   const clear = hasSky ? fills.length - 1 : -1;
-  const layers = fills.map(() => new Map());
-  let d = fills.map(() => "");
+  const rim = skin?.outline ?? 2;
   const width = BOT_GRID * frames.length;
   const pixels = new Uint8Array(width * BOT_GRID);
   frames.forEach((frame, f) => {
-    const eyes = eyeCells(s, frame);
+    const eyeSet = eyeCells(s, frame);
+    const eyes = cellMask(eyeSet);
+    const outline = cellMask(eyeOutline(eyeSet));
     const lit = skin?.lift ? { ...frame, boost: (frame.boost ?? 0) + skin.lift } : frame;
-    const outline = eyeOutline(eyes);
-    for (const layer of layers) layer.clear();
     for (let y = 0; y < BOT_GRID; y += 1) {
       for (let x = 0; x < BOT_GRID; x += 1) {
-        const cell = `${x},${y}`;
+        const i = y * BOT_GRID + x;
         // Eyes are white with a 1-pixel outline in the darkest stop, so they read on any part of the gradient.
-        const mark = marks.get(cell);
-        const index = eyes.has(cell) ? 3 : outline.has(cell) ? (skin?.outline ?? 2) : mark === "t" ? clear : (mark ?? ditherIndex(x, y, lit));
-        pixels[y * width + f * BOT_GRID + x] = index;
-        const row = layers[index].get(y) ?? [];
-        row.push(x);
-        layers[index].set(y, row);
+        const mark = marks[i];
+        pixels[y * width + f * BOT_GRID + x] = eyes[i] ? 3 : outline[i] ? rim : mark === SKY_MARK ? clear : mark !== NO_MARK ? mark : ditherIndex(x, y, lit);
       }
     }
-    d = d.map((path, i) => path + runsPath(layers[i], f * BOT_GRID));
   });
   let encoded = null;
   try {
@@ -484,18 +564,38 @@ export function botArt(color, shape = "circle", mood = "awake") {
   let url;
   if (encoded) url = `url("${encoded}")`;
   else {
-    const body = d.map((path, i) => (path && i !== clear ? `<path fill="${fills[i]}" d="${path}"/>` : "")).join("");
+    // Only without an encoder (or when it fails) are the pixels drawn as SVG paths.
+    const body = sheetPaths(pixels, width, fills.length).map((path, i) => (path && i !== clear ? `<path fill="${fills[i]}" d="${path}"/>` : "")).join("");
     const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${width} ${BOT_GRID}" shape-rendering="crispEdges">${body}</svg>`;
     url = `url("data:image/svg+xml,${encodeURIComponent(svg)}")`;
   }
-  const art = { url, frames: frames.length, duration };
-  cache.set(key, art);
-  return art;
+  return keepArt(key, { url, frames: frames.length, duration });
 }
 
-/** The neutral (eyes open) face as a CSS url(): Settings swatches. */
+/**
+ * A face that does not move, for (color, shape, mood): one frame. A blob at rest (its
+ * eyes for the mood); a pixel face as the mood draws it, or open-eyed for a moving one. Subagents under their bot.
+ * @returns {{ url: string, frames: 1 }}
+ */
+export function botStill(color, shape = "circle", mood = "awake") {
+  const s = Object.hasOwn(BOT_SHAPES, shape) ? shape : "circle";
+  const m = Object.hasOwn(MOODS, mood) ? mood : "awake";
+  if (isBlob(s)) {
+    const c = botColorKey(color);
+    const key = `still:blob:${c}:${s}:${m}`;
+    return cachedArt(key) ?? keepArt(key, { url: blobArt(botStops(c)[1], s, m, { still: true }).url, frames: 1 });
+  }
+  // A moving pixel mood (working, attention) stands still as the open-eyed face.
+  const art = botArt(color, s, MOODS[m].frames.length === 1 ? m : "awake");
+  return { url: art.url, frames: 1 };
+}
+
+/**
+ * The neutral (eyes open) face as a CSS url(): Settings swatches. One frame: a swatch
+ * does not move (an animated blob sheet squeezed the whole strip into it).
+ */
 export function botFillUrl(color, shape = "circle") {
-  return botArt(color, shape, "awake").url;
+  return botStill(color, shape, "awake").url;
 }
 
 /** clip-path value for `shape`. */
@@ -604,14 +704,18 @@ const badgeCache = new Map();
 
 /**
  * The badge for a row status (and T3's own label, which tells a question from
- * an approval). @returns {{ url: string, frames: number, duration: number }}
+ * an approval). With a `color` (Status colors: the face is painted in its status's
+ * color), the tile takes that color's light and mid stops: the badge's own tones
+ * (blue for working) would read as another status beside a yellow face.
+ * @returns {{ url: string, frames: number, duration: number }}
  */
-export function botBadge(status, label = "") {
+export function botBadge(status, label = "", color = null) {
   const tone = Object.hasOwn(BADGE_TONES, status ?? "") ? status : "idle";
+  const tint = color === null ? null : botColorKey(color);
   const { frames, duration } = badgeFrames(tone, label);
-  const key = `${tone}:${frames.map((f) => `${f.glyph ?? f.dots}${f.hop ? "^" : ""}`).join(",")}:${pixelEncoder ? "p" : "s"}`;
+  const key = `${tone}:${tint ?? ""}:${frames.map((f) => `${f.glyph ?? f.dots}${f.hop ? "^" : ""}`).join(",")}:${pixelEncoder ? "p" : "s"}`;
   if (badgeCache.has(key)) return badgeCache.get(key);
-  const fills = ["transparent", "#0a0a0a", ...BADGE_TONES[tone], "#ffffff"];
+  const fills = ["transparent", "#0a0a0a", ...(tint ? botStops(tint).slice(0, 2) : BADGE_TONES[tone]), "#ffffff"];
   const width = BADGE_W * frames.length;
   const pixels = new Uint8Array(width * BADGE_H);
   frames.forEach((frame, f) => {
@@ -643,13 +747,12 @@ let botStyle = "classic";
 export function setBotStyle(style) {
   botStyle = Object.hasOwn(BOT_STYLES, style ?? "") ? style : "classic";
 }
-export function currentBotStyle() {
-  return botStyle;
-}
 
-// Classic: the shapes of no themed set (not the balls, planets, fruit or blobs).
+// Classic: the shapes of no themed set (not the balls, planets, fruit or blobs). Worked out
+// once: the style's shapes are asked for per bot in every check.
 const themedShapes = new Set(Object.values(BOT_STYLES).flatMap((s) => s.shapes ?? []));
-const styleShapes = () => BOT_STYLES[botStyle]?.shapes ?? Object.keys(BOT_SHAPES).filter((n) => !Object.hasOwn(BOT_SKINS, n) && !themedShapes.has(n));
+const CLASSIC_SHAPES = Object.freeze(Object.keys(BOT_SHAPES).filter((n) => !Object.hasOwn(BOT_SKINS, n) && !themedShapes.has(n)));
+const styleShapes = () => BOT_STYLES[botStyle]?.shapes ?? CLASSIC_SHAPES;
 const keyHash = (key) => {
   let hash = 7;
   for (const ch of String(key)) hash = (hash * 33 + ch.charCodeAt(0)) >>> 0;
@@ -660,31 +763,40 @@ const keyHash = (key) => {
 // its hashed shape, or the next free one. A bot then keeps the shape it was
 // given, on screen or the last time it was: re-dealt whenever another row came
 // or went (a folder collapsed, Settled opened), faces changed under people's eyes.
-let assigned = new Map();
-let remembered = new Map(); // bots no longer on screen -> the shape they had (bounded)
-let assignedFor = "";
-let assignedStyle = "";
+// Each style keeps its own deal while another is shown: a profile with its own bot
+// style dealt afresh on every switch back to it changed nearly every face there.
+const deals = new Map(); // style -> { assigned, remembered (no longer on screen; bounded), signature, keys (as last asked) }
+function dealOf(style) {
+  let deal = deals.get(style);
+  if (!deal) deals.set(style, (deal = { assigned: new Map(), remembered: new Map(), signature: "", keys: [] }));
+  return deal;
+}
+const sameKeys = (a, b) => a.length === b.length && a.every((key, i) => key === b[i]);
 export function assignBotShapes(keys) {
+  const deal = dealOf(botStyle);
+  // The same rows in the same order as last time (nearly every check): nothing to deal.
+  if (sameKeys(keys, deal.keys)) return;
+  deal.keys = [...keys];
   const names = styleShapes();
   const sorted = [...new Set(keys)].sort();
-  const signature = `${botStyle}|${sorted.join(",")}`;
-  if (signature === assignedFor) return;
-  assignedFor = signature;
-  if (assignedStyle !== botStyle) {
-    // Another style is another set of shapes: dealt afresh.
-    assignedStyle = botStyle;
-    assigned = new Map();
-    remembered = new Map();
-  }
+  const signature = sorted.join(",");
+  if (signature === deal.signature) return;
+  deal.signature = signature;
+  const { assigned, remembered } = deal;
   const next = new Map();
   const used = new Set();
   // More bots than shapes: some share one anyway, so a kept shape may repeat.
   const crowded = sorted.length > names.length;
-  for (const key of sorted) {
-    const had = assigned.get(key) ?? remembered.get(key);
-    if (had && names.includes(had) && (crowded || !used.has(had))) {
-      next.set(key, had);
-      used.add(had);
+  // Those on screen last time first, then those back: one back whose old shape another
+  // was given meanwhile takes a new one. Taken in key order, it changed that other's face
+  // on screen, as a peek at another profile dealt its bots (app.js statusCopy).
+  for (const had of [assigned, remembered]) {
+    for (const key of sorted) {
+      const shape = had.get(key);
+      if (shape && names.includes(shape) && (crowded || !used.has(shape))) {
+        next.set(key, shape);
+        used.add(shape);
+      }
     }
   }
   for (const key of sorted) {
@@ -697,21 +809,23 @@ export function assignBotShapes(keys) {
   for (const [key, shape] of assigned) if (!next.has(key)) remembered.set(key, shape);
   for (const key of next.keys()) remembered.delete(key);
   while (remembered.size > 500) remembered.delete(remembered.keys().next().value);
-  assigned = next;
+  deal.assigned = next;
 }
 
 /** A stable default shape for a bot that has none picked, so bots do not all look alike: from the current style's set. */
 export function defaultBotShape(key) {
   const names = styleShapes();
-  const picked = assigned.get(key) ?? remembered.get(key);
+  const deal = deals.get(botStyle);
+  const picked = deal?.assigned.get(key) ?? deal?.remembered.get(key);
   if (picked && names.includes(picked)) return picked;
   return names[keyHash(key) % names.length];
 }
 
+// The colors a new bot may get (gray is no one's by chance).
+const DEFAULT_COLOR_NAMES = Object.freeze(PICKABLE_BOT_COLORS.filter((n) => n !== "gray"));
 /** A stable default color for a bot that has none saved, so new bots differ. */
 export function defaultBotColor(key) {
-  const names = Object.keys(BOT_COLORS).filter((n) => n !== "gray");
   let hash = 0;
   for (const ch of String(key)) hash = (hash * 31 + ch.charCodeAt(0)) >>> 0;
-  return names[hash % names.length];
+  return DEFAULT_COLOR_NAMES[hash % DEFAULT_COLOR_NAMES.length];
 }

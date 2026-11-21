@@ -40,19 +40,23 @@ You need macOS, the T3 Code desktop app and Node 22.2+.
 
 Every thread becomes a little pixel-art bot with a face, its name and its latest message.
 
-- **Moods**: eyes closed when idle, animated while the thread works, with a status badge on the corner.
-- **Subagents**: mini robots line up under a bot while it runs subagents, and finished ones go dark.
+- **Moods**: eyes closed when idle, animated while the thread works.
+- **Status badges** (Settings → t3+, off to start): a small tile on each bot's face that shows what the thread is doing.
+- **Subagents**: small faces line up under a bot while it runs subagents, in the bot's own shape and color (or ones you pick in Settings → t3+ → Subagents); finished ones dim.
+- **Status colors** (Settings → t3+): in the sidebar's Status view every bot wears its status's color, orange when it needs you, red failed, amber working, green done and blue idle. Everywhere else bots keep their own colors, and balls, planets and fruit always do.
 - Pick a shape and color per bot in Settings, or let each one take its project's color.
 
 </td>
 </tr>
 </table>
 
-Four styles for bots you haven't customized:
+Five styles for bots you haven't customized (Settings → t3+ → Bot style):
 
 | Classic | Sports | Space | Fruit |
 |:---:|:---:|:---:|:---:|
 | <img src="media/style-classic.png" width="180" alt="Classic bots"> | <img src="media/style-sports.png" width="180" alt="Sports bots"> | <img src="media/style-space.png" width="180" alt="Space bots"> | <img src="media/style-fruit.png" width="180" alt="Fruit bots"> |
+
+And **Blobs**: soft blobs in the bot's color with two capsule eyes, always gently alive. They glance around, blink and breathe, and show the mood.
 
 ## Glow and glass
 
@@ -99,8 +103,10 @@ Everything is read on your Mac: T3's own database, T3's local API and your Claud
 Dots at the bottom of the sidebar, like Dia's profiles. Each profile shows its own projects.
 
 - Click a dot, swipe sideways with two fingers, or press **Ctrl+Shift+1–9**.
-- Drag a project onto a dot to move it.
+- Drag a project onto a dot, or right-click it → **Move to profile**, to move it.
 - Right-click a dot to rename or delete it.
+- The button at the right of the dots shows the **Status view**: the profile's threads grouped by what they need (Needs you, Working, Done, Idle).
+- Most t3+ settings can differ per profile or per machine: pick one at the top of Settings → t3+ ("Applying t3+ for … on …"). Turning profiles on or off and screenshot mode are the same everywhere, as are each bot's own look and backups.
 
 </td>
 </tr>

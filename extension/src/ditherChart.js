@@ -1,22 +1,13 @@
 import { DITHER_CELL_CSS } from "./backdropRenderer.js";
+import { themeStamp } from "./color.js";
+import { BAYER_8 } from "./ditherMath.js";
 
 // Dither-kit area fills for the widget charts and T3's own Usage chart. The
 // SVG keeps the smooth path for hover math and as the no-canvas fallback; this
 // paints the visible fill as square cells on the same pixel grid as the
-// backdrop (whole device pixels, sized by --t3plus-dither-cell), with an
+// backdrop (whole device pixels, its cell size from the settings), with an
 // ordered Bayer "fade": dense just under the line, dissolving toward the
 // baseline over each area's own height.
-
-const BAYER_8 = [
-  [0, 48, 12, 60, 3, 51, 15, 63],
-  [32, 16, 44, 28, 35, 19, 47, 31],
-  [8, 56, 4, 52, 11, 59, 7, 55],
-  [40, 24, 36, 20, 43, 27, 39, 23],
-  [2, 50, 14, 62, 1, 49, 13, 61],
-  [34, 18, 46, 30, 33, 17, 45, 29],
-  [10, 58, 6, 54, 9, 57, 5, 53],
-  [42, 26, 38, 22, 41, 25, 37, 21],
-];
 
 /** Fill density at a depth through an area (0 = just under its line, 1 = baseline). */
 export function ditherDensity(depth) {
@@ -71,34 +62,38 @@ export function ditherCells({ cols, rows, series }) {
   return { fill, edge };
 }
 
+/** The attribute a plot gets once its canvas has painted: CSS then hides the SVG's own fills. */
+export const PAINTED_ATTR = "data-t3plus-painted";
+
 /**
  * A canvas behind a plot's SVG. `series` points are fractions of the plot box.
- * The canvas's parent gets `data-t3plus-dithered` once it has painted, which
- * is what CSS uses to hide the SVG's own fills.
+ * The canvas's parent gets PAINTED_ATTR once it has painted. `cell`: the
+ * backdrop's dither cell size in CSS px (settings composerGradient.ditherSize).
  * @param {Document} doc
  * @param {{ points: [number, number][], color: string, fillAlpha?: number, lineAlpha?: number, dashed?: boolean }[]} series
  */
-export function createDitherCanvas(doc, series, { className = "t3plus-w-dither" } = {}) {
+export function createDitherCanvas(doc, series, { className = "t3plus-w-dither", cell: cellCss = DITHER_CELL_CSS.medium } = {}) {
   const win = doc.defaultView;
   const canvas = doc.createElement("canvas");
   canvas.className = className;
   canvas.setAttribute("aria-hidden", "true");
   let key = "";
+  // Its size as its ResizeObserver last reported it: a check's paint (one that changes
+  // nothing, mostly) reads no layout. Read from the canvas only until it has reported.
+  let size = null;
 
-  function paint() {
+  /** Draws the fill if anything it depends on changed (`cell`: a new cell size). */
+  function paint({ cell: nextCell = cellCss } = {}) {
+    cellCss = nextCell;
     if (!canvas.isConnected || !win) return false;
-    const width = canvas.clientWidth;
-    const height = canvas.clientHeight;
+    const width = size?.width ?? canvas.clientWidth;
+    const height = size?.height ?? canvas.clientHeight;
     if (!width || !height) return false;
     const dpr = win.devicePixelRatio || 1;
-    const raw = parseFloat(win.getComputedStyle(doc.documentElement).getPropertyValue("--t3plus-dither-cell"));
-    const cellCss = Number.isFinite(raw) && raw > 0 ? raw : DITHER_CELL_CSS.medium;
     const cell = Math.max(2, Math.round(cellCss * dpr)); // whole device px, same rule as the backdrop
     // The theme is part of the key: after a switch (dark to light at sunset) the old
     // colors stayed, a white Codex line on a white page. T3 changes themes on <html>.
-    const root = doc.documentElement;
-    const theme = `${root.className}|${root.getAttribute("data-theme") ?? ""}|${root.getAttribute("data-theme-id") ?? ""}|${root.style.length}`;
-    const next = [width, height, dpr, cell, theme].join();
+    const next = [width, height, dpr, cell, themeStamp(doc.documentElement)].join();
     if (next === key) return true;
     const ctx = canvas.getContext?.("2d");
     if (!ctx) return false;
@@ -126,21 +121,28 @@ export function createDitherCanvas(doc, series, { className = "t3plus-w-dither" 
       ctx.fillRect((i % cols) * cell, y0 + Math.floor(i / cols) * cell, cell, cell);
     }
     ctx.globalAlpha = 1;
-    // Hide the SVG's fills only when there is something to show instead.
-    canvas.parentElement?.toggleAttribute("data-t3plus-dithered", series.length > 0);
+    // Hide the SVG's fills only when there is something to show instead. Not the
+    // dithered glow's attribute: on <html> too, its every toggle restyled each <path>.
+    canvas.parentElement?.toggleAttribute(PAINTED_ATTR, series.length > 0);
     return true;
   }
 
-  const observer = win?.ResizeObserver ? new win.ResizeObserver(() => paint()) : null;
+  const observer = win?.ResizeObserver
+    ? new win.ResizeObserver((entries) => {
+        const box = entries.at(-1).contentRect;
+        size = { width: box.width, height: box.height };
+        paint();
+      })
+    : null;
   observer?.observe(canvas);
   return {
     canvas,
     paint,
-    /** New data for the same canvas (T3 re-rendered its chart). */
-    setSeries(next) {
+    /** New data for the same canvas (T3 re-rendered its chart); `options` as paint's. */
+    setSeries(next, options) {
       series = next;
       key = "";
-      return paint();
+      return paint(options);
     },
     disconnect: () => observer?.disconnect(),
   };

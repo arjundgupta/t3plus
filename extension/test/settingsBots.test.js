@@ -1,17 +1,16 @@
 import assert from "node:assert/strict";
-import { after, test } from "node:test";
+import { test } from "node:test";
 import { JSDOM } from "jsdom";
 import { createAppearancePanel } from "../src/appearancePanel.js";
 import { resolveBotPresentation } from "../src/bots.js";
 import { DEFAULT_SETTINGS } from "../src/config.js";
+import { closeWhenDone } from "./helpers.js";
 
 // Settings -> t3+ -> Bots on its own: a chip per bot, one picker open at a time.
-const windows = [];
-after(() => windows.forEach((w) => w.close())); // even when a test fails part way
 
 function setup() {
   const dom = new JSDOM("<!doctype html><html><body></body></html>", { pretendToBeVisual: true });
-  windows.push(dom.window);
+  closeWhenDone(dom.window); // even when a test fails part way
   const doc = dom.window.document;
   const calls = [];
   const actions = new Proxy({}, { get: (_, name) => (...args) => calls.push([name, ...args]) });
@@ -113,7 +112,7 @@ test("leaving Settings clears the search; same-named bots read apart by their la
   const search = t.doc.querySelector(".t3plus-bots-search");
   search.value = "x";
   search.dispatchEvent(new t.dom.window.Event("input", { bubbles: true }));
-  t.panel.closeBotEditor();
+  t.panel.leave();
   assert.equal(search.value, "");
   assert.equal(names(t).length, 2);
   t.show([t.bot("e:1", "Quiet")]);

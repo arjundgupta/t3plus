@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { decorateBotBreadcrumb, decorateBotHoverCards } from "../src/bots.js";
 import { STORAGE_KEYS, T3PLUS } from "../src/config.js";
+import { createDemoMode } from "../src/demoMode.js";
 import { createNameBook, fakeCode, fakeProse, isNeutral, projectInitials } from "../src/demoText.js";
+import { stopSprites } from "../src/spriteClock.js";
 import { BOT_TITLE, createApp, createDom, createFakeChromeStorage, settle, sidebarHtml } from "./helpers.js";
 
 test("stand-ins are stable, distinct per real name, and keep generic values", () => {
@@ -200,8 +203,7 @@ test("screenshot mode covers text React changes in place (a streaming reply), no
   app.stop();
 });
 
-test("screenshot mode covers T3's thread hover card by what each line is: project, machine, branch (and its tooltip), PR titles; the model and T3's sentences stay", async () => {
-  const { createDemoMode } = await import("../src/demoMode.js");
+test("screenshot mode covers T3's thread hover card by what each line is: project, machine, branch (and its tooltip), PR titles; the model and T3's sentences stay", () => {
   // ThreadHoverCard's lines, in T3's order; any of them can be missing.
   const line = (inner, cls = "") => `<div class="flex min-w-0 items-center gap-2 ${cls}">${inner}</div>`;
   const dom = createDom("/", `<div data-slot="tooltip-popup"><div data-slot="tooltip-viewport"><div class="flex min-w-0 max-w-80 flex-col gap-2 px-1 py-2">
@@ -242,8 +244,7 @@ test("screenshot mode covers T3's thread hover card by what each line is: projec
   assert.equal(text("pr"), "Fix Acme Corp payroll export");
 });
 
-test("an open bot hover card follows screenshot mode: its name switches to the stand-in and back", async () => {
-  const { decorateBotHoverCards } = await import("../src/bots.js");
+test("an open bot hover card follows screenshot mode: its name switches to the stand-in and back", () => {
   const dom = createDom("/", `<div data-slot="tooltip-popup"><div class="min-w-0 truncate text-xs font-medium" id="t">Night Shift</div></div>`);
   const doc = dom.window.document;
   const bot = (label) => ({ key: "env1:b1", titleLabel: label, status: "working", thread: { title: "Night Shift" } });
@@ -251,13 +252,10 @@ test("an open bot hover card follows screenshot mode: its name switches to the s
   assert.equal(doc.getElementById("t").getAttribute("data-t3plus-bot-hover-label"), "Night Shift");
   decorateBotHoverCards(doc, new Map([["Night Shift", bot("Inbox Zero")]]), {}); // screenshot mode on
   assert.equal(doc.getElementById("t").getAttribute("data-t3plus-bot-hover-label"), "Inbox Zero");
-  const { stopSprites } = await import("../src/spriteClock.js");
   stopSprites(); // a working bot's face animates; stop its clock
 });
 
-test("screenshot mode: a name T3 splits in two spans gets one stand-in; a draft row's unsent words are covered; the breadcrumb is clean after a bot thread", async () => {
-  const { createDemoMode } = await import("../src/demoMode.js");
-  const { decorateBotBreadcrumb } = await import("../src/bots.js");
+test("screenshot mode: a name T3 splits in two spans gets one stand-in; a draft row's unsent words are covered; the breadcrumb is clean after a bot thread", () => {
   const dom = createDom("/", `
     <nav aria-label="Thread breadcrumb"><ol>
       <li><button><span data-slot="workspace-breadcrumb-text" id="crumb"><span class="min-w-0 truncate">acme-payroll-</span><span class="shrink-0">service</span></span></button></li>
@@ -283,12 +281,10 @@ test("screenshot mode: a name T3 splits in two spans gets one stand-in; a draft 
   decorateBotBreadcrumb(doc, null);
   const h = doc.getElementById("h");
   assert.deepEqual([...h.attributes].map((a) => a.name), ["id"], [...h.attributes].map((a) => a.name).join(","));
-  const { stopSprites } = await import("../src/spriteClock.js");
   stopSprites();
 });
 
 test("screenshot mode: when T3 writes the real window title back, it is covered again at once; palette actions name projects by stand-in", async () => {
-  const { createDemoMode } = await import("../src/demoMode.js");
   const dom = createDom("/", `<div data-command-palette="true"><div data-slot="command-item" id="act"><span class="truncate">New thread in <b>secret-client</b></span></div><div data-slot="command-item" id="proj"><span data-slot="project-monogram"><svg><text>SC</text></svg></span><span class="truncate">secret-client</span></div><div data-slot="command-item" id="cmd"><span class="truncate">Change theme</span></div></div>`);
   const doc = dom.window.document;
   doc.title = "secret-client / Payroll fix";
@@ -312,9 +308,6 @@ test("screenshot mode: when T3 writes the real window title back, it is covered 
 });
 
 test("screenshot mode: a thread made a bot while it is on is read by its real title (status, remembered title), not the stand-in", async () => {
-  const { createApp, createFakeChromeStorage, sidebarHtml, settle } = await import("./helpers.js");
-  const { STORAGE_KEYS } = await import("../src/config.js");
-  const { stopSprites } = await import("../src/spriteClock.js");
   // T3's current rows have no sr-only copy: the [dir] span (which screenshot mode covers) is the title.
   const dom = createDom("/", sidebarHtml().replace(/<span class="sr-only">[^<]*<\/span>/g, ""));
   const doc = dom.window.document;
@@ -337,8 +330,7 @@ test("screenshot mode: a thread made a bot while it is on is read by its real ti
   stopSprites();
 });
 
-test("screenshot mode covers the rest of T3's chrome: branch pickers (split names and their tooltip), Run on, the From badge, details sections, side chats, tooltips, the screen-reader window title", async () => {
-  const { createDemoMode } = await import("../src/demoMode.js");
+test("screenshot mode covers the rest of T3's chrome: branch pickers (split names and their tooltip), Run on, the From badge, details sections, side chats, tooltips, the screen-reader window title", () => {
   const split = (id, head, tail) => `<span id="${id}" title="${head}${tail}" class="inline-flex"><span class="peer min-w-0">${head}</span><span class="shrink-0">${tail}</span></span>`;
   const html = `
   <div data-slot="sidebar-inner"><ul><li data-thread-item="env1:t1"><div role="button" data-sidebar-row="env1:t1" aria-label="Pay rent to landlord, acme-payroll"><div class="relative z-10">
@@ -384,7 +376,7 @@ test("settings flows keep screenshot mode honest: an import leaves it on, a fail
   const storage = createFakeChromeStorage();
   await storage.area.set({ [STORAGE_KEYS.settings]: { demo: { enabled: true } } });
   const dom = createDom("/", sidebarHtml());
-  const backup = { import: async (data) => (await storage.area.set({ [STORAGE_KEYS.settings]: data.data[STORAGE_KEYS.settings] }), [STORAGE_KEYS.settings]) };
+  const backup = { import: async (data) => (await storage.area.set({ [STORAGE_KEYS.settings]: data.data[STORAGE_KEYS.settings] }), { keys: [STORAGE_KEYS.settings], skipped: [] }) };
   const { app } = createApp(dom, storage, { backup });
   await app.start();
   const file = { name: "acme-client-backup.json", text: async () => JSON.stringify({ app: "t3plus", data: { [STORAGE_KEYS.settings]: { demo: { enabled: false }, glass: { enabled: false } } } }) };
@@ -410,4 +402,33 @@ test("settings flows keep screenshot mode honest: an import leaves it on, a fail
   assert.equal(storage.area.data.get(STORAGE_KEYS.settings).glass.enabled, false, "and saved");
   assert.equal(app.state.settings.demo.enabled, true, "Reset keeps screenshot mode");
   app.stop();
+});
+
+test("screenshot mode's prune() lets go of what T3 removed: a restore then writes only on what is still on the page", () => {
+  const card = (id, project, branch) => `<div data-slot="tooltip-popup" id="${id}"><div data-slot="tooltip-viewport"><div class="flex min-w-0 max-w-80 flex-col gap-2 px-1 py-2">
+    <div class="min-w-0 truncate text-xs leading-tight font-medium text-foreground">Rotate the keys</div>
+    <div class="grid gap-1.5 pl-0.5 text-xs text-muted-foreground">
+      <div class="flex min-w-0 items-center gap-2"><span data-slot="project-monogram"><svg><text>AP</text></svg></span><div class="min-w-0 truncate" id="${id}-project">${project}</div></div>
+      <div class="flex min-w-0 items-center gap-2"><svg class="size-3"></svg><span id="${id}-branch" title="${branch}" class="inline-flex min-w-0"><span class="peer min-w-0">${branch}</span></span></div>
+    </div></div></div></div>`;
+  const doc = createDom("/", card("gone", "acme-billing", "sam/billing-fix")).window.document;
+  const demo = createDemoMode(doc);
+  demo.apply({});
+  const goneProject = doc.getElementById("gone-project");
+  const goneBranch = doc.getElementById("gone-branch");
+  const covered = { project: goneProject.textContent, title: goneBranch.getAttribute("title") };
+  assert.notEqual(covered.project, "acme-billing");
+  assert.notEqual(covered.title, "sam/billing-fix");
+
+  // T3 closes that hover card and opens another.
+  doc.getElementById("gone").remove();
+  doc.body.insertAdjacentHTML("beforeend", card("kept", "acme-payroll", "sam/payroll-fix"));
+  demo.apply({});
+  assert.notEqual(doc.getElementById("kept-project").textContent, "acme-payroll");
+  demo.prune();
+  demo.restore();
+  assert.equal(doc.getElementById("kept-project").textContent, "acme-payroll", "what is on the page is restored");
+  assert.equal(doc.getElementById("kept-branch").getAttribute("title"), "sam/payroll-fix");
+  assert.equal(goneProject.textContent, covered.project, "a node T3 removed is forgotten, not written on");
+  assert.equal(goneBranch.getAttribute("title"), covered.title);
 });

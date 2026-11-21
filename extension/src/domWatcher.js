@@ -14,14 +14,19 @@
  * mode's cover) keeps up while the full check waits.
  * Without frames (tests), checks wait `throttleMs` as before.
  *
- * `isNoise(node)`, when given, marks mutations t3+ never needs to react to
- * (text streaming into the message list): a batch made only of those is
- * dropped without scheduling a check.
+ * `isNoise(record)`, when given, marks mutation records t3+ never needs to react
+ * to (text streaming into the message list, t3+'s own nodes coming and going): a
+ * batch made only of those is dropped without scheduling a check. `onChange(records)`
+ * is handed the rest of each batch before its check is scheduled (what changed where).
+ * `onRecords(records)` is handed every batch first, in the observer's own callback:
+ * before paint, for what must follow a change without waiting for a check.
+ * A check first takes in the records not handed over yet (changes made in the same
+ * task, before a flush), so what it reads and what it was told agree.
  */
 const STORM_CHECKS = 40;
 const STORM_HOLD_MS = 1000;
 
-export function createDomWatcher({ win, doc, check, throttleMs, isNoise = null, frames = false, quick = null }) {
+export function createDomWatcher({ win, doc, check, throttleMs, isNoise = null, onChange = null, onRecords = null, frames = false, quick = null }) {
   let timer = null;
   let frame = null;
   let observer = null;
@@ -49,11 +54,22 @@ export function createDomWatcher({ win, doc, check, throttleMs, isNoise = null, 
   let watchText = false;
   const options = () => ({ childList: true, subtree: true, characterData: watchText });
 
+  /** Hands a batch of records on; whether any of them calls for a check. */
+  function deliver(records) {
+    onRecords?.(records);
+    const changes = isNoise ? records.filter((record) => !isNoise(record)) : records;
+    if (!changes.length) return false;
+    onChange?.(changes);
+    return true;
+  }
+
   function run() {
     if (timer !== null) win.clearTimeout(timer);
     if (frame !== null) win.cancelAnimationFrame?.(frame);
     timer = null;
     frame = null;
+    const pending = observer?.takeRecords() ?? [];
+    if (pending.length) deliver(pending); // this check is the one they call for
     const t = now();
     if (t - windowStart > 1000) {
       windowStart = t;
@@ -116,8 +132,7 @@ export function createDomWatcher({ win, doc, check, throttleMs, isNoise = null, 
     start() {
       running = true;
       observer = new win.MutationObserver((records) => {
-        if (isNoise && records.every((record) => isNoise(record.target))) return;
-        schedule();
+        if (deliver(records)) schedule();
       });
       observer.observe(doc.documentElement, options());
       // T3 uses client-side routing. The Navigation API sees pushState too;

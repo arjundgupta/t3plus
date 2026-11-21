@@ -1,18 +1,23 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { T3PLUS, STORAGE_KEYS } from "../src/config.js";
+import { BOT_LIMITS, T3PLUS, STORAGE_KEYS } from "../src/config.js";
+import { LOOK, lookValue } from "../src/composer.js";
 import {
   createApp,
   createDom,
   createFakeChromeStorage,
   fakeImageRecord,
   settle,
+  sidebarHtml,
   T3_APPEARANCE_HTML,
   T3_COMPOSER_HTML,
+  threadRowHtml,
 } from "./helpers.js";
 
 const panelIn = (doc) => doc.getElementById(T3PLUS.panelId);
 const modeOf = (doc) => doc.documentElement.getAttribute(T3PLUS.modeAttr);
+// The glow's values, on the pane's glow layer (composer.js setLook), not on <html>.
+const glowValue = (doc, name) => lookValue(doc, LOOK.glow, name);
 
 function click(dom, el) {
   el.dispatchEvent(new dom.window.MouseEvent("click", { bubbles: true }));
@@ -79,7 +84,7 @@ test("controls switch modes, persist, and drive the composer theme", async () =>
   await app.start();
   const panel = panelIn(doc);
   const imageRow = panel.querySelector(".t3plus-thumb").closest(".t3plus-row");
-  const accentRow = panel.querySelector(".t3plus-color").closest(".t3plus-row");
+  const accentRow = panel.querySelector('[aria-label="Glow color"]').closest(".t3plus-row");
 
   assert.equal(modeOf(doc), "half-circle");
   assert.equal(imageRow.hidden, true);
@@ -90,7 +95,7 @@ test("controls switch modes, persist, and drive the composer theme", async () =>
   assert.equal(modeOf(doc), "image");
   assert.equal(imageRow.hidden, false);
   assert.equal(accentRow.hidden, true);
-  assert.match(doc.documentElement.style.getPropertyValue("--t3plus-image"), /assets\/sample-spectrum\.svg/);
+  assert.match(glowValue(doc, "--t3plus-image"), /assets\/sample-spectrum\.svg/);
   assert.equal(storage.area.data.get(STORAGE_KEYS.settings).composerGradient.mode, "image");
 
   const toggle = panel.querySelector('[role="switch"]');
@@ -109,21 +114,21 @@ test("controls switch modes, persist, and drive the composer theme", async () =>
   const slider = panel.querySelector('input[type="range"]');
   slider.value = "90";
   slider.dispatchEvent(new dom.window.Event("input", { bubbles: true }));
-  assert.equal(doc.documentElement.style.getPropertyValue("--t3plus-core"), "63%");
+  assert.equal(glowValue(doc, "--t3plus-core"), "63%");
   assert.equal(storage.area.data.get(STORAGE_KEYS.settings).composerGradient.intensity, 45);
   slider.dispatchEvent(new dom.window.Event("change", { bubbles: true }));
   await settle();
   assert.equal(storage.area.data.get(STORAGE_KEYS.settings).composerGradient.intensity, 90);
 
-  // Custom accent, then back to theme.
-  const color = panel.querySelector('.t3plus-advanced input[type="color"]');
+  // Custom glow color, then back to the theme's.
+  const color = panel.querySelector('[aria-label="Custom glow color"]');
   color.value = "#ff3366";
   color.dispatchEvent(new dom.window.Event("change", { bubbles: true }));
   await settle();
-  assert.equal(doc.documentElement.style.getPropertyValue("--t3plus-accent"), "#ff3366");
-  click(dom, [...panel.querySelectorAll("button")].find((b) => b.textContent === "Theme"));
+  assert.equal(glowValue(doc, "--t3plus-accent"), "#ff3366");
+  click(dom, panel.querySelector('[aria-label="Glow color"] [aria-label="Theme"]'));
   await settle();
-  assert.equal(doc.documentElement.style.getPropertyValue("--t3plus-accent"), "");
+  assert.equal(glowValue(doc, "--t3plus-accent"), "");
 
   // Reset.
   click(dom, [...panel.querySelectorAll("button")].find((b) => b.textContent === "Reset"));
@@ -145,8 +150,8 @@ test("settings survive a reload", async () => {
   const second = createApp(dom, storage).app;
   await second.start();
   assert.equal(modeOf(dom.window.document), "image");
-  assert.equal(dom.window.document.documentElement.style.getPropertyValue("--t3plus-scrim-top"), "83%");
-  assert.equal(dom.window.document.documentElement.style.getPropertyValue("--t3plus-scrim-bottom"), "73%");
+  assert.equal(glowValue(dom.window.document, "--t3plus-scrim-top"), "83%");
+  assert.equal(glowValue(dom.window.document, "--t3plus-scrim-bottom"), "73%");
   second.stop();
 });
 
@@ -159,12 +164,12 @@ test("uploading an image stores it locally and uses it; removing falls back to t
 
   await app.actions.chooseImage({ name: "mine.png", type: "image/png", size: 10 });
   assert.equal(storage.area.data.get(STORAGE_KEYS.image).name, "mine.png");
-  assert.match(doc.documentElement.style.getPropertyValue("--t3plus-image"), /^url\("blob:/);
+  assert.match(glowValue(doc, "--t3plus-image"), /^url\("blob:/);
   assert.match(panelIn(doc).textContent, /Using mine\.png \(1600×900\)/);
 
   await app.actions.removeImage();
   assert.equal(storage.area.data.has(STORAGE_KEYS.image), false);
-  assert.match(doc.documentElement.style.getPropertyValue("--t3plus-image"), /sample-spectrum\.svg/);
+  assert.match(glowValue(doc, "--t3plus-image"), /sample-spectrum\.svg/);
   app.stop();
 });
 
@@ -207,6 +212,8 @@ test("stop removes every trace from the page", async () => {
   assert.equal(panelIn(doc), null);
   assert.equal(modeOf(doc), null);
   assert.equal(doc.documentElement.getAttribute("style") ?? "", "");
+  assert.equal(doc.querySelector("style[data-t3plus-owned]"), null, "the look's stylesheet goes too");
+  assert.equal(glowValue(doc, "--t3plus-core"), "");
   assert.equal(storage.onChanged.listenerCount(), 0);
 });
 
@@ -305,7 +312,6 @@ test("new-thread hero: T3 switching the composer overlay's class alone triggers 
 });
 
 test("a stopped copy stays stopped: late saves, late loads and a start() cut short leave nothing behind", async () => {
-  const { STORAGE_KEYS: KEYS } = await import("../src/config.js");
   const storage = createFakeChromeStorage();
   const dom = createDom("/settings/appearance", T3_APPEARANCE_HTML);
   const doc = dom.window.document;
@@ -329,23 +335,21 @@ test("a stopped copy stays stopped: late saves, late loads and a start() cut sho
   await starting;
   await new Promise((r) => setTimeout(r, 20));
   assert.equal(storage2.onChanged.listenerCount(), 0, "no storage listeners left behind");
-  await storage2.area.set({ [KEYS.settings]: { composerGradient: { intensity: 10 } } });
+  await storage2.area.set({ [STORAGE_KEYS.settings]: { composerGradient: { intensity: 10 } } });
   await settle();
   assert.equal([...dom2.window.document.documentElement.attributes].filter((a) => /t3plus/.test(a.name)).length, 0);
 });
 
 test("more bots on screen than the remembered-bots cap: storage settles instead of being rewritten every check", async () => {
-  const { STORAGE_KEYS: KEYS, BOT_LIMITS } = await import("../src/config.js");
-  const { threadRowHtml } = await import("./helpers.js");
   const n = BOT_LIMITS.maxBots * 2 + 12;
   const rows = Array.from({ length: n }, (_, i) => threadRowHtml({ key: `env1:t${i}`, title: `Thread ${i}` })).join("");
   const dom = createDom("/", `<div data-slot="sidebar-inner"><div data-slot="sidebar-content"><ul id="thread-list">${rows}</ul></div></div>`);
   const storage = createFakeChromeStorage();
-  storage.area.data.set(KEYS.settings, { sidebar: { bots: true, botsDefault: true } });
+  storage.area.data.set(STORAGE_KEYS.settings, { sidebar: { bots: true, botsDefault: true } });
   let writes = 0;
   const set = storage.area.set;
   storage.area.set = async (items) => {
-    if (KEYS.knownBots in items) writes += 1;
+    if (STORAGE_KEYS.knownBots in items) writes += 1;
     return set(items);
   };
   const { app } = createApp(dom, storage);
@@ -406,7 +410,7 @@ test("a T3 theme switch on <html> alone triggers a check (the glow takes the new
   doc.getElementById("stack").getBoundingClientRect = box(300, 120);
   doc.getElementById("banner").getBoundingClientRect = box(424, 40); // hangs 44 px below the composer
   doc.querySelector('[data-workspace-area="conversation"]').getBoundingClientRect = box(0, 900);
-  const { app } = createApp(dom);
+  const { app } = createApp(dom, undefined, { homeFeed: { readCache: async () => null, load: async () => null } }); // the cards need a feed source
   await app.start();
   app.watcher.flush();
   const home = doc.querySelector(".t3plus-home");
@@ -425,17 +429,15 @@ test("a T3 theme switch on <html> alone triggers a check (the glow takes the new
 });
 
 test("a bot title longer than the remembered-bots list keeps is saved once, not rewritten on every check", async () => {
-  const { STORAGE_KEYS: KEYS } = await import("../src/config.js");
-  const { threadRowHtml } = await import("./helpers.js");
   const long = `A very long thread title ${"that keeps going ".repeat(10)}`;
   assert.ok(long.length > 120);
   const dom = createDom("/", `<div data-slot="sidebar-inner"><div data-slot="sidebar-content"><ul id="thread-list">${threadRowHtml({ key: "env1:t1", title: long })}</ul></div></div>`);
   const storage = createFakeChromeStorage();
-  storage.area.data.set(KEYS.settings, { sidebar: { bots: true, botsDefault: true } });
+  storage.area.data.set(STORAGE_KEYS.settings, { sidebar: { bots: true, botsDefault: true } });
   let writes = 0;
   const set = storage.area.set;
   storage.area.set = async (items) => {
-    if (KEYS.knownBots in items) writes += 1;
+    if (STORAGE_KEYS.knownBots in items) writes += 1;
     return set(items);
   };
   const { app } = createApp(dom, storage);
@@ -471,10 +473,8 @@ test("no home feed yet: the read is retried at most every few seconds, not on ev
 });
 
 test("a check step that throws is skipped: the steps after it (screenshot mode, health) still run", async () => {
-  const { STORAGE_KEYS: KEYS } = await import("../src/config.js");
-  const { sidebarHtml } = await import("./helpers.js");
   const storage = createFakeChromeStorage();
-  storage.area.data.set(KEYS.settings, { demo: { enabled: true } });
+  storage.area.data.set(STORAGE_KEYS.settings, { demo: { enabled: true } });
   const dom = createDom("/env1/a1", sidebarHtml());
   const errors = [];
   dom.window.console.error = (...args) => errors.push(args.join(" "));

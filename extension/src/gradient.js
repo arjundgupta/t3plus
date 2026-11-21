@@ -14,7 +14,8 @@ import { DITHER_CELL_CSS } from "./backdropRenderer.js";
  * @returns {{ mode: "half-circle" | "image" | null, glass: boolean, vars: Record<string, string | null> }}
  *   `mode` goes on <html data-t3plus-backdrop>; null removes it.
  *   `glass` toggles <html data-t3plus-glass>.
- *   `vars` are custom properties on <html>; null removes the property.
+ *   `vars` are custom properties, null removing one: composer.js writes each where
+ *   content.css reads it (the dither tile on <html>, the rest in its look sheet).
  */
 export function computeComposerTheme(settings, imageUrl) {
   const g = settings.composerGradient;
@@ -22,13 +23,12 @@ export function computeComposerTheme(settings, imageUrl) {
   const s = settings.glass.strength;
   const vars = {
     "--t3plus-dither": BAYER_DITHER_DATA_URL,
-    // One source of truth for every pixel surface: the backdrop renderer,
-    // charts, heatmap cells and the small icon marks all read this
-    // CSS length. Keeping it on <html> also lets a setting change repaint the
-    // widgets without rebuilding their DOM.
+    // The home widgets' heat cells in the backdrop's pixel size (the renderer and the
+    // charts take it from the settings), so a setting change repaints them without
+    // rebuilding their DOM.
     "--t3plus-dither-cell": `${DITHER_CELL_CSS[g.ditherSize] ?? DITHER_CELL_CSS.medium}px`,
-    // --t3plus-composer-x is NOT set here: it is measured from the live layout
-    // by syncBackdropAnchor (composer.js). Resetting it to 50% on every render
+    // --t3plus-composer-x is NOT set here: app.js syncDither measures it from the
+    // live layout and sets it on the pane. Resetting it to 50% on every render
     // made the glow jump sideways and back on each thread switch.
     // Unset means "follow T3's --primary", resolved where the background is painted.
     "--t3plus-accent": g.accent === "theme" ? null : g.accent,

@@ -13,3 +13,5 @@ config.json
 # Machine-specific feed settings read by inject/feeds.js
 server/config.local.json
 *.local.json
+# Private names, hosts and paths the public mirror is checked for (extension/tools/publish-public.mjs)
+.publish-deny

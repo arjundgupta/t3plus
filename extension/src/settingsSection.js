@@ -11,6 +11,10 @@ export const SETTINGS_ROUTE = /\/settings(\/|$)/;
 
 const NAV_ANCHOR = T3_SELECTORS.settingsAppearanceLink;
 const PAGE = T3_SELECTORS.settingsPage;
+/** T3's entry for the settings page t3+ is open over (t3+'s own entry is current then too). */
+const T3_CURRENT_ENTRY = `${T3_SELECTORS.settingsNavCurrent}:not([${T3PLUS.ownedAttr}])`;
+/** On that entry while t3+'s holds its aria-current. */
+const MOVED_ATTR = "data-t3plus-current-moved";
 
 // lucide "square-plus", in T3's icon style.
 const ICON = '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect width="18" height="18" x="3" y="3" rx="4"/><path d="M8 12h8"/><path d="M12 8v8"/></svg>';
@@ -61,7 +65,7 @@ export function createSettingsNavItem(doc, onOpen) {
     onOpen();
   });
   li.appendChild(button);
-  let anchorButton = null;
+  let moved = null; // T3's entry whose aria-current t3+'s holds while it is open
 
   return {
     element: li,
@@ -70,7 +74,6 @@ export function createSettingsNavItem(doc, onOpen) {
     mount(anchor) {
       const anchorItem = anchor.closest("li");
       if (!anchorItem?.parentElement) return false;
-      anchorButton = anchor;
       if (button.className !== anchor.className) button.className = anchor.className;
       // Reachable and announced like T3's own entries: the same role and tab stop
       // as the Appearance button (and its <li>), whatever this T3 version uses.
@@ -90,16 +93,22 @@ export function createSettingsNavItem(doc, onOpen) {
         if (on) button.setAttribute("aria-current", "page");
         else button.removeAttribute("aria-current");
       }
-      // One current page: Appearance (the route t3+ shows over) is not it while t3+ is
-      // open, and is again after, if T3 still has it active.
-      const appearance = anchorButton?.isConnected ? anchorButton : null;
-      if (!appearance) return;
-      if (on && appearance.getAttribute("aria-current") === "page") {
-        appearance.removeAttribute("aria-current");
-        appearance.setAttribute("data-t3plus-current-moved", "");
-      } else if (!on && appearance.hasAttribute("data-t3plus-current-moved")) {
-        appearance.removeAttribute("data-t3plus-current-moved");
-        if (appearance.getAttribute("data-active") === "true") appearance.setAttribute("aria-current", "page");
+      // One current page: the entry of the settings page t3+ is open over (any of them,
+      // in any of T3's nav groups) is not it while t3+ is open, and is again after, if T3
+      // still has it active. This runs in every check: the page is looked through only
+      // when t3+ opens (or T3 draws its nav anew), and nothing is held once it closes.
+      if (on) {
+        if (moved?.isConnected && !moved.hasAttribute("aria-current")) return;
+        moved?.removeAttribute(MOVED_ATTR);
+        moved = doc.querySelector(T3_CURRENT_ENTRY);
+        if (moved) {
+          moved.removeAttribute("aria-current");
+          moved.setAttribute(MOVED_ATTR, "");
+        }
+      } else if (moved) {
+        moved.removeAttribute(MOVED_ATTR);
+        if (moved.isConnected && moved.getAttribute("data-active") === "true") moved.setAttribute("aria-current", "page");
+        moved = null;
       }
     },
   };

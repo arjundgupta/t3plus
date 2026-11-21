@@ -61,7 +61,11 @@ const BOT_MESSAGES = [
   "Ran the full e2e suite: 248 passed, 0 failed.",
 ];
 
-const AUTOMATIONS = ["Nightly dependency check", "Weekly changelog draft", "Morning triage", "Daily backup check", "Release notes digest"];
+// Enough that the automation titles a session shows rarely share one.
+const AUTOMATIONS = [
+  "Nightly dependency check", "Weekly changelog draft", "Morning triage", "Daily backup check", "Release notes digest", "Stale branch cleanup",
+  "Flaky test report", "Uptime summary", "Security audit sweep", "Sprint recap", "Error budget check", "Docs link check",
+];
 
 const PROSE =
   "I traced the failing request to the retry middleware. It replays the original body after the stream has already been read, so the second attempt sends an empty payload. " +
@@ -128,7 +132,7 @@ const CODE_KEYWORDS = new Set([
 ]);
 
 /** FNV-1a, 32-bit. */
-export function hashText(text) {
+function hashText(text) {
   let h = 0x811c9dc5;
   for (let i = 0; i < text.length; i += 1) {
     h ^= text.charCodeAt(i);
@@ -142,12 +146,19 @@ export function isNeutral(text) {
   return /^[\s\d:+\-−–—.,%()×x/·•|#@<>=*'"`~!?[\]{}]*(AM|PM|am|pm|[smhdkKMB]|ms)?[\s\d:.,%()]*$/.test(text);
 }
 
-const words = (text) => text.split(/(\s+)/);
+/** Where each sentence of a passage starts. */
+function sentenceStarts(source) {
+  const starts = [0];
+  for (let i = 0; i < source.length - 1; i += 1) if (source[i] === " " && /[.?!]/.test(source[i - 1] ?? "")) starts.push(i + 1);
+  return starts;
+}
+// Found once per passage (PROSE, USER_PROSE): excerpt() runs for every text node screenshot mode covers.
+const STARTS = new Map();
 
 /** A run of `source` (from a sentence start picked by `seed`) about `length` characters long, cut at a word. */
 function excerpt(source, seed, length) {
-  const starts = [0];
-  for (let i = 0; i < source.length - 1; i += 1) if (source[i] === " " && /[.?!]/.test(source[i - 1] ?? "")) starts.push(i + 1);
+  let starts = STARTS.get(source);
+  if (!starts) STARTS.set(source, (starts = sentenceStarts(source)));
   let i = starts[seed % starts.length];
   let out = "";
   const target = Math.max(1, length);
@@ -234,7 +245,9 @@ export function fakeCode(original) {
       .join("\n");
   }
   const core = original.trim();
-  if (!core || isNeutral(core) || CODE_KEYWORDS.has(core) || /^[^A-Za-z]*$/.test(core)) return original;
+  // A token with no letter in any script (an operator, a number, box drawing) stays.
+  // Tested for ASCII letters only, Cyrillic or CJK comments and strings stayed real.
+  if (!core || isNeutral(core) || CODE_KEYWORDS.has(core) || /^\P{L}*$/u.test(core)) return original;
   const quote = core.match(/^(["'`])(.*)\1$/);
   if (quote) return framed(original, `${quote[1]}${IDENTIFIERS[hashText(core) % IDENTIFIERS.length]}${quote[1]}`);
   if (/\s/.test(core)) return framed(original, CODE_LINES[hashText(core) % CODE_LINES.length]);

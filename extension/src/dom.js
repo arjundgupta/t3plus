@@ -21,3 +21,30 @@ export function setText(el, value) {
   const next = value ?? "";
   if (el.textContent !== next) el.textContent = next;
 }
+
+// The writes below happen only when they change something: t3+'s updates run in every
+// check, slider step and feed read, and a write of the same value still restyles the
+// element (and tells a screen reader about an aria-* change).
+
+/** Sets (or, for null/undefined, removes) an attribute only when that changes it. */
+export function setAttr(el, name, value) {
+  if (value === null || value === undefined) {
+    if (el.hasAttribute(name)) el.removeAttribute(name);
+  } else if (el.getAttribute(name) !== value) {
+    el.setAttribute(name, value);
+  }
+}
+
+/** Sets (or, for null, removes) an inline custom property only when that changes it. */
+export function setVar(el, name, value) {
+  if (value === null) {
+    if (el.style.getPropertyValue(name)) el.style.removeProperty(name);
+  } else if (el.style.getPropertyValue(name) !== value) {
+    el.style.setProperty(name, value);
+  }
+}
+
+/** Shows or hides an element only when that changes it. */
+export function setHidden(el, hidden) {
+  if (el.hidden !== hidden) el.hidden = hidden;
+}

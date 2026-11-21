@@ -39,7 +39,7 @@ test("public path policy excludes personal configuration, unknown roots, and nes
   for (const path of ["private/notes.md", "personal.md", "t3plus.local.json", "config.json", "feeds/t3plus-home.json", "state/health.json", "server/config.local.json", "extension/server/config.local.json", "extension/AGENTS.md", "extension/docs/setup.md", "extension/harness/serve.mjs", "extension/src/.env", "extension/src/.env.local", "extension/tools/signing.key", "extension/.github/workflows/ci.yml", "src/app.js"]) {
     assert.equal(isPublicPath(path), false, path);
   }
-  for (const path of ["README.md", "LICENSE", "t3plus.mjs", "build.sh", "inject/main-loader.js", "launchd/com.t3plus.autostart.plist", "media/hero.gif", "extension/src/app.js", "extension/test/app.test.js", "extension/package.json", "extension/icons/icon-128.png"]) assert.equal(isPublicPath(path), true, path);
+  for (const path of ["README.md", "LICENSE", "t3plus.mjs", "build.sh", "inject/main-loader.js", "launchd/com.t3plus.autostart.plist", "media/hero.gif", "extension/src/app.js", "extension/test/app.test.js", "extension/package.json", "extension/tools/publish-policy.mjs"]) assert.equal(isPublicPath(path), true, path);
   assert.throws(() => parseDenyPatterns("# empty"), /at least one/);
   assert.throws(() => parseDenyPatterns("["), /Invalid private-detail pattern/);
   const privateText = "internal-host";
@@ -91,14 +91,28 @@ test("privacy violations and unreviewed binaries stop before a public push", asy
     await assert.rejects(publishPublic(options), (error) => /Private details/.test(error.message) && !error.message.includes("internal-host"));
     await rm(join(f.cwd, "inject", "internal-host.md"));
     await writeFile(join(f.cwd, "README.md"), "Safe content");
-    await mkdir(join(f.cwd, "extension", "icons"));
-    await writeFile(join(f.cwd, "extension", "icons", "fixture.png"), Buffer.from([0, 1, 2]));
+    await mkdir(join(f.cwd, "media"));
+    await writeFile(join(f.cwd, "media", "fixture.png"), Buffer.from([0, 1, 2]));
     git(f.cwd, "add", ".");
     git(f.cwd, "commit", "-m", "Image");
     await assert.rejects(publishPublic(options), /visual review/);
     assert.equal(git(f.remote, "rev-parse", "main"), before);
     await publishPublic({ ...options, imagesChecked: true });
     assert.notEqual(git(f.remote, "rev-parse", "main"), before);
+  } finally { await f.clean(); }
+});
+
+test("a git identity with a real e-mail stops the mirror commit, which would carry it, without printing it", async () => {
+  const f = await fixture();
+  try {
+    const before = git(f.remote, "rev-parse", "main");
+    const email = ["person", "example.com"].join("@"); // assembled: the mirror's own privacy check reads this file
+    git(f.cwd, "config", "user.email", email);
+    await assert.rejects(
+      publishPublic({ cwd: f.cwd, ref: "HEAD", push: true, denyText: "internal-host", log() {} }),
+      (error) => /\(git_author_ident\):1/.test(error.message) && /\(git_committer_ident\):1/.test(error.message) && !error.message.includes(email),
+    );
+    assert.equal(git(f.remote, "rev-parse", "main"), before);
   } finally { await f.clean(); }
 });
 

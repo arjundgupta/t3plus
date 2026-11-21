@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import { STORAGE_KEYS, T3PLUS } from "../src/config.js";
+import { createSettingsNavItem } from "../src/settingsSection.js";
 import { createApp, createDom, createFakeChromeStorage, settle, T3_APPEARANCE_HTML } from "./helpers.js";
 
 // T3's Settings sidebar, as on app.t3.codes (ui/sidebar.tsx menu items).
@@ -96,7 +98,7 @@ test("settings saved by v0.14 load unchanged; options this build dropped are ign
   assert.equal(saved.composerGradient.ditherStyle, "grain");
   assert.equal(saved.composerGradient.accent, "#112233");
 
-  assert.deepEqual(Object.keys(saved.sidebar).sort(), ["botStyle", "bots", "botsDefault", "profiles"], "saving keeps only the options that still exist");
+  assert.deepEqual(Object.keys(saved.sidebar).sort(), ["botStyle", "bots", "botsDefault", "profiles", "statusBadges", "statusColors", "subagentColor", "subagentShape"], "saving keeps only the options that still exist");
   assert.equal(saved.sidebar.bots, true);
   app.stop();
 });
@@ -115,8 +117,9 @@ test("the toolbar icon's #t3plus link opens the t3+ section once", async () => {
 });
 
 test("the t3+ entry takes T3's role and tab stop from Appearance (keyboard reachable in current T3), and T3's page actions hide while it is open", async () => {
-  // Current T3: plain buttons in plain <li>s (no tree roles, no tabindex).
-  const plain = SETTINGS_HTML.replaceAll(' role="treeitem"', "");
+  // Current T3: plain buttons in plain <li>s (no tree roles, no tabindex). The header: its breadcrumb, then the page's actions.
+  const header = '<header><nav aria-label="Settings breadcrumb"><ol><li aria-current="page">Appearance</li></ol></nav><div><button>Restore device defaults</button><button aria-label="Close"></button></div></header>';
+  const plain = header + SETTINGS_HTML.replaceAll(' role="treeitem"', "");
   const dom = createDom("/settings/appearance", plain);
   const doc = dom.window.document;
   const { app } = createApp(dom);
@@ -128,7 +131,12 @@ test("the t3+ entry takes T3's role and tab stop from Appearance (keyboard reach
   click(dom, button);
   assert.equal(button.getAttribute("aria-current"), "page");
   assert.equal(button.hasAttribute("aria-selected"), false, "no aria-selected without a role that has it");
+  // T3's sections and page actions (they act on the page underneath) are marked to hide: opening
+  // and closing restyle what is in them, not the whole page (a rule keyed on <html> alone).
+  assert.equal(doc.querySelector("header nav ~ div").getAttribute("data-t3plus-settings-hide"), "actions");
+  assert.equal(doc.getElementById("page-container").getAttribute("data-t3plus-settings-hide"), "sections");
   app.stop();
+  assert.equal(doc.querySelector("[data-t3plus-settings-hide]"), null, "unmarked once t3+ stops");
 
   // Older T3 (tree roles): the entry follows those instead.
   const dom2 = createDom("/settings/appearance", SETTINGS_HTML);
@@ -137,14 +145,12 @@ test("the t3+ entry takes T3's role and tab stop from Appearance (keyboard reach
   assert.equal(navButton(dom2.window.document).getAttribute("role"), "treeitem");
   app2.stop();
 
-  const { readFileSync } = await import("node:fs");
   const css = readFileSync(new URL("../src/styles/content.css", import.meta.url), "utf8");
-  assert.match(css, /html\[data-t3plus-settings\] nav\[aria-label="Settings breadcrumb"\] ~ div > :not\(\[aria-label="Close"\]\)\s*\{\s*display: none !important;/, "Restore device defaults & co. hide; Close stays");
+  assert.match(css, /\[data-t3plus-settings-hide="actions"\] > :not\(\[aria-label="Close"\]\)\s*\{\s*display: none !important;/, "Restore device defaults & co. hide; Close stays");
+  assert.match(css, /\[data-t3plus-settings-hide="sections"\] > :not\(#t3plus-appearance\)\s*\{\s*display: none !important;/, "T3's sections hide; the panel stays");
 });
 
-test("settings nav: t3+'s entry is one of T3's arrow-key stops, and only one entry is the current page", async () => {
-  const { createSettingsNavItem } = await import("../src/settingsSection.js");
-  const { createDom } = await import("./helpers.js");
+test("settings nav: t3+'s entry is one of T3's arrow-key stops, and only one entry is the current page", () => {
   const dom = createDom("/settings/appearance", `<ul><li><button data-settings-section="/settings/appearance" data-active="true" aria-current="page">Appearance</button></li></ul>`);
   const doc = dom.window.document;
   const appearance = doc.querySelector("button");
@@ -157,4 +163,67 @@ test("settings nav: t3+'s entry is one of T3's arrow-key stops, and only one ent
   nav.setActive(false);
   assert.equal(appearance.getAttribute("aria-current"), "page", "and is again after");
   assert.equal(nav.button.hasAttribute("aria-current"), false);
+});
+
+test("opened over any settings page, in any of T3's nav groups, t3+'s entry is the one current page until it closes", async () => {
+  // T3's nav as it ships: each group its own list, the page's entry marked aria-current="page".
+  const entry = (page, current) => `<li data-slot="sidebar-menu-item"><button type="button" data-slot="sidebar-menu-button"
+    data-settings-section="/settings/${page}" data-active="${current}"${current ? ' aria-current="page"' : ""}><span>${page}</span></button></li>`;
+  const group = (pages, current) => `<div role="group"><ul data-slot="sidebar-menu">${pages.map((p) => entry(p, p === current)).join("")}</ul></div>`;
+  const nav = (current) => `<div>${group(["general", "appearance", "chat"], current)}${group(["providers", "about"], current)}</div>${T3_APPEARANCE_HTML}`;
+  for (const page of ["general", "providers"]) {
+    const dom = createDom(`/settings/${page}`, nav(page));
+    const doc = dom.window.document;
+    const { app } = createApp(dom);
+    await app.start();
+    const own = doc.querySelector(`[data-settings-section="/settings/${page}"]`);
+    const current = () => [...doc.querySelectorAll('[aria-current="page"]')];
+    click(dom, navButton(doc));
+    assert.deepEqual(current(), [navButton(doc)], `over ${page}: t3+'s entry only`);
+    app.watcher.flush();
+    assert.deepEqual(current(), [navButton(doc)], "and so it stays");
+    click(dom, doc.querySelector('[data-settings-section="/settings/chat"]')); // a T3 link closes t3+
+    assert.deepEqual(current(), [own], `${page}'s entry is the current page again`);
+    click(dom, navButton(doc));
+    app.stop();
+    assert.deepEqual(current(), [own], "and once t3+ stops");
+    assert.equal(doc.querySelector("[data-t3plus-current-moved]"), null);
+  }
+});
+
+test("settings nav: closed after T3 took Settings down, the entry holds on to nothing of it", () => {
+  const dom = createDom("/settings/general", `<ul id="nav"><li><button data-settings-section="/settings/general" data-active="true" aria-current="page">General</button></li></ul>`);
+  const doc = dom.window.document;
+  const list = doc.getElementById("nav");
+  const general = list.querySelector("button");
+  const nav = createSettingsNavItem(doc, () => {});
+  nav.mount(general);
+  nav.setActive(true);
+  list.remove(); // T3 leaves Settings: the whole nav goes
+  nav.setActive(false);
+  assert.equal(general.hasAttribute("data-t3plus-current-moved"), false, "unmarked");
+  doc.body.append(list); // were it ever back, it is T3's own: t3+ does not touch it
+  nav.setActive(false);
+  assert.equal(general.hasAttribute("aria-current"), false);
+});
+
+test("settings nav: when T3 unmounts Settings, t3+'s entry and panel leave its detached tree", async () => {
+  // React takes down only the route's top node: what t3+ put inside stays a child of
+  // the detached tree (not connected, but still holding on to it) unless t3+ removes it.
+  const dom = createDom("/settings/appearance", `<div id="route">${SETTINGS_HTML}</div>`);
+  const doc = dom.window.document;
+  const { app } = createApp(dom);
+  await app.start();
+  click(dom, navButton(doc));
+  const route = doc.getElementById("route");
+  const entry = navButton(doc).closest("li");
+  const panel = doc.getElementById(T3PLUS.panelId);
+  assert.ok(route.contains(entry) && route.contains(panel), "both are in T3's Settings route");
+
+  route.remove();
+  dom.window.history.pushState({}, "", "/");
+  app.watcher.flush();
+  assert.equal(entry.parentNode, null, "the entry is out of T3's old nav");
+  assert.equal(panel.parentNode, null, "the panel is out of T3's old page");
+  assert.equal(route.querySelector("[data-t3plus-settings-nav], #" + T3PLUS.panelId), null);
 });

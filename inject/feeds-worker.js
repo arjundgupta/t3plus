@@ -5,7 +5,7 @@
 // the read-only API session for the home feed (T3's CLI issues it; it is reused for
 // a quarter of an hour, then revoked), which T3 records like any session.
 "use strict";
-const { parentPort, workerData } = require("worker_threads");
+const { parentPort, workerData, threadId } = require("worker_threads");
 const fs = require("fs");
 const path = require("path");
 const os = require("os");
@@ -32,12 +32,17 @@ const json = (s) => { try { return JSON.parse(s); } catch { return null; } };
 
 /** Markdown to one plain line: drop code fences, links, emphasis and headings. */
 function plain(text) {
-  let t = String(text ?? "");
-  t = t.replace(/```[\s\S]*?```/g, " ");
+  let t = String(text ?? "").replace(/```[\s\S]*?```/g, " ");
+  // A preview's worth of what is left: the rules below scan ahead from each mark, which
+  // over a 60 KB line took seconds, and only MAX_TEXT characters are kept in the end.
+  t = t.trimStart().slice(0, 16 * MAX_TEXT);
   t = t.replace(/!\[[^\]]*\]\([^)]*\)/g, " ");
   t = t.replace(/\[([^\]]+)\]\([^)]*\)/g, "$1");
   t = t.replace(/`([^`]*)`/g, "$1");
-  t = t.replace(/(\*\*|__|\*|_|~~)(?=\S)(.+?)(?<=\S)\1/g, "$2");
+  // Emphasis within a line, and not too long; "_" only at a word's edges, as in CommonMark
+  // (user_id and snake_case_name keep theirs).
+  t = t.replace(/(\*\*|\*|~~)(?=\S)([^\n]{1,200}?)(?<=\S)\1/g, "$2");
+  t = t.replace(/(?<![\p{L}\p{N}_])(__|_)(?=\S)([^\n]{1,200}?)(?<=\S)\1(?![\p{L}\p{N}_])/gu, "$2");
   t = t.replace(/^\s{0,3}(#{1,6}\s+|>\s?|[-*+]\s+|\d+\.\s+)/gm, "");
   t = t.replace(/\s+/g, " ").trim();
   const chars = [...t];
@@ -154,7 +159,7 @@ function entrySpend(entry) {
   const pending = new Set();
   for (const f of Object.values(entry.files || {})) {
     const p = f.pending;
-    if (!p || (entry.seenSet ||= new Set(entry.seen || [])).has(p.key) || pending.has(p.key)) continue;
+    if (!p || seenOf(entry).has(p.key) || pending.has(p.key)) continue;
     pending.add(p.key);
     all.push([p.model + "|" + p.speed + "|" + tierOf(p.model, p.parts), p.parts, p.reported]);
     for (const a of Object.values(p.advisors || {})) all.push([a.model + "|" + p.speed + "|" + tierOf(a.model, a.parts), a.parts]);
@@ -172,7 +177,36 @@ function entrySpend(entry) {
 }
 const SPEND_CACHE = path.join(cfg.home, "state", "spend-cache.json");
 let spendCache = null;
-let spendText = null; // the cache as last written: an unchanged cache is not written again
+// Written once it changed (a log read further, an entry new, renewed or forgotten), at most
+// every SPEND_WRITE_MS and on dispose: written whole on every publish while a bot worked, it
+// was megabytes every few seconds. A copy a little behind only means a little log read again.
+const SPEND_WRITE_MS = 30 * 1000;
+let spendDirty = false;
+let spendWrittenAt = 0;
+let spendWriteTimer = null;
+/** Writes the cache now, if it changed. */
+function writeSpendCache() {
+  clearTimeout(spendWriteTimer);
+  spendWriteTimer = null;
+  if (!spendDirty || !spendCache) return;
+  const files = {};
+  for (const [id, entry] of Object.entries(spendCache)) {
+    const { seenSet, ...kept } = entry;
+    files[id] = seenSet ? { ...kept, seen: [...seenSet] } : kept;
+  }
+  try {
+    writeAtomic(SPEND_CACHE, JSON.stringify({ v: SPEND_CACHE_VERSION, files }));
+    spendDirty = false;
+    spendWrittenAt = Date.now();
+  } catch {}
+}
+/** Writes a changed cache now, or once SPEND_WRITE_MS have passed since the last write. */
+function saveSpendCache() {
+  if (!spendDirty || spendWriteTimer) return;
+  const wait = spendWrittenAt + SPEND_WRITE_MS - Date.now();
+  if (wait <= 0) writeSpendCache();
+  else spendWriteTimer = setTimeout(writeSpendCache, wait);
+}
 // New whole lines of a log since entry.offset that contain one of `needles`, in file
 // order, read in 8 MB chunks. Only those lines are decoded: a session log can be far
 // larger than a string may be (one here is 700 MB), and most of its bytes are text
@@ -227,10 +261,18 @@ function shortHash(text) {
   for (let i = 0; i < text.length; i += 1) { h ^= text.charCodeAt(i); h = Math.imul(h, 0x01000193) >>> 0; }
   return h.toString(36) + text.length.toString(36);
 }
+/** The ids a thread's logs have counted, as a Set (the cache file keeps a list, dropped once it is one). */
+function seenOf(entry) {
+  if (!entry.seenSet) {
+    entry.seenSet = new Set(entry.seen || []);
+    delete entry.seen;
+  }
+  return entry.seenSet;
+}
 function firstTime(entry, key) {
-  entry.seenSet ||= new Set(entry.seen || []);
-  if (entry.seenSet.has(key)) return false;
-  entry.seenSet.add(key);
+  const seen = seenOf(entry);
+  if (seen.has(key)) return false;
+  seen.add(key);
   return true;
 }
 function claudeRequestParts(u) {
@@ -323,7 +365,18 @@ function logRoots(provider) {
   try { for (const dir of JSON.parse(fs.readFileSync(HOMES_FILE, "utf8"))[provider] || []) if (typeof dir === "string" && dir) roots.add(dir); } catch {}
   return [...roots];
 }
-function sessionFiles(driver, nativeId) {
+/** Every Codex session log: [name, file], from its <root>/<year>/<month>/<day> folders. */
+function codexLogs() {
+  const logs = [];
+  for (const root of logRoots("codex")) {
+    for (const y of listDir(root)) for (const m of listDir(path.join(root, y))) for (const d of listDir(path.join(root, y, m))) {
+      for (const f of listDir(path.join(root, y, m, d))) if (f.startsWith("rollout-") && f.endsWith(".jsonl")) logs.push([f, path.join(root, y, m, d, f)]);
+    }
+  }
+  return logs;
+}
+/** A session's main log files. `codex()` lists the Codex logs (one walk of their folders, shared by the sessions looked up together). */
+function sessionFiles(driver, nativeId, codex) {
   const found = [];
   if (driver === "claudeAgent") {
     for (const root of logRoots("claude")) {
@@ -334,17 +387,15 @@ function sessionFiles(driver, nativeId) {
       }
     }
   } else if (driver === "codex") {
-    for (const root of logRoots("codex")) {
-      for (const y of listDir(root)) for (const m of listDir(path.join(root, y))) for (const d of listDir(path.join(root, y, m))) {
-        for (const f of listDir(path.join(root, y, m, d))) if (f.startsWith("rollout-") && f.endsWith("-" + nativeId + ".jsonl")) found.push(["codex", path.join(root, y, m, d, f)]);
-      }
-    }
+    const tail = "-" + nativeId + ".jsonl"; // rollout-<time>-<id>.jsonl
+    for (const [name, file] of codex()) if (name.endsWith(tail)) found.push(["codex", file]);
   }
   return found;
 }
 // "driver:nativeId" -> { files, at }: main session files (they do not move). One not
 // found (a remote machine's thread, a log elsewhere) is looked for again only now and
-// then: for Codex that is a walk of every day folder.
+// then: for Codex that takes a walk of every day folder (one for all the sessions looked
+// for in a publish: one each took a second for 64 of a remote machine's threads).
 const fileIndex = new Map();
 const MISSING_RETRY_MS = 10 * 60 * 1000;
 function withSubagents(files, nativeId) {
@@ -365,8 +416,7 @@ function spendFor(conn, threadIds) {
   loadRates();
   if (!spendCache) {
     try {
-      spendText = fs.readFileSync(SPEND_CACHE, "utf8");
-      const cached = JSON.parse(spendText);
+      const cached = JSON.parse(fs.readFileSync(SPEND_CACHE, "utf8"));
       spendCache = cached && cached.v === SPEND_CACHE_VERSION && cached.files && typeof cached.files === "object" ? cached.files : {};
     } catch {
       spendCache = {};
@@ -375,6 +425,9 @@ function spendFor(conn, threadIds) {
   const now = Date.now();
   const out = {};
   const sessions = conn.prepare("SELECT payload_json FROM orchestration_v2_projection_provider_threads WHERE thread_id = ?");
+  // The Codex logs, listed once for every session looked up in this publish.
+  let codexListed = null;
+  const codex = () => (codexListed ??= codexLogs());
   for (const threadId of threadIds) {
     let usd = 0;
     let tokens = 0;
@@ -388,7 +441,7 @@ function spendFor(conn, threadIds) {
     for (const ref of refs) {
       const [driver, nativeId] = [ref.slice(0, ref.indexOf(":")), ref.slice(ref.indexOf(":") + 1)];
       const known = fileIndex.get(ref);
-      if (!known || (!known.files.length && now - known.at > MISSING_RETRY_MS)) fileIndex.set(ref, { files: sessionFiles(driver, nativeId), at: now });
+      if (!known || (!known.files.length && now - known.at > MISSING_RETRY_MS)) fileIndex.set(ref, { files: sessionFiles(driver, nativeId, codex), at: now });
       files.push(...withSubagents(fileIndex.get(ref).files, nativeId));
     }
     // Oldest log first: a resumed session's copies are then the ones skipped.
@@ -397,32 +450,38 @@ function spendFor(conn, threadIds) {
     if (sized.some(({ file, size }) => (entry.files[file]?.offset || 0) > size)) entry = { files: {}, agg: {} };
     for (const { kind, file, size } of sized) {
       const f = (entry.files[file] ||= {});
-      try { (kind === "claude" ? readClaude : readCodex)(file, entry, f, size); } catch { continue; }
+      const from = f.offset;
+      try { (kind === "claude" ? readClaude : readCodex)(file, entry, f, size); } catch {}
+      if (f.offset !== from) spendDirty = true;
     }
-    if (now - (entry.seenAt || 0) > 86400000) entry.seenAt = now; // daily: the cache is not rewritten for this alone
+    // Daily, so this alone rewrites the cache once a day at most.
+    if (now - (entry.seenAt || 0) > 86400000) {
+      entry.seenAt = now;
+      spendDirty = true;
+    }
     spendCache[threadId] = entry;
     [usd, tokens] = entrySpend(entry);
     if (tokens) out[threadId] = { usd: Math.round(usd * 1e4) / 1e4, tokens };
   }
   // Logs of threads not looked at in a month are forgotten (read again if they come back).
-  for (const [id, entry] of Object.entries(spendCache)) if (!entry || now - (entry.seenAt || 0) > SPEND_KEEP_MS) delete spendCache[id];
-  for (const entry of Object.values(spendCache)) if (entry.seenSet) entry.seen = [...entry.seenSet];
-  const text = JSON.stringify({ v: SPEND_CACHE_VERSION, files: spendCache }, (k, v) => (k === "seenSet" ? undefined : v));
-  if (text !== spendText) {
-    try {
-      fs.mkdirSync(path.dirname(SPEND_CACHE), { recursive: true });
-      fs.writeFileSync(SPEND_CACHE + ".tmp", text, { mode: 0o600 });
-      fs.renameSync(SPEND_CACHE + ".tmp", SPEND_CACHE);
-      spendText = text;
-    } catch {}
+  for (const [id, entry] of Object.entries(spendCache)) {
+    if (entry && now - (entry.seenAt || 0) <= SPEND_KEEP_MS) continue;
+    delete spendCache[id];
+    spendDirty = true;
   }
+  saveSpendCache();
   return out;
 }
 
-function subagents(conn, threadId) {
-  const latest = conn.prepare("SELECT run_id FROM orchestration_v2_projection_subagents WHERE thread_id = ? ORDER BY started_at DESC LIMIT 1").get(threadId);
+/** The statements subagents() runs for each bot, prepared once per publish. */
+const subagentQueries = (conn) => ({
+  latest: conn.prepare("SELECT run_id FROM orchestration_v2_projection_subagents WHERE thread_id = ? ORDER BY started_at DESC LIMIT 1"),
+  run: conn.prepare("SELECT status, payload_json FROM orchestration_v2_projection_subagents WHERE thread_id = ? AND run_id = ? ORDER BY started_at"),
+});
+function subagents(queries, threadId) {
+  const latest = queries.latest.get(threadId);
   if (!latest) return [];
-  const rows = conn.prepare("SELECT status, payload_json FROM orchestration_v2_projection_subagents WHERE thread_id = ? AND run_id = ? ORDER BY started_at").all(threadId, latest.run_id);
+  const rows = queries.run.all(threadId, latest.run_id);
   if (rows.every((r) => DONE.has(String(r.status || "")))) return [];
   return rows.slice(0, MAX_SUBAGENTS).map((r) => ({ title: plain(json(r.payload_json)?.title || "").slice(0, 60), status: String(r.status || "").slice(0, 16) }));
 }
@@ -437,19 +496,22 @@ function bots(ids) {
     const rank = new Map(manual.map((id, i) => [id, i]));
     const rows = conn.prepare("SELECT thread_id, title, payload_json FROM orchestration_v2_projection_threads WHERE deleted_at IS NULL AND archived_at IS NULL AND (title LIKE ? OR thread_id IN (" + manual.map(() => "?").join(",") + "))").all("%" + MARKER + "%", ...manual);
     const isBot = (title) => { const w = String(title || "").split(/\s+/).filter(Boolean); return w.length > 0 && (w[0] === MARKER || w[w.length - 1] === MARKER); };
+    // Read one at a time, newest first, until one has text (most often the first).
     const messages = conn.prepare("SELECT role, created_at, payload_json FROM orchestration_v2_projection_messages WHERE thread_id = ? AND role IN ('assistant', 'user') ORDER BY created_at DESC LIMIT 6");
+    const subagentRuns = subagentQueries(conn);
     rows.sort((a, b) => (rank.get(a.thread_id) ?? Infinity) - (rank.get(b.thread_id) ?? Infinity));
+    // Filtered before the cap: LIKE also matches a marker mid-title, and such a thread
+    // took one of the MAX_BOTS places only to be dropped.
+    const wanted = rows.filter((row) => isBot(row.title) || rank.has(row.thread_id));
     const out = {};
-    for (const row of rows.slice(0, MAX_BOTS)) {
-      if (!isBot(row.title) && !manual.includes(row.thread_id)) continue;
+    for (const row of wanted.slice(0, MAX_BOTS)) {
       const selection = json(row.payload_json)?.modelSelection || {};
-      const effort = (selection.options || []).find((o) => o?.id === "reasoningEffort")?.value;
-      const entry = { text: "", role: "assistant", at: null, model: modelLabel(String(selection.model || "")), effort: String(effort || "").slice(0, 16), computer: cfg.computer };
-      for (const m of messages.all(row.thread_id)) {
+      const entry = { text: "", role: "assistant", at: null, model: modelLabel(String(selection.model || "")), computer: cfg.computer };
+      for (const m of messages.iterate(row.thread_id)) {
         const text = plain(String(json(m.payload_json)?.text || ""));
         if (text) { Object.assign(entry, { text, role: m.role, at: m.created_at }); break; }
       }
-      const subs = subagents(conn, row.thread_id);
+      const subs = subagents(subagentRuns, row.thread_id);
       if (subs.length) entry.subagents = subs;
       out[row.thread_id] = entry;
     }
@@ -465,7 +527,7 @@ const localDay = (iso) => {
   const d = new Date(iso || "");
   return Number.isFinite(d.getTime()) ? d.toLocaleDateString("en-CA") : null; // YYYY-MM-DD, machine time zone
 };
-function homeDatabase(envId, activityDays) {
+function homeDatabase(activityDays) {
   const conn = db();
   try {
     // Only each project's place in the list: the page counts activity per project,
@@ -507,15 +569,25 @@ const ACTIVITY_DAYS = 26 * 7;
 const USAGE_DAYS = 90;
 const SPEND_DAYS = 62;
 const HISTORY_DAYS = 8;
+/** One stored limits-history sample per this long (the published series' step). */
+const HISTORY_STEP_MS = 10 * 60000;
 const HOUR = 3600000;
 
 const { home, t3Home, t3Cli, timeZone } = cfg;
 const feedDir = path.join(home, "feeds");
 const stateDir = path.join(home, "state");
+// The temporary copy is this worker's own: a worker being disposed writes its spend cache
+// while the next loader's worker may already write the same files.
 function writeAtomic(file, text) {
+  const tmp = `${file}.${process.pid}-${threadId}.tmp`;
   fs.mkdirSync(path.dirname(file), { recursive: true });
-  fs.writeFileSync(file + ".tmp", text, { mode: 0o600 });
-  fs.renameSync(file + ".tmp", file);
+  try {
+    fs.writeFileSync(tmp, text, { mode: 0o600 });
+    fs.renameSync(tmp, file);
+  } catch (error) {
+    try { fs.rmSync(tmp, { force: true }); } catch {}
+    throw error;
+  }
 }
 const environmentId = () => { try { return fs.readFileSync(path.join(t3Home, "userdata", "environment-id"), "utf8").trim() || null; } catch { return null; } };
 const nowIso = () => new Date().toISOString().replace(/\.\d{3}Z$/, "Z");
@@ -579,62 +651,68 @@ async function readT3() {
   })();
   looking.catch(() => {}); // a failed lookup is reported below
   const session = await issuing;
-  try {
-    const { base, proto } = await looking;
-    const today = new Date();
-    const since = new Date(today.getTime() - USAGE_DAYS * 86400000).toLocaleDateString("en-CA");
-    return await new Promise((resolve, reject) => {
-      const ws = new WebSocket("ws://" + base + "/ws?orchestrationProtocol=" + proto, { headers: { Authorization: "Bearer " + session.token } });
-      let summary = null;
-      let summaryOk = false;
-      let providers = null;
-      let sources = null;
-      const finish = () => {
-        if (summary === null || sources === null) return;
+  const { base, proto } = await looking;
+  const today = new Date();
+  const since = new Date(today.getTime() - USAGE_DAYS * 86400000).toLocaleDateString("en-CA");
+  return await new Promise((resolve, reject) => {
+    const ws = new WebSocket("ws://" + base + "/ws?orchestrationProtocol=" + proto, { headers: { Authorization: "Bearer " + session.token } });
+    let summary = null;
+    let summaryOk = false;
+    let providers = null;
+    let sources = null;
+    const answer = () => ({ summary: summary || {}, summaryOk, providers: providers || [], sources: sources || [] });
+    const finish = () => {
+      if (summary === null || sources === null) return;
+      clearTimeout(timer);
+      try { ws.close(); } catch {}
+      resolve(answer());
+    };
+    // What came in time, once the summary has: T3 may send no usage-limit sources at all
+    // (none set up), or only when they change (as the Python publisher, it publishes without).
+    const timer = setTimeout(() => {
+      try { ws.close(); } catch {}
+      if (summary === null) reject(new Error("T3 API timed out"));
+      else resolve(answer());
+    }, 45000);
+    // Turned away (the session expired early, or the user revoked it): the next publish
+    // starts with a new one. Any other failure keeps it, for the next publish to reuse.
+    ws.onerror = () => {
+      clearTimeout(timer);
+      dropSession();
+      reject(new Error("T3 API connection failed"));
+    };
+    ws.onopen = () => {
+      ws.send(JSON.stringify({ _tag: "Request", id: "summary", tag: "server.getUsageSummary", headers: [], payload: { sinceDay: since, untilDay: today.toLocaleDateString("en-CA"), timeZone, awaitRefresh: false } }));
+      ws.send(JSON.stringify({ _tag: "Request", id: "config", tag: "subscribeServerConfig", headers: [], payload: { usageLimitSources: true } }));
+    };
+    ws.onmessage = (event) => {
+      let frame;
+      try { frame = JSON.parse(String(event.data)); } catch { return; }
+      if (!frame || typeof frame !== "object") return;
+      // An odd frame fails this read only, never the worker.
+      try {
+        if (frame._tag === "Ping") ws.send('{"_tag":"Pong"}');
+        else if (frame._tag === "Exit" && String(frame.requestId) === "summary") {
+          summaryOk = frame.exit?._tag === "Success";
+          summary = summaryOk ? frame.exit.value : {};
+        }
+        else if (frame._tag === "Chunk" && String(frame.requestId) === "config") {
+          ws.send(JSON.stringify({ _tag: "Ack", requestId: frame.requestId }));
+          for (const item of frame.values || []) {
+            if (!item || typeof item !== "object") continue;
+            const payload = item.payload || item.config || {};
+            if (item.type === "usageLimitSourcesUpdated") sources = payload.sources || [];
+            else if (item.type === "snapshot") providers = payload.config?.providers || payload.providers || [];
+          }
+        }
+        finish();
+      } catch (e) {
         clearTimeout(timer);
         try { ws.close(); } catch {}
-        resolve({ summary: summary || {}, summaryOk, providers: providers || [], sources: sources || [] });
-      };
-      const timer = setTimeout(() => { try { ws.close(); } catch {} reject(new Error("T3 API timed out")); }, 45000);
-      ws.onerror = () => { clearTimeout(timer); reject(new Error("T3 API connection failed")); };
-      ws.onopen = () => {
-        ws.send(JSON.stringify({ _tag: "Request", id: "summary", tag: "server.getUsageSummary", headers: [], payload: { sinceDay: since, untilDay: today.toLocaleDateString("en-CA"), timeZone, awaitRefresh: false } }));
-        ws.send(JSON.stringify({ _tag: "Request", id: "config", tag: "subscribeServerConfig", headers: [], payload: { usageLimitSources: true } }));
-      };
-      ws.onmessage = (event) => {
-        let frame;
-        try { frame = JSON.parse(String(event.data)); } catch { return; }
-        if (!frame || typeof frame !== "object") return;
-        // An odd frame fails this read only, never the worker.
-        try {
-          if (frame._tag === "Ping") ws.send('{"_tag":"Pong"}');
-          else if (frame._tag === "Exit" && String(frame.requestId) === "summary") {
-            summaryOk = frame.exit?._tag === "Success";
-            summary = summaryOk ? frame.exit.value : {};
-          }
-          else if (frame._tag === "Chunk" && String(frame.requestId) === "config") {
-            ws.send(JSON.stringify({ _tag: "Ack", requestId: frame.requestId }));
-            for (const item of frame.values || []) {
-              if (!item || typeof item !== "object") continue;
-              const payload = item.payload || item.config || {};
-              if (item.type === "usageLimitSourcesUpdated") sources = payload.sources || [];
-              else if (item.type === "snapshot") providers = payload.config?.providers || payload.providers || [];
-            }
-          }
-          finish();
-        } catch (e) {
-          clearTimeout(timer);
-          try { ws.close(); } catch {}
-          reject(e);
-        }
-      };
-    });
-  } catch (e) {
-    // A failed read may be the session (expired early, revoked by the user): the next
-    // publish starts with a new one.
-    dropSession();
-    throw e;
-  }
+        reject(e);
+      }
+    };
+  });
 }
 
 // ---------- Shaping (same as the Python publisher) ----------
@@ -650,6 +728,10 @@ const cleanWindow = (w) => {
   };
 };
 const safeLabel = (text, fallback) => { const t = String(text || "").trim(); return !t || t.includes("@") ? fallback : t.slice(0, 32); };
+// A Claude account's key in the limit history (state/limits-history.json): a hash of its
+// id, which a usage-limit hub takes from the account's auth file, an e-mail address often.
+// Kept in the worker: the feed, which the page copies into T3's storage, has no use for it.
+const accountKey = (id) => "a" + shortHash(String(id));
 function limits(providers, sources) {
   const claude = [];
   for (const p of providers) {
@@ -657,7 +739,7 @@ function limits(providers, sources) {
     if (driver !== "claudeAgent" || !p.usageLimits || p.enabled === false) continue;
     const windows = (p.usageLimits.windows || []).map(cleanWindow).filter(Boolean);
     if (!windows.length) continue;
-    claude.push({ id: p.instanceId, label: safeLabel(p.displayName || p.label || p.instanceId, "Claude"), plan: String(p.auth?.type || "").slice(0, 40), windows, checkedAt: p.usageLimits.checkedAt });
+    claude.push({ key: accountKey(p.instanceId), label: safeLabel(p.displayName || p.label || p.instanceId, "Claude"), plan: String(p.auth?.type || "").slice(0, 40), windows, checkedAt: p.usageLimits.checkedAt });
   }
   // Usage-limit hubs (Settings -> Providers; T3 names them "cliproxy-<host>", older
   // setups "codex_gateway"): every Codex account in any of them. A hub holds other
@@ -683,7 +765,7 @@ function limits(providers, sources) {
       for (const a of s.accounts || []) {
         if (a.driver !== "claudeAgent") continue;
         const windows = (a.usageLimits?.windows || []).map(cleanWindow).filter(Boolean);
-        if (windows.length) claude.push({ id: String(s.id + ":" + a.id).slice(0, 80), label: safeLabel(a.email, "Claude " + (claude.length + 1)), plan: String(a.plan || "").slice(0, 40), windows, checkedAt: a.usageLimits.checkedAt });
+        if (windows.length) claude.push({ key: accountKey(s.id + ":" + a.id), label: safeLabel(a.email, "Claude " + (claude.length + 1)), plan: String(a.plan || "").slice(0, 40), windows, checkedAt: a.usageLimits.checkedAt });
       }
     }
   }
@@ -773,18 +855,23 @@ function updateHistory(pool, claude, at) {
   const entry = { t: at, ...(pool || {}) };
   for (const c of claude) {
     const weekly = c.windows.find(isWeekly);
-    if (weekly) (entry.claudeWeekUsed ||= {})[c.id] = weekly.usedPercent;
+    if (weekly) (entry.claudeWeekUsed ||= {})[c.key] = weekly.usedPercent;
   }
-  history = [...history.filter((h) => (h.t || "") >= cutoff), entry];
-  writeAtomic(file, JSON.stringify(history));
-  // At most one point per 10 minutes in the published copy keeps it small.
-  const thinned = [];
+  // At most one sample per HISTORY_STEP_MS is stored, and the file is written only when
+  // that changes: it kept every run's sample (every 2 minutes) and was rewritten whole on
+  // each run. The pool fields stay in each sample: codexSeries reads them.
+  const kept = [];
   let last = null;
-  for (const h of history) {
+  for (const h of Array.isArray(history) ? history : []) {
+    if (!h || typeof h !== "object" || (h.t || "") < cutoff) continue;
     const t = Date.parse(h.t);
-    if (last === null || t - last >= 10 * 60000 || h === history[history.length - 1]) { thinned.push(h); last = t; }
+    if (!Number.isFinite(t)) continue; // a sample with no time would hold back every later one
+    if (last === null || t - last >= HISTORY_STEP_MS) { kept.push(h); last = t; }
   }
-  return thinned;
+  if (last === null || Date.parse(at) - last >= HISTORY_STEP_MS) kept.push(entry);
+  if (JSON.stringify(kept) !== JSON.stringify(history)) writeAtomic(file, JSON.stringify(kept));
+  // This run's sample is the newest point, stored or not.
+  return kept[kept.length - 1] === entry ? kept : [...kept, entry];
 }
 function claudeSeries(history) {
   // Each account's week counts the same (T3 weighs Claude plans only in the five-hour window).
@@ -821,11 +908,447 @@ function usageKept(summary, ok) {
   return next;
 }
 
-async function publishHome() {
+// ---------- Thread status feed (the Status view) ----------
+// Every thread's status as T3's sidebar would show it, for the threads its list does not
+// show (a collapsed folder's). T3's rules (Sidebar.logic: thread status, unread; threadSettled;
+// its server's thread state), the first that holds:
+// - "approval": a pending approval. T3 keeps one request a thread (any that is not a question
+//   first, the newest first), so a sign-in to renew, which has no word, hides an older one.
+// - "input": a question, or a secret or link card only you can answer.
+// - "request": a guest's message waiting.
+// - "waiting": no run is setting up, starting or running, the latest run is over (completed,
+//   interrupted, cancelled, or still taking its checkpoint), and work T3 waits on is still
+//   open: a subagent or tool call (not a command, not a persistent tool), a task the provider
+//   reports that is awaited or more than a command or monitor, or a watched pull request whose
+//   checks may still run (that one before any run too). Or a running run waits on another
+//   thread (T3's t3_thread_wait, or delegate_task waiting) with nothing else in flight but
+//   subagents T3 runs itself.
+// - "preparing": a run setting up; "working": a run under way, or the latest run queued, with
+//   goal: true (T3's label "Goal") while the provider thread it runs on pursues an active goal.
+// - "limited": the latest run failed on a usage limit (its own error, not a subagent's), unless
+//   the thread's provider session (the newest on its provider) reports another error. Seeing
+//   it does not clear it.
+// - "failed": the latest run failed otherwise, after you last looked.
+// - Else a woken snooze is "woke", a run finished since you last looked "done".
+// The latest run is the newest one not held in the queue, not cancelled before it started
+// while an earlier one ran on, and not T3's own idle "/compact". But while the run that ran
+// last (the one still going, if one is; a "/compact" counts) failed on a usage limit, that one
+// is the latest: runs queued after it, or cancelled before they started, do not change that.
+// A side chat's requests and a running subagent's approvals and cards count for the thread
+// they belong to (as T3 passes them up). Settled and snoozed threads are left out, and the
+// subagents and side chats that are part of another thread (forks are listed). Not read here
+// (T3's own row, when it shows the thread, has them): a run status this T3 does not know
+// ("Failed" there), and two things this machine's T3 server does not have either:
+// - "Setting up" for a thread with no run yet. The server makes a launched thread's first run
+//   in the same command as the thread, so what it has is read here ("preparing"); T3's client
+//   shows "Setting up" a moment longer for a draft of its own it is promoting, from its
+//   composer drafts store in the page (Sidebar.logic R, on the drafts marked promotedTo).
+// - A request from a thread T3 runs on another machine for one of these (a task delegated
+//   there): it is in that machine's database, which T3's client reads over its own connection
+//   to that machine; the server here records only the task and, at its end, its result.
+const MAX_THREADS = 400;
+// T3's own SQL (its server's thread state), as fragments over an alias:
+// a "/compact" T3 sends an idle thread by itself (not a message you wrote),
+const IDLE_COMPACTION = (m) => `(${m}.role = 'user'
+  AND lower(trim(json_extract(${m}.payload_json, '$.text'), char(9, 10, 11, 12, 13, 32, 160, 5760, 8192, 8193, 8194, 8195, 8196, 8197, 8198, 8199, 8200, 8201, 8202, 8232, 8233, 8239, 8287, 12288, 65279))) = '/compact'
+  AND coalesce(json_array_length(${m}.payload_json, '$.attachments'), 0) = 0
+  AND (json_extract(${m}.payload_json, '$.idleCompaction') IS NOT NULL
+    OR (json_extract(${m}.payload_json, '$.createdBy') = 'agent' AND json_extract(${m}.payload_json, '$.creationSource') = 'server')))`;
+// the run it answers, kept out of sight (unless its compaction failed),
+const SILENT_RUN = (r) => `(${r}.status <> 'failed'
+  AND EXISTS (SELECT 1 FROM orchestration_v2_projection_messages prompt
+    WHERE prompt.message_id = json_extract(${r}.payload_json, '$.userMessageId') AND ${IDLE_COMPACTION("prompt")})
+  AND NOT EXISTS (SELECT 1 FROM orchestration_v2_projection_turn_items compaction
+    WHERE compaction.thread_id = ${r}.thread_id AND compaction.run_id = ${r}.run_id AND compaction.type = 'compaction' AND compaction.status = 'failed'))`;
+// and the run T3 presents as the latest: not a held queued one, not one cancelled before it
+// started that an earlier run outlived, not a silent one.
+const PRESENTED_RUN = (threadId) => `(SELECT candidate.run_id FROM orchestration_v2_projection_runs candidate
+  WHERE candidate.thread_id = ${threadId}
+    AND NOT (candidate.status = 'queued' AND json_extract(candidate.payload_json, '$.queueHeld') IS 1)
+    AND NOT (candidate.status = 'cancelled' AND json_extract(candidate.payload_json, '$.startedAt') IS NULL AND candidate.completed_at IS NOT NULL
+      AND EXISTS (SELECT 1 FROM orchestration_v2_projection_runs earlier
+        WHERE earlier.thread_id = candidate.thread_id AND earlier.ordinal < candidate.ordinal AND earlier.status <> 'queued'
+          AND NOT ${SILENT_RUN("earlier")}
+          AND (earlier.completed_at IS NULL OR julianday(earlier.completed_at) >= julianday(candidate.completed_at))))
+    AND NOT ${SILENT_RUN("candidate")}
+  ORDER BY candidate.ordinal DESC, candidate.run_id DESC LIMIT 1)`;
+// The run that ended last (one not ended counts as last; a queued one, or one cancelled
+// before it started, does not count; a silent one does): while a usage limit failed it, T3
+// presents it as the latest. Written as T3 writes it: T3's partial index for it
+// (runs_last_executed_idx) serves exactly this filter and order.
+const LAST_EXECUTED_RUN = (threadId) => `(SELECT x.run_id FROM orchestration_v2_projection_runs x
+  WHERE x.thread_id = ${threadId} AND x.status <> 'queued'
+    AND NOT (x.status = 'cancelled' AND json_extract(x.payload_json, '$.startedAt') IS NULL)
+  ORDER BY x.completed_at IS NULL DESC, x.completed_at DESC, x.ordinal DESC, x.run_id DESC LIMIT 1)`;
+// A run's own failure: the newest failed error item at its root node (one at a subagent's
+// node is the subagent's; each attempt of a retried provider turn has a row of its own).
+const ROOT_FAILURE = (r) => `(SELECT json_extract(e.payload_json, '$.failure') FROM orchestration_v2_projection_turn_items e
+  WHERE e.thread_id = ${r}.thread_id AND e.run_id = ${r}.run_id AND e.type = 'error' AND e.status = 'failed'
+    AND e.node_id IS json_extract(${r}.payload_json, '$.rootNodeId')
+  ORDER BY e.updated_at DESC, e.ordinal DESC, e.turn_item_id DESC LIMIT 1)`;
+// The last error of the provider session bound to the thread on its current provider instance
+// (the newest such session; bindings first, as T3 reads them): a failure whose message differs
+// is no longer the thread's error (T3's threadErrorSummary).
+const SESSION_ERROR = (t) => `(SELECT json_extract(s.payload_json, '$.lastError')
+  FROM orchestration_v2_projection_provider_session_bindings bnd
+  CROSS JOIN orchestration_v2_projection_provider_sessions s ON s.provider_session_id = bnd.provider_session_id
+  WHERE bnd.thread_id = ${t}.thread_id AND s.provider_instance_id = ${t}.provider_instance_id
+  ORDER BY s.updated_at DESC, s.provider_session_id DESC LIMIT 1)`;
+// A run under way: setting up, starting, running or taking its checkpoint. Written with the
+// statuses of T3's partial index of runs not over (runs_recovery_idx), queued left out: SQLite
+// takes a partial index only for a query that repeats its condition.
+const UNDER_WAY = (r) => `${r}.status IN ('queued', 'preparing', 'starting', 'running', 'waiting') AND ${r}.status <> 'queued'`;
+// Each thread's run under way, the newest first (T3's activity run: not a silent one), and when
+// its work started (T3's activity_run_started_at).
+const ACTIVE_RUNS = `SELECT a.thread_id AS thread, a.run_id AS run, a.status AS status,
+    COALESCE(json_extract(a.payload_json, '$.workStartedAt'), json_extract(a.payload_json, '$.startedAt'), a.requested_at) AS at
+  FROM orchestration_v2_projection_runs a
+  WHERE ${UNDER_WAY("a")} AND NOT ${SILENT_RUN("a")}
+  ORDER BY a.thread_id, a.ordinal DESC`;
+// The work in flight in a running one ([type, tool, mode, origin] each): all T3 reads to tell a
+// run that only waits on other threads (deriveBlockedOnThreadWait).
+const IN_FLIGHT = `SELECT json_group_array(json_array(i.type, json_extract(i.payload_json, '$.toolName'),
+    json_extract(i.payload_json, '$.input.mode'), json_extract(i.payload_json, '$.origin'))) AS items
+  FROM orchestration_v2_projection_turn_items i
+  WHERE i.thread_id = ? AND i.run_id = ? AND i.status IN ('running', 'waiting')
+    AND i.type IN ('command_execution', 'dynamic_tool', 'subagent', 'file_change', 'file_search', 'web_search', 'compaction')`;
+// Work T3 waits on before it calls a thread's run done (derivePendingBackgroundWork). None
+// while a run is setting up, starting or running;
+const INTERRUPTIBLE_RUN = (threadId) => `EXISTS (SELECT 1 FROM orchestration_v2_projection_runs a
+  WHERE a.thread_id = ${threadId} AND a.status IN ('preparing', 'starting', 'running') AND NOT ${SILENT_RUN("a")})`;
+// else a watched pull request whose checks may still run,
+const PR_WATCH_AWAITED = (t) => `EXISTS (SELECT 1 FROM json_each(${t}.payload_json, '$.pullRequests') pr
+  WHERE json_type(pr.value, '$.watch') = 'object' AND json_extract(pr.value, '$.source') IS NOT 'stack-dismissed'
+    AND json_extract(pr.value, '$.snapshot.state') IS NOT 'merged' AND json_type(pr.value, '$.watch.checksPending') IS NOT 'false')`;
+// a task the provider reports for the thread (on its active provider thread, if it names one)
+// that is awaited or more than a command or monitor (one of a kind T3 does not know holds),
+const CONSIDERED_PT = (p, t) => `${p}.thread_id = ${t}.thread_id
+    AND (json_extract(${t}.payload_json, '$.activeProviderThreadId') IS NULL
+      OR ${p}.provider_thread_id = json_extract(${t}.payload_json, '$.activeProviderThreadId'))`;
+const PROVIDER_TASK_HOLDS = (t) => `EXISTS (SELECT 1 FROM orchestration_v2_projection_provider_threads p
+    CROSS JOIN json_each(p.payload_json, '$.pendingBackgroundTasks') task
+  WHERE ${CONSIDERED_PT("p", t)} AND json_extract(task.value, '$.taskId') <> ''
+    AND (json_type(task.value, '$.awaited') = 'true' OR json_extract(task.value, '$.kind') IS NULL
+      OR json_extract(task.value, '$.kind') NOT IN ('command', 'monitor')))`;
+// or a subagent or tool still open (not a persistent tool; not in a rolled-back run, or one
+// gone), unless a task the provider reports has its id: T3 lists that task in its place.
+const ITEM_HOLDS = (t) => `EXISTS (SELECT 1 FROM orchestration_v2_projection_turn_items i
+    LEFT JOIN orchestration_v2_projection_runs ir ON ir.run_id = i.run_id
+  WHERE i.thread_id = ${t}.thread_id AND i.type IN ('dynamic_tool', 'subagent') AND i.status IN ('pending', 'running', 'waiting')
+    AND (i.run_id IS NULL OR ir.status <> 'rolled_back')
+    AND NOT (i.type = 'dynamic_tool' AND json_type(i.payload_json, '$.input.persistent') IS 'true')
+    AND NOT EXISTS (SELECT 1 FROM orchestration_v2_projection_provider_threads p2
+        CROSS JOIN json_each(p2.payload_json, '$.pendingBackgroundTasks') task2
+      WHERE ${CONSIDERED_PT("p2", t)}
+        AND json_extract(task2.value, '$.taskId') = COALESCE(NULLIF(json_extract(i.payload_json, '$.nativeItemRef.nativeId'), ''), i.turn_item_id)))`;
+// Whether such work holds the thread: while no run is setting up, starting or running, after
+// a run that ended ('waiting': its turn is over, its checkpoint still being taken), and before
+// any run for a pull request's watch. Not after a failed run: T3 shows the failure.
+const ENDED = "('cancelled', 'completed', 'interrupted', 'waiting')";
+const BACKGROUND_HOLD = (t, r) => `CASE WHEN ${INTERRUPTIBLE_RUN(`${t}.thread_id`)} THEN 0
+    WHEN ${r}.run_id IS NULL THEN ${PR_WATCH_AWAITED(t)}
+    WHEN ${r}.status IN ${ENDED} THEN ${PR_WATCH_AWAITED(t)} OR ${PROVIDER_TASK_HOLDS(t)} OR ${ITEM_HOLDS(t)}
+    ELSE 0 END`;
+// Whether the goal of the thread's active provider thread is active: T3 then labels "Working"
+// "Goal". Only that provider thread's goal (T3's activeProviderGoalForShell): none without
+// one, unlike the tasks above. Looked up by its key, so it costs little on every thread.
+const ACTIVE_GOAL = (t) => `EXISTS (SELECT 1 FROM orchestration_v2_projection_provider_threads g
+  WHERE g.provider_thread_id = json_extract(${t}.payload_json, '$.activeProviderThreadId') AND g.thread_id = ${t}.thread_id
+    AND json_extract(g.payload_json, '$.goal.status') = 'active')`;
+// T3's two tools that wait on another thread, by the names providers give tools
+// ("mcp__t3-code__t3_thread_wait", Codex's "t3-code-direct.delegate_task", a label ending in
+// " completed"): T3's resolveT3McpToolId for these two (no other tool of T3's ends in either).
+const T3_SERVERS = new Set(["t3-code", "t3_code", "t3code", "t3-code-direct", "t3_code_direct"]);
+const WAIT_TOOLS = ["t3_thread_wait", "delegate_task"];
+function waitTool(name) {
+  if (typeof name !== "string") return null;
+  const label = name.replace(/\s+(?:complete|completed)\s*$/i, "").trim();
+  const wait = (tool) => (WAIT_TOOLS.includes(tool) ? tool : null);
+  const mcp = /^mcp__(.+?)__(.+)$/i.exec(label);
+  if (mcp) return T3_SERVERS.has(mcp[1].toLowerCase()) ? wait(mcp[2]) : null;
+  const namespaced = /^(?:t3[-_]code[-_]direct|t3-code|t3_code|t3code)(?:[.:/]|\s*·\s*)(.+)$/i.exec(label);
+  if (namespaced) return wait(namespaced[1]);
+  const bare = wait(/^(?:mcp[-_]{1,2})?t3[-_ ]?code(?:__|[-_.:/ ])(.+)$/i.exec(label)?.[1] ?? label);
+  if (bare || !/^t3-code-/i.test(label)) return bare;
+  return WAIT_TOOLS.find((tool) => label.endsWith(`_${tool}`)) ?? null; // a "t3-code-…_<tool>" label
+}
+/** T3's blockedOnThreadWait over IN_FLIGHT: waits on other threads are all that is in flight. */
+function waitsOnThread(inFlight) {
+  let waits = false;
+  for (const [type, toolName, mode, origin] of json(inFlight) ?? []) {
+    if (type === "subagent" && origin === "app_owned") continue; // a thread T3 runs for it reports back
+    const tool = type === "dynamic_tool" ? waitTool(toolName) : null;
+    if (tool !== "t3_thread_wait" && !(tool === "delegate_task" && mode === "wait")) return false;
+    waits = true;
+  }
+  return waits;
+}
+// A git remote as T3's sidebar folder key: "github.com/owner/repo". Kept per folder until
+// its .git/config changes (the feed is read every couple of seconds while shown).
+const repoKeys = new Map(); // root -> { mtime, key }
+function repoKey(root) {
+  const file = path.join(root, ".git", "config");
+  let mtime;
+  try { mtime = fs.statSync(file).mtimeMs; } catch { repoKeys.delete(root); return null; }
+  const known = repoKeys.get(root);
+  if (known && known.mtime === mtime) return known.key;
+  const key = readRepoKey(file);
+  repoKeys.set(root, { mtime, key });
+  return key;
+}
+function readRepoKey(file) {
+  let config;
+  try { config = fs.readFileSync(file, "utf8"); } catch { return null; }
+  const url = (/\[remote "origin"\][^[]*?\burl\s*=\s*(\S+)/.exec(config) || [])[1];
+  if (!url) return null;
+  const m = /^(?:[a-z+]+:\/\/)?(?:[^@/\s]+@)?([^/:\s]+)(?::\d+)?[:/](.+?)(?:\.git)?\/?$/i.exec(url.trim());
+  return m ? `${m[1].toLowerCase()}/${m[2]}` : null;
+}
+// The rows the statuses are read from, a thread each. Not the subagents and side chats that
+// are part of another thread (their requests count for that one): T3's own filter for its
+// list, which also keeps the cost to the threads listed (subagents are most of a database).
+// Forks are threads of their own, listed though T3 nests them. "limited", "waiting" and a goal
+// come from T3's provider tables (provider threads and sessions, their bindings, a turn item's
+// node and order): without them (exact false: an older T3's database, or not T3's) their
+// columns are NULL, and the statuses are read without those rather than not at all.
+function threadRowsSql(exact) {
+  const needs = (sql) => (exact ? sql : "NULL");
+  return `SELECT t.thread_id AS id, t.project_id AS project, t.title AS title, t.updated_at AS updated,
+        json_extract(t.payload_json, '$.lastVisitedAt') AS visited,
+        json_extract(t.payload_json, '$.settledOverride') AS settled,
+        json_extract(t.payload_json, '$.settledAt') AS settledAt,
+        json_extract(t.payload_json, '$.snoozedUntil') AS snoozedUntil,
+        json_extract(t.payload_json, '$.snoozedAt') AS snoozedAt,
+        (SELECT COUNT(*) FROM json_each(t.payload_json, '$.guestShare.messages') m WHERE json_extract(m.value, '$.status') = 'pending') AS guests,
+        r.status AS run, r.requested_at AS runAt, json_extract(r.payload_json, '$.startedAt') AS runStart, r.completed_at AS runDone,
+        ${needs(`CASE WHEN r.status = 'failed' THEN ${ROOT_FAILURE("r")} END`)} AS runFailure,
+        -- The run that ended last, when it failed: the latest run instead, if a usage limit did it.
+        lim.requested_at AS limitAt, json_extract(lim.payload_json, '$.startedAt') AS limitStart, lim.completed_at AS limitDone,
+        ${needs(`CASE WHEN lim.run_id IS NOT NULL THEN ${ROOT_FAILURE("lim")} END`)} AS limitFailure,
+        ${needs(`CASE WHEN r.status = 'failed' OR lim.run_id IS NOT NULL THEN ${SESSION_ERROR("t")} END`)} AS sessionError,
+        ${needs(BACKGROUND_HOLD("t", "r"))} AS held,
+        ${needs(ACTIVE_GOAL("t"))} AS goal
+      FROM orchestration_v2_projection_threads t
+      LEFT JOIN orchestration_v2_projection_runs r ON r.run_id = ${PRESENTED_RUN("t.thread_id")}
+      LEFT JOIN orchestration_v2_projection_runs lim ON lim.run_id = ${LAST_EXECUTED_RUN("t.thread_id")} AND lim.status = 'failed'
+      WHERE t.deleted_at IS NULL AND t.archived_at IS NULL
+        AND json_extract(t.payload_json, '$.lineage.relationshipToParent') IS NOT 'subagent'
+        AND json_extract(t.payload_json, '$.lineage.sideChat') IS NOT 1`;
+}
+let exactRead = true; // whether the last read was threadRowsSql(true) (falling back is logged once)
+function threadStatuses(envId) {
+  const conn = db();
+  try {
+    const now = Date.now();
+    const time = (iso) => { const t = Date.parse(iso || ""); return Number.isNaN(t) ? null : t; };
+    // What is rare is read as a set of its own, through T3's indexes for it, and matched to the
+    // threads here (asked of every thread, one at a time, it was most of a publish): the runs under
+    // way; per thread what T3 itself picks (its server's thread state): one pending request
+    // (approvals before questions, the newest first), its newest waiting secret card on a run
+    // under way and its newest waiting link card.
+    const first = (sql) => {
+      const byThread = new Map();
+      for (const row of conn.prepare(sql).all()) if (!byThread.has(row.thread)) byThread.set(row.thread, row);
+      return byThread;
+    };
+    const active = first(ACTIVE_RUNS);
+    const requests = first(`SELECT thread_id AS thread, kind || '|' || created_at AS request FROM orchestration_v2_projection_runtime_requests
+      WHERE status = 'pending' ORDER BY thread_id, (kind = 'user_input') ASC, created_at DESC, runtime_request_id DESC`);
+    const secrets = first(`SELECT s.thread_id AS thread, max(s.updated_at) AS at FROM orchestration_v2_projection_runs r
+        CROSS JOIN orchestration_v2_projection_turn_items s ON s.thread_id = r.thread_id AND s.run_id = r.run_id
+      WHERE ${UNDER_WAY("r")} AND s.type = 'secret_request' AND s.status = 'waiting' GROUP BY s.thread_id`);
+    const links = first(`SELECT thread_id AS thread, updated_at || '|' || coalesce(json_extract(payload_json, '$.startedAt'), updated_at) AS link
+      FROM orchestration_v2_projection_turn_items WHERE type = 'link_request' AND status = 'waiting'
+      ORDER BY thread_id, updated_at DESC, turn_item_id DESC`);
+    // Read for those threads only: when you last wrote in one with a link card, and the lineage of
+    // the threads that ask something (and of those they pass it up to). T3 walks up through the
+    // subagents and side chats to the first thread of its own (a fork copies its source's root
+    // id, so the root is not that thread).
+    const wrote = conn.prepare(`SELECT m.updated_at AS at FROM orchestration_v2_projection_messages m
+      WHERE m.thread_id = ? AND m.role = 'user' AND json_extract(m.payload_json, '$.createdBy') = 'user' AND NOT ${IDLE_COMPACTION("m")}
+      ORDER BY m.updated_at DESC LIMIT 1`);
+    const lineageOf = conn.prepare(`SELECT json_extract(payload_json, '$.lineage.parentThreadId') AS parent,
+        json_extract(payload_json, '$.lineage.relationshipToParent') AS relation,
+        json_extract(payload_json, '$.lineage.sideChat') AS sideChat,
+        json_extract(payload_json, '$.creationSource') AS source
+      FROM orchestration_v2_projection_threads WHERE thread_id = ? AND deleted_at IS NULL`);
+    const lineages = new Map();
+    const lineage = (id) => {
+      if (!lineages.has(id)) lineages.set(id, lineageOf.get(id) ?? null);
+      return lineages.get(id); // null: no such thread, or a deleted one
+    };
+    const isSideChat = (r) => Boolean(r && r.parent && (r.sideChat === 1 || r.sideChat === true));
+    const isSubagent = (r) => Boolean(r && r.parent && r.relation === "subagent");
+    /** What a thread asks of you itself: { what: "approval" | "input" | null, at, userOnly, refresh }. */
+    function asks(id) {
+      const request = requests.get(id)?.request ?? null;
+      const [kind, at] = request ? [request.slice(0, request.indexOf("|")), request.slice(request.indexOf("|") + 1)] : [null, null];
+      // A secret or link card only you can answer (a link one until you have written since it
+      // started: a message of yours, not T3's own or another agent's).
+      const linkCard = links.get(id)?.link ?? null;
+      const [linkAt, linkStart] = linkCard ? linkCard.split("|") : [null, null];
+      const wroteAt = linkAt ? (wrote.get(id)?.at ?? null) : null;
+      const link = linkAt && !(wroteAt && time(wroteAt) > time(linkStart)) ? linkAt : null;
+      const card = [secrets.get(id)?.at ?? null, link].filter(Boolean).sort().at(-1) ?? null;
+      if (card && (!kind || kind === "user_input") && (!at || card >= at)) return { what: "input", at: card, userOnly: true, refresh: false };
+      if (!kind) return null;
+      if (kind === "auth_refresh") return { what: null, at, userOnly: false, refresh: true }; // a sign-in to renew: no word, but it wakes
+      return { what: kind === "user_input" ? "input" : "approval", at, userOnly: false, refresh: false };
+    }
+    // thread -> { what, at, wakes (shows a snoozed thread again whenever it came), askedAt
+    // (its own latest question: wakes it only if asked after the snooze) }
+    const pending = new Map();
+    const note = (id, what, at, wakes, asked) => {
+      const had = pending.get(id) ?? { what: null, at: null, wakes: false, askedAt: null };
+      // An approval outranks a question (T3 checks it first); of the same kind, the earliest.
+      if (what && (!had.what || (had.what === "input" && what === "approval"))) [had.what, had.at] = [what, at];
+      else if (what && had.what === what && at < had.at) had.at = at;
+      if (wakes) had.wakes = true;
+      if (asked && (!had.askedAt || at > had.askedAt)) had.askedAt = at;
+      pending.set(id, had);
+    };
+    for (const id of new Set([...requests.keys(), ...secrets.keys(), ...links.keys()])) {
+      const f = lineage(id);
+      if (!f) continue;
+      const a = asks(id);
+      if (!a) continue;
+      note(id, a.what, a.at, a.what !== "input", a.what === "input");
+      if (a.refresh) continue;
+      // T3 shows on its thread: a side chat's request (its direct parent only), and a
+      // running subagent's approval or card only you can answer, unless the provider made
+      // it (its own Task tool), on every thread up the chain of subagents and side chats.
+      if (isSideChat(f)) note(f.parent, a.what, a.at, true, false);
+      else if (isSubagent(f) && f.source !== "provider" && active.has(id) && (a.what === "approval" || a.userOnly)) {
+        const seen = new Set([id]);
+        let up = f.parent;
+        while (up && !seen.has(up)) {
+          seen.add(up);
+          note(up, a.what, a.at, true, false);
+          const g = lineage(up);
+          up = g && (isSubagent(g) || isSideChat(g)) ? g.parent : null;
+        }
+      }
+    }
+    // SQLite names a missing table or column when it prepares the query (threadRowsSql), and
+    // stops at JSON not shaped as T3 writes it (a task that is no object) when it runs it.
+    let rows;
+    // The running ones' work in flight, a part of the exact read (from T3's provider work too).
+    let inFlight = new Map();
+    try {
+      rows = conn.prepare(threadRowsSql(true)).all();
+      const flight = conn.prepare(IN_FLIGHT);
+      for (const t of rows) {
+        const run = active.get(t.id);
+        if (run?.status === "running") inFlight.set(t.id, flight.get(t.id, run.run).items);
+      }
+      exactRead = true;
+    } catch (e) {
+      if (exactRead) log("thread statuses read without limits and background work:", e && e.message);
+      exactRead = false;
+      rows = conn.prepare(threadRowsSql(false)).all();
+      inFlight = new Map();
+    }
+    const threads = [];
+    const used = new Set();
+    for (const t of rows) {
+      // Settled by hand, or by T3 itself (settledAt), unless made active again (T3's rule).
+      if (t.settled === "settled" || (t.settledAt && t.settled !== "active")) continue;
+      const snoozedUntil = time(t.snoozedUntil);
+      const visited = time(t.visited);
+      const req = pending.get(t.id);
+      // The latest run as T3 has it: the one it presents, unless a usage limit failed the run
+      // that ended last. A failure counts as a usage limit while the provider's session reports
+      // no other error.
+      const limitHit = (failure) => { const f = json(failure); return f?.class === "usage_limit" && (t.sessionError === null || t.sessionError === f.message); };
+      const blocked = limitHit(t.limitFailure);
+      const [run, runAt, runStart, runDone] = blocked ? ["failed", t.limitAt, t.limitStart, t.limitDone] : [t.run, t.runAt, t.runStart, t.runDone];
+      const limited = blocked || (run === "failed" && limitHit(t.runFailure));
+      // Snoozed: out of sight until it wakes, unless it needs you meanwhile (T3's rule): an
+      // approval, a subagent's request or a guest's message at once; its own question or a
+      // failure only if it came after the snooze (one from before is what you put off).
+      if (snoozedUntil !== null && snoozedUntil > now) {
+        const since = time(t.snoozedAt);
+        const after = (iso) => iso && (since === null || time(iso) > since);
+        const failedSince = run === "failed" && (since === null || (runDone && time(runDone) > since));
+        if (!(req?.wakes || t.guests > 0 || after(req?.askedAt) || failedSince)) continue;
+      }
+      // Failed: if the failure came after you last looked (T3: when the run ended, else when it
+      // started, else when it was asked for); else it is just finished. Limited either way.
+      const failedAt = time(runDone ?? runStart ?? runAt);
+      const failed = run === "failed" && !limited && (visited === null || failedAt === null || failedAt > visited);
+      // When it woke (T3's threadSettled): while it needs you, the failure, else the question,
+      // after the snooze, else its last change (or the snooze if it never ran); else the
+      // snooze's end, once that came.
+      let wokeAt = null;
+      if (snoozedUntil !== null) {
+        const since = time(t.snoozedAt);
+        const afterSnooze = (iso) => (iso && (since === null || time(iso) > since) ? time(iso) : null);
+        if (req || t.guests > 0 || failed) wokeAt = (failed && afterSnooze(runDone)) || afterSnooze(req?.askedAt) || (run ? time(t.updated) : since);
+        else if (snoozedUntil <= now) wokeAt = snoozedUntil;
+      }
+      // Waiting (T3): on work that holds the thread (BACKGROUND_HOLD; not after a failure), or in
+      // a running run, on other threads only.
+      const underWay = active.get(t.id);
+      const waiting = (t.held === 1 && run !== "failed") || (underWay?.status === "running" && waitsOnThread(inFlight.get(t.id) ?? null));
+      let status;
+      let at = t.updated;
+      if (req?.what) [status, at] = [req.what, req.at];
+      else if (t.guests > 0) status = "request"; // a guest's message waits for you
+      else if (waiting) [status, at] = ["waiting", underWay ? underWay.at : runDone || runAt];
+      else if (underWay?.status === "preparing") [status, at] = ["preparing", underWay.at];
+      else if (underWay) [status, at] = ["working", underWay.at];
+      else if (run === "queued") [status, at] = ["working", runAt]; // the latest run queued (not held): Working in T3
+      else if (limited) [status, at] = ["limited", runDone || runAt];
+      else if (failed) [status, at] = ["failed", runDone || runAt];
+      else if (wokeAt !== null && (visited === null || visited < wokeAt)) [status, at] = ["woke", new Date(wokeAt).toISOString()];
+      else if (runDone && run !== "interrupted" && run !== "cancelled" && visited !== null && time(runDone) > visited) [status, at] = ["done", runDone];
+      else status = "idle";
+      // The title as T3 shows it (only spaces folded: plain() would drop "_" and "*" from it).
+      const row = { id: t.id, project: t.project || null, title: String(t.title || "").replace(/\s+/g, " ").trim().slice(0, 120), status, at: at || t.updated || null };
+      // "Goal" is T3's label for "working" alone (not "Setting up", not "Waiting"). Only when it
+      // holds, so a feed without goals reads as before.
+      if (status === "working" && t.goal === 1) row.goal = true;
+      threads.push(row);
+      if (t.project) used.add(t.project);
+    }
+    // Most recent first, the busy ones before the idle ones if there are too many.
+    const rank = (s) => (s === "idle" ? 1 : 0);
+    threads.sort((a, b) => rank(a.status) - rank(b.status) || String(b.at).localeCompare(String(a.at)));
+    threads.length = Math.min(threads.length, MAX_THREADS);
+    // Each project's possible sidebar folder keys, the likeliest first: its repository,
+    // its folder on this machine (T3's key for a folder that is no repository), T3's
+    // scratch folder ("No project").
+    const projects = {};
+    const scratch = path.join(cfg.t3Home, "scratch");
+    for (const p of conn.prepare("SELECT project_id AS id, title, workspace_root AS root FROM projection_projects WHERE deleted_at IS NULL").all()) {
+      if (!used.has(p.id)) continue;
+      const keys = [repoKey(p.root), envId && `${envId}:${p.root}`, p.root === scratch || p.root.startsWith(scratch + path.sep) ? "\u0000no-project" : null].filter(Boolean);
+      projects[p.id] = { title: String(p.title || "").replace(/\s+/g, " ").trim().slice(0, 60), keys };
+    }
+    return { threads, projects };
+  } finally {
+    conn.close();
+  }
+}
+let lastThreads = null; // stable() of the statuses last written
+function publishThreads() {
   const envId = environmentId();
+  const next = threadStatuses(envId);
+  const file = path.join(feedDir, "t3plus-threads.json");
+  // A worker started since (t3+ re-run): the copy on disk is what was last written.
+  // The machine too: a file written while its id was unreadable is written again once it is.
+  if (lastThreads === null) { try { const { environmentId, threads, projects } = JSON.parse(fs.readFileSync(file, "utf8")); lastThreads = stable({ envId: environmentId, threads, projects }); } catch {} }
+  const nextStable = stable({ envId, ...next });
+  if (nextStable === lastThreads) return false;
+  writeAtomic(file, JSON.stringify({ version: 1, generatedAt: nowIso(), environmentId: envId, ...next }));
+  lastThreads = nextStable;
+  return true;
+}
+
+async function publishHome() {
   const api = readT3();
   let dbPart;
-  try { dbPart = homeDatabase(envId, ACTIVITY_DAYS); } catch (e) { api.catch(() => {}); throw e; }
+  try { dbPart = homeDatabase(ACTIVITY_DAYS); } catch (e) { api.catch(() => {}); throw e; }
   const t3 = await api;
   const lim = limits(t3.providers, t3.sources);
   const pool = codexPool(lim.codex);
@@ -851,7 +1374,7 @@ async function publishHome() {
     projects: dbPart.projects,
     activity: dbPart.activity,
     spend: usage.spend,
-    limits: { ...lim, pool },
+    limits: { ...lim, claude: lim.claude.map(({ key, ...account }) => account), pool },
     codexSeries: codexSeries(history),
     claudeSeries: claudeSeries(history),
     aiActivity: usage.activity,
@@ -860,9 +1383,20 @@ async function publishHome() {
   return true;
 }
 
+const OPS = {
+  bots: (args) => publishBots(args.ids),
+  threads: () => publishThreads(),
+  home: () => publishHome(),
+  // t3+ turned off or replaced: the T3 session revoked, the spend cache written as it is.
+  dispose: () => {
+    dropSession();
+    writeSpendCache();
+    return null;
+  },
+};
 parentPort.on("message", ({ id, op, args }) => {
   // Calls run one at a time per kind (the loader queues them); a bot refresh may run while the home feed waits on T3's API.
   Promise.resolve()
-    .then(() => (op === "bots" ? publishBots(args.ids) : op === "home" ? publishHome() : op === "dispose" ? (dropSession(), null) : null))
+    .then(() => (Object.hasOwn(OPS, op) ? OPS[op](args) : null))
     .then((result) => parentPort.postMessage({ id, result }), (error) => parentPort.postMessage({ id, error: String((error && error.message) || error) }));
 });

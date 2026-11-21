@@ -1,5 +1,6 @@
-import { CONFIG_LIMITS, STORAGE_KEYS } from "./config.js";
-import { HOME_FEED_ENDPOINT } from "./hosts.js";
+import { STORAGE_KEYS } from "./config.js";
+import { CONFIG_LIMITS, HOME_FEED_ENDPOINT } from "./hosts.js";
+import { createCachedFeed } from "./runtimeFetch.js";
 
 // t3plus-home.json (server/publish_home.py) -> what the home widgets show.
 // Pure functions, no DOM, so every number on the home page is unit-tested.
@@ -12,13 +13,19 @@ const iso = (v) => (typeof v === "string" && !Number.isNaN(Date.parse(v)) ? v : 
 function cleanWindow(w) {
   if (!w || typeof w !== "object" || typeof w.usedPercent !== "number") return null;
   return {
-    label: text(w.label, 40) || "Window",
     kind: text(w.kind, 24),
     durationMins: typeof w.durationMins === "number" ? w.durationMins : null,
     usedPercent: Math.max(0, Math.min(100, w.usedPercent)),
     resetsAt: iso(w.resetsAt),
   };
 }
+
+/**
+ * A feed's { provider: value } object as entries, without a "__proto__" key: JSON.parse
+ * keeps one as an own key, and summed into an object later it reached Object.prototype
+ * (every object's cost and tokens became NaN).
+ */
+const providerEntries = (byProvider) => Object.entries(byProvider).filter(([k]) => k !== "__proto__");
 
 /** Validates the feed. Never throws; returns null for anything unusable. */
 export function parseHomeFeedText(raw) {
@@ -30,7 +37,6 @@ export function parseHomeFeedText(raw) {
     return null;
   }
   if (!d || d.version !== 1) return null;
-  const projects = (Array.isArray(d.projects) ? d.projects : []).slice(0, 500).map((p) => ({ title: text(p?.title, 60), root: text(p?.root, 260) }));
   const activity = new Map();
   for (const [day, cells] of Object.entries(d.activity && typeof d.activity === "object" ? d.activity : {})) {
     if (!isDay(day) || !Array.isArray(cells)) continue;
@@ -39,39 +45,16 @@ export function parseHomeFeedText(raw) {
   const spend = new Map();
   for (const [day, byProvider] of Object.entries(d.spend && typeof d.spend === "object" ? d.spend : {})) {
     if (!isDay(day) || !byProvider || typeof byProvider !== "object") continue;
-    spend.set(day, Object.fromEntries(Object.entries(byProvider).map(([k, v]) => [k.slice(0, 24), [num(v?.[0]), num(v?.[1])]])));
+    spend.set(day, Object.fromEntries(providerEntries(byProvider).map(([k, v]) => [k.slice(0, 24), [num(v?.[0]), num(v?.[1])]])));
   }
   const limits = d.limits && typeof d.limits === "object" ? d.limits : {};
-  const claude = (Array.isArray(limits.claude) ? limits.claude : []).slice(0, 8).map((c) => ({
-    id: text(c?.id, 60),
-    label: text(c?.label, 32) || "Claude",
-    plan: text(c?.plan, 40),
-    checkedAt: iso(c?.checkedAt),
-    windows: (Array.isArray(c?.windows) ? c.windows : []).map(cleanWindow).filter(Boolean),
-  }));
+  // What the pools are made of: each account's windows, and a Codex account's plan (its weight).
+  const windowsOf = (account) => (Array.isArray(account?.windows) ? account.windows : []).map(cleanWindow).filter(Boolean);
+  const claude = (Array.isArray(limits.claude) ? limits.claude : []).slice(0, 8).map((c) => ({ windows: windowsOf(c) }));
   const codex =
     limits.codex && Array.isArray(limits.codex.accounts)
-      ? {
-          checkedAt: iso(limits.codex.checkedAt),
-          accounts: limits.codex.accounts.slice(0, 32).map((a, i) => ({
-            label: text(a?.label, 32) || `Account ${i + 1}`,
-            plan: text(a?.plan, 40),
-            windows: (Array.isArray(a?.windows) ? a.windows : []).map(cleanWindow).filter(Boolean),
-          })),
-        }
+      ? { accounts: limits.codex.accounts.slice(0, 32).map((a) => ({ plan: text(a?.plan, 40), windows: windowsOf(a) })) }
       : null;
-  const history = (Array.isArray(d.limitHistory) ? d.limitHistory : [])
-    .filter((h) => iso(h?.t) && typeof h.weekCap === "number" && h.weekCap > 0)
-    .map((h) => ({ t: Date.parse(h.t), weekLeft: num(h.weekLeft), weekCap: num(h.weekCap) }))
-    .sort((a, b) => a.t - b.t);
-  const automations = (Array.isArray(d.automations) ? d.automations : []).slice(0, 100).map((a) => ({
-    title: text(a?.title, 80),
-    project: typeof a?.project === "number" ? a.project : null,
-    threadKey: typeof a?.threadKey === "string" && /^[^:\s]+:\S+$/.test(a.threadKey) ? a.threadKey : null,
-    nextRunAt: iso(a?.nextRunAt),
-    lastRunAt: iso(a?.lastRunAt),
-    lastStatus: text(a?.lastStatus, 20),
-  }));
   // Recorded pools: [unix seconds, left, cap, (five-hour left, five-hour cap)] in percent of a Plus week.
   const series = (list) =>
     (Array.isArray(list) ? list : [])
@@ -81,13 +64,10 @@ export function parseHomeFeedText(raw) {
       .sort((a, b) => a.t - b.t);
   return {
     generatedAt: iso(d.generatedAt),
-    projects,
     activity,
     spend,
     claude,
     codex,
-    history,
-    automations,
     codexSeries: series(d.codexSeries),
     // The optional activity source: AI tokens per day, all providers.
     // {day: [total, {provider: tokens}]} (or a bare total from older feeds).
@@ -96,7 +76,7 @@ export function parseHomeFeedText(raw) {
         const total = Array.isArray(v) ? v[0] : v;
         if (!isDay(day) || typeof total !== "number" || !Number.isFinite(total) || total < 0) return [];
         const raw = Array.isArray(v) && v[1] && typeof v[1] === "object" ? v[1] : {};
-        const providers = Object.fromEntries(Object.entries(raw).filter(([, n]) => typeof n === "number" && n > 0).map(([k, n]) => [k.slice(0, 24), n]));
+        const providers = Object.fromEntries(providerEntries(raw).filter(([, n]) => typeof n === "number" && n > 0).map(([k, n]) => [k.slice(0, 24), n]));
         return [[day, { total, providers }]];
       }),
     ),
@@ -104,42 +84,33 @@ export function parseHomeFeedText(raw) {
   };
 }
 
-/** Indexes of all the feed's projects. */
-export function projectSet(feed) {
-  return new Set(feed.projects.map((_, i) => i));
-}
 
 const pad = (n) => String(n).padStart(2, "0");
 export const dayKey = (d) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
 
-/** Threads and turns per day for the given projects. */
-export function dailyActivity(feed, projectSet) {
+/** Turns per day for the given project indexes (`projects`), or for every project when null. */
+export function dailyActivity(feed, projects = null) {
   const out = new Map();
   for (const [day, cells] of feed.activity) {
-    let threads = 0;
     let runs = 0;
-    for (const [p, t, r] of cells) {
-      if (!projectSet.has(p)) continue;
-      threads += t;
-      runs += r;
-    }
-    if (threads || runs) out.set(day, { threads, runs });
+    for (const [p, , r] of cells) if (!projects || projects.has(p)) runs += r;
+    if (runs) out.set(day, { runs });
   }
+  return out;
+}
+
+/** The activity source's tokens per day as a heatmap input (value in `runs`, so heatmap() levels it). */
+export function tokenDaily(feed) {
+  const out = new Map();
+  for (const [day, v] of feed.aiActivity) if (v.total > 0) out.set(day, { runs: v.total, providers: v.providers });
   return out;
 }
 
 /**
  * GitHub-style heatmap: `weeks` columns ending with the current week
  * (Sunday-first), each cell a level 0-4 by turns, with quartile thresholds
- * over the active days so one huge day does not wash out the rest.
+ * over the active days so one huge day does not wash out the rest. `runs`: the total.
  */
-/** The activity source's tokens per day as a heatmap input (value in `runs`, so heatmap() levels it). */
-export function tokenDaily(feed) {
-  const out = new Map();
-  for (const [day, v] of feed.aiActivity) if (v.total > 0) out.set(day, { threads: 0, runs: v.total, providers: v.providers });
-  return out;
-}
-
 export function heatmap(daily, now, weeks = 26) {
   const end = new Date(now.getFullYear(), now.getMonth(), now.getDate());
   const start = new Date(end);
@@ -148,39 +119,30 @@ export function heatmap(daily, now, weeks = 26) {
   const q = (f) => values[Math.min(values.length - 1, Math.floor(values.length * f))] ?? 0;
   const cuts = [q(0.25), q(0.5), q(0.75)];
   const columns = [];
-  let threads = 0;
+  const today = dayKey(end);
   let runs = 0;
-  let activeDays = 0;
   for (let w = 0; w < weeks; w += 1) {
     const column = [];
     for (let d = 0; d < 7; d += 1) {
       const date = new Date(start);
       date.setDate(start.getDate() + w * 7 + d);
       const key = dayKey(date);
-      const v = daily.get(key) ?? { threads: 0, runs: 0 };
+      const v = daily.get(key)?.runs ?? 0;
       const future = date > end;
-      if (!future) {
-        threads += v.threads;
-        runs += v.runs;
-        if (v.runs) activeDays += 1;
-      }
-      const level = future || !v.runs ? 0 : v.runs <= cuts[0] ? 1 : v.runs <= cuts[1] ? 2 : v.runs <= cuts[2] ? 3 : 4;
-      column.push({ key, level, threads: v.threads, runs: v.runs, future, today: key === dayKey(end) });
+      if (!future) runs += v;
+      const level = future || !v ? 0 : v <= cuts[0] ? 1 : v <= cuts[1] ? 2 : v <= cuts[2] ? 3 : 4;
+      column.push({ key, level, runs: v, future, today: key === today });
     }
     columns.push(column);
   }
-  return { columns, threads, runs, activeDays, start, end };
+  return { columns, runs };
 }
 
 // T3's pool rules (its usage limits view): one provider's accounts are pooled with a
 // weight per plan, every plan known or all of them equal. Codex: Plus 1x, Pro 100 5x,
-// Pro 200 20x, for its five-hour and weekly windows. Claude: Pro 1x, Max 5x, Ultra
-// 20x for the five-hour window only; its week is unweighted. (inject/feeds-worker.js
+// Pro 200 20x for its weekly window; Claude's week is unweighted. (inject/feeds-worker.js
 // records the pool line by the same rules.)
 export const CODEX_PLAN_WEIGHTS = Object.freeze({ "ChatGPT Plus Subscription": 1, "ChatGPT Pro 100 Subscription": 5, "ChatGPT Pro 200 Subscription": 20 });
-export const CLAUDE_SESSION_WEIGHTS = Object.freeze({ Pro: 1, Max: 5, Ultra: 20 });
-/** "Claude Max 20x" / "max" / "Claude Pro" -> T3's tier name, or the plan as it is. */
-export const claudeTier = (plan) => (/ultra|max\s*20/i.test(plan ?? "") ? "Ultra" : /max/i.test(plan ?? "") ? "Max" : /pro/i.test(plan ?? "") ? "Pro" : (plan ?? ""));
 /** Weights for `accounts`, T3's way: from `table` by plan when every plan is in it, else all equal. */
 export function poolWeights(plans, table) {
   const weights = plans.map((plan) => table[plan]);
@@ -188,138 +150,52 @@ export function poolWeights(plans, table) {
 }
 /** What a window is, as T3 says (kind); a feed without kinds tells by its length. Monthly windows are no week. */
 export const isWeekly = (w) => (w.kind ? w.kind === "weekly" : (w.durationMins ?? 0) >= 6 * 1440 && (w.durationMins ?? 0) <= 8 * 1440);
-export const isFiveHour = (w) => (w.kind ? w.kind === "session" : (w.durationMins ?? 0) > 0 && (w.durationMins ?? 0) < 1440);
 
 // ---------- Pools (weekly pool charts, compact) ----------
 
 const HOUR = 3600000;
 
-/**
- * Projects a pool forward "as usual": the recorded burn rate of the last day
- * (only the drops count; refills are not burn), plus each account's weekly
- * refill at its reset time. Returns points every 30 minutes and when the pool
- * first runs out.
- */
-export function projectPool({ recorded, left, cap, refills, now, until }) {
-  const dayAgo = now - 24 * HOUR;
-  const recent = recorded.filter((p) => p.t >= dayAgo);
-  let drop = 0;
-  for (let i = 1; i < recent.length; i += 1) drop += Math.max(0, recent[i - 1].left - recent[i].left);
-  const span = recent.length > 1 ? (recent.at(-1).t - recent[0].t) / HOUR : 0;
-  const burn = span >= 2 ? drop / span : 0; // percent per hour
-  const points = [{ t: now, left }];
-  const queue = [...refills].filter((r) => r.at > now && r.at <= until).sort((a, b) => a.at - b.at);
-  let value = left;
-  let runsOutAt = left <= 0 ? now : null;
-  const step = HOUR / 2;
-  for (let t = now + step; t <= until; t += step) {
-    value = Math.max(0, value - burn * (step / HOUR));
-    while (queue.length && queue[0].at <= t) value = Math.min(cap, value + queue.shift().amount);
-    if (value <= 0 && runsOutAt === null) runsOutAt = t;
-    points.push({ t, left: value });
-  }
-  return { points, burn, runsOutAt };
-}
-
-const weeklyRefills = (accounts, weightOf) =>
-  accounts.flatMap((a) => {
-    const weekly = a.windows.find(isWeekly);
-    // At 0% used the reset still marks the week (the chart and "Reset - …" say when it ends).
-    if (!weekly?.resetsAt || !Number.isFinite(Date.parse(weekly.resetsAt))) return [];
-    return [{ at: Date.parse(weekly.resetsAt), amount: Math.round(weightOf(a) * ((weekly.usedPercent ?? 0) / 100)) }];
-  });
+/** The accounts a pool can be made of: every Codex account, or every Claude one. */
+const poolSource = (feed, kind) => (kind === "codex" ? (feed.codex?.accounts ?? []) : feed.claude);
+// Only accounts that report a week: one whose limits failed to load counted as 100% left.
+const reportsWeek = (account) => account.windows.some(isWeekly);
+/** Whether `feed` has a pool for `kind` to draw (poolModel is not null), without making it. */
+export const hasPool = (feed, kind) => Boolean(feed) && poolSource(feed, kind).some(reportsWeek);
 
 /**
- * One pool for the chart: current left/cap, recorded line, projection, refills.
+ * One pool for the chart, past usage only: what is left of its cap now, the line recorded
+ * over the last `back` days, and when its next weekly reset is ({ at }, or null).
  * Codex: every Codex account's week, weighted by plan (T3's weights; in Plus weeks).
  * Claude: every Claude account's weekly window, 100% each.
  */
-export function poolModel(feed, kind, now = Date.now(), { back = 3, ahead = 3 } = {}) {
+export function poolModel(feed, kind, now = Date.now(), { back = 3 } = {}) {
   if (!feed) return null;
-  let accounts;
-  let weightOf;
-  let fiveWeightOf;
-  let recorded;
-  // Only accounts that report a week: one whose limits failed to load counted as 100% left.
-  if (kind === "codex") {
-    accounts = (feed.codex?.accounts ?? []).filter((a) => a.windows.some(isWeekly));
-    if (!accounts.length) return null;
-    // One account is simply 100%; several are summed in Plus weeks.
-    const weights = accounts.length === 1 ? [1] : poolWeights(accounts.map((a) => a.plan), CODEX_PLAN_WEIGHTS);
-    weightOf = (a) => weights[accounts.indexOf(a)] * 100;
-    fiveWeightOf = weightOf;
-    recorded = feed.codexSeries;
-  } else {
-    accounts = feed.claude.map((c) => ({ label: c.label, plan: c.plan, windows: c.windows })).filter((a) => a.windows.some(isWeekly));
-    if (!accounts.length) return null;
-    weightOf = () => 100;
-    const five = accounts.length === 1 ? [1] : poolWeights(accounts.map((a) => claudeTier(a.plan)), CLAUDE_SESSION_WEIGHTS);
-    fiveWeightOf = (a) => five[accounts.indexOf(a)] * 100;
-    recorded = feed.claudeSeries;
-  }
+  const accounts = poolSource(feed, kind).filter(reportsWeek);
+  if (!accounts.length) return null;
+  // One account is simply 100%; several Codex ones are summed in Plus weeks.
+  const weights = kind !== "codex" || accounts.length === 1 ? accounts.map(() => 1) : poolWeights(accounts.map((a) => a.plan), CODEX_PLAN_WEIGHTS);
   let cap = 0;
   let left = 0;
-  let fiveCap = 0;
-  let fiveLeft = 0;
-  for (const a of accounts) {
-    const w = weightOf(a);
+  let nextReset = Infinity;
+  accounts.forEach((a, i) => {
+    const w = weights[i] * 100;
     const weekly = a.windows.find(isWeekly);
-    const five = a.windows.find(isFiveHour);
     cap += w;
-    left += w * (1 - (weekly?.usedPercent ?? 0) / 100);
-    if (five) {
-      const fw = fiveWeightOf(a);
-      fiveCap += fw;
-      fiveLeft += fw * (1 - five.usedPercent / 100);
-    }
-  }
+    left += w * (1 - (weekly.usedPercent ?? 0) / 100);
+    // At 0% used the reset still marks the week (the chart and "Reset - …" say when it ends).
+    const at = Date.parse(weekly.resetsAt ?? "");
+    if (at > now && at < nextReset) nextReset = at;
+  });
+  const from = now - back * 24 * HOUR;
   // Each recorded point in today's pool size: one taken while an account was missing
   // (its limits failed to load) had a smaller cap, and plotted as a sudden dip.
-  recorded = recorded.map((p) => (p.cap > 0 && p.cap !== cap ? { ...p, left: (p.left * cap) / p.cap, cap } : p));
-  const from = now - back * 24 * HOUR;
-  const until = now + ahead * 24 * HOUR;
-  const refills = weeklyRefills(accounts, weightOf).filter((r) => r.at > now);
-  const shown = recorded.filter((p) => p.t >= from && p.t <= now);
-  const projection = projectPool({ recorded, left, cap, refills, now, until });
-  const nextRefill = refills.sort((a, b) => a.at - b.at)[0] ?? null;
-  return {
-    kind,
-    cap: Math.round(cap),
-    left: Math.round(left),
-    fiveCap: Math.round(fiveCap),
-    fiveLeft: Math.round(fiveLeft),
-    accounts: accounts.length,
-    from,
-    until,
-    now,
-    recorded: [...shown, { t: now, left }],
-    projected: projection.points,
-    burn: projection.burn,
-    runsOutAt: projection.runsOutAt,
-    refills: refills.filter((r) => r.at <= until),
-    nextRefill,
-  };
-}
-
-/** Quick activity numbers: turns this week (Sunday on), current streak, best day. */
-export function activityStats(daily, now) {
-  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-  let week = 0;
-  for (let i = 0; i <= today.getDay(); i += 1) {
-    const d = new Date(today);
-    d.setDate(today.getDate() - i);
-    week += daily.get(dayKey(d))?.runs ?? 0;
+  const recorded = [];
+  for (const p of kind === "codex" ? feed.codexSeries : feed.claudeSeries) {
+    if (p.t < from || p.t > now) continue;
+    recorded.push(p.cap > 0 && p.cap !== cap ? { ...p, left: (p.left * cap) / p.cap, cap } : p);
   }
-  let streak = 0;
-  const d = new Date(today);
-  if (!daily.get(dayKey(d))?.runs) d.setDate(d.getDate() - 1); // today may not have started yet
-  while (daily.get(dayKey(d))?.runs) {
-    streak += 1;
-    d.setDate(d.getDate() - 1);
-  }
-  let best = 0;
-  for (const v of daily.values()) best = Math.max(best, v.runs);
-  return { week, streak, best };
+  recorded.push({ t: now, left });
+  return { cap: Math.round(cap), left: Math.round(left), from, now, recorded, nextRefill: Number.isFinite(nextReset) ? { at: nextReset } : null };
 }
 
 /** Tokens per provider per day for the last `days` days (T3's usage chart), plus month totals. */
@@ -337,9 +213,11 @@ export function tokenSeries(feed, now, days = 14) {
     .map((p) => ({ provider: p, values: keys.map((k) => feed.spend.get(k)?.[p]?.[1] ?? 0) }))
     .filter((s) => s.values.some((v) => v > 0));
   const monthStart = dayKey(new Date(now.getFullYear(), now.getMonth(), 1));
-  const month = {};
+  const today = dayKey(now);
+  // Null-prototype: a provider key is never one of Object's own (see providerEntries).
+  const month = Object.create(null);
   for (const [day, byProvider] of feed.spend) {
-    if (day < monthStart || day > dayKey(now)) continue;
+    if (day < monthStart || day > today) continue;
     for (const [p, [cost, tokens]] of Object.entries(byProvider)) {
       month[p] ??= { cost: 0, tokens: 0 };
       month[p].cost += cost;
@@ -377,7 +255,6 @@ export function formatTokens(v) {
   return String(Math.round(n));
 }
 
-/** Loads the feed through the background worker; falls back to the cached copy. */
 /**
  * Which pool belongs to the model in T3's composer picker, from its label
  * ("Claude Opus 5.5, High", "GPT-6.1 Sol, High"): "claude", "codex" or null.
@@ -385,39 +262,14 @@ export function formatTokens(v) {
 export function providerKind(label) {
   const text = String(label ?? "");
   if (/\b(claude|opus|sonnet|haiku|fable)\b/i.test(text)) return "claude";
-  if (/\b(gpt|codex|o[1-9])\b|\bgpt-|\b(sol|terra|astra)\b/i.test(text)) return "codex";
+  if (/\b(gpt|codex|o[1-9]|sol|terra|astra)\b/i.test(text)) return "codex";
   return null;
 }
 
-export function createHomeFeed({ area, fetchRemote, endpoint = HOME_FEED_ENDPOINT }) {
-  const key = STORAGE_KEYS.homeFeedCache;
-  let cachedText = null; // what this copy last wrote to the cache
-  async function readCache() {
-    const value = (await area.get(key))?.[key];
-    return typeof value?.text === "string" ? parseHomeFeedText(value.text) : null;
-  }
-  return {
-    endpoint,
-    readCache,
-    async load() {
-      let response = null;
-      try {
-        response = await fetchRemote(endpoint);
-      } catch {
-        response = null;
-      }
-      const parsed = response?.ok ? parseHomeFeedText(response.text) : null;
-      if (parsed) {
-        // The cache is a convenience: a failed write (storage full) must not throw
-        // away the fresh feed it was copying. Written only when the text changed.
-        if (response.text !== cachedText) {
-          await Promise.resolve(area.set({ [key]: { text: response.text } }))
-            .then(() => (cachedText = response.text))
-            .catch(() => {});
-        }
-        return parsed;
-      }
-      return readCache();
-    },
-  };
-}
+/**
+ * The home feed, loaded through the background worker (or the desktop loader's copy),
+ * with a stored copy to fall back to (runtimeFetch.js createCachedFeed). load() resolves
+ * to the parsed feed or null; an unchanged feed is the same object.
+ */
+export const createHomeFeed = ({ area, fetchRemote, endpoint = HOME_FEED_ENDPOINT, readLocal }) =>
+  createCachedFeed({ area, key: STORAGE_KEYS.homeFeedCache, fetchRemote, endpoint, parse: parseHomeFeedText, readLocal });

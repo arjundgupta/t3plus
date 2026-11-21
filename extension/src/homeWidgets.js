@@ -2,7 +2,7 @@ import { T3PLUS } from "./config.js";
 import { createTooltip, TOOLTIP_ID } from "./homeTooltip.js";
 import { createBuilder } from "./dom.js";
 import { createDitherCanvas } from "./ditherChart.js";
-import { dailyActivity, formatPercent, formatTokens, formatUsd, formatUsdExact, heatmap, poolModel, projectSet, tokenDaily, tokenSeries } from "./homeData.js";
+import { dailyActivity, formatPercent, formatTokens, formatUsd, formatUsdExact, hasPool, heatmap, poolModel, tokenDaily, tokenSeries } from "./homeData.js";
 
 // Home widgets under T3's new-thread composer: four compact cards in a 2x2
 // grid, exactly as wide as T3's composer.
@@ -28,7 +28,10 @@ const ICONS = {
   chart: '<path d="M3 3v16a2 2 0 0 0 2 2h16"/><path d="m19 9-5 5-4-4-3 3"/>',
 };
 
-export const PROVIDER_COLORS = {
+// Null-prototype tables: a provider named "constructor" or "toString" in a feed falls back
+// to its own name and the muted color, not to Object's own members.
+const PROVIDER_COLORS = {
+  __proto__: null,
   codex: "var(--contrast-foreground, var(--foreground))",
   claude: "#d97757",
   grok: "color-mix(in oklab, var(--contrast-foreground, var(--foreground)) 72%, var(--background))",
@@ -37,7 +40,7 @@ export const PROVIDER_COLORS = {
   antigravity: "#8c7bd1",
   pi: "#4d9f8a",
 };
-const PROVIDER_LABELS = { codex: "Codex", claude: "Claude", grok: "Grok", cursor: "Cursor", opencode: "OpenCode", antigravity: "Antigravity", pi: "Pi" };
+const PROVIDER_LABELS = { __proto__: null, codex: "Codex", claude: "Claude", grok: "Grok", cursor: "Cursor", opencode: "OpenCode", antigravity: "Antigravity", pi: "Pi" };
 /** Pool line colors: blue for Codex, T3's Claude orange for Claude. */
 const POOL_COLORS = { codex: "#6f9cf5", claude: "#d97757" };
 
@@ -113,10 +116,18 @@ export function createHomeView(doc, { variant = "home" } = {}) {
   const tip = createTooltip(doc, variant === "pool" ? `${TOOLTIP_ID}-pool` : TOOLTIP_ID);
   const cellTips = new WeakMap(); // heatmap cell -> tooltip content
   const plotHovers = new WeakMap(); // chart plot -> (fraction 0..1) => { frac, content, dots: [{ y, color }] }
+  // The keyboard's way to the same numbers: each chart is a Tab stop whose arrow keys step
+  // through its days (or the pool's samples), with the tooltip and a line read out.
+  const keyCharts = new WeakMap(); // focusable chart -> { key, size, pick(index) }
+  const selected = new WeakMap(); // focusable chart -> the index picked by keys
+  // One status line for the view, kept across rebuilds: a live region made anew is not
+  // announced the first time.
+  const said = h("div", { class: "t3plus-sr-only", role: "status", "aria-live": "polite" });
   let marked = null;
   let dithers = []; // the current cards' dither canvases
+  let cell; // their pixel size (CSS px), as the last update gave it
   const dither = (series) => {
-    const d = createDitherCanvas(doc, series);
+    const d = createDitherCanvas(doc, series, { cell });
     dithers.push(d);
     return d.canvas;
   };
@@ -126,17 +137,18 @@ export function createHomeView(doc, { variant = "home" } = {}) {
     marked = null;
   }
 
-  function showMarker(plot, hit) {
+  /** `box`: the plot's rect, measured for the hit (the crosshair moves by its pixels). */
+  function showMarker(plot, hit, box) {
     let marker = plot.querySelector(":scope > .t3plus-w-hover");
     if (!marker) {
       marker = h("div", { class: "t3plus-w-hover", "aria-hidden": "true" }, [h("span", { class: "t3plus-w-hover-line" })]);
       plot.append(marker);
     }
-    marker.style.left = `${(hit.frac * 100).toFixed(2)}%`;
+    marker.style.translate = `${(hit.frac * box.width).toFixed(1)}px 0`;
     const dots = [...marker.querySelectorAll(".t3plus-w-hover-dot")];
     hit.dots.forEach((d, i) => {
       const dot = dots[i] ?? marker.appendChild(h("span", { class: "t3plus-w-hover-dot" }));
-      dot.style.top = `${(d.y * 100).toFixed(2)}%`;
+      dot.style.translate = `0 ${(d.y * box.height).toFixed(1)}px`;
       dot.style.background = d.color;
     });
     for (const extra of dots.slice(hit.dots.length)) extra.remove();
@@ -145,13 +157,22 @@ export function createHomeView(doc, { variant = "home" } = {}) {
     marked = plot;
   }
 
+  function showCell(cell) {
+    clearMarker();
+    const r = cell.getBoundingClientRect();
+    tip.show({ x: r.left + r.width / 2, top: r.top, bottom: r.bottom }, cellTips.get(cell));
+  }
+  /** `box`: the plot's rect, when already measured. */
+  function showHit(plot, hit, box = plot.getBoundingClientRect()) {
+    showMarker(plot, hit, box);
+    tip.show({ x: box.left + hit.frac * box.width, top: box.top, bottom: box.bottom }, hit.content);
+  }
+
   function onPointerMove(event) {
     const target = event.target;
     const cell = target?.closest?.(".t3plus-w-cell");
     if (cell && cellTips.has(cell)) {
-      clearMarker();
-      const r = cell.getBoundingClientRect();
-      tip.show({ x: r.left + r.width / 2, top: r.top, bottom: r.bottom }, cellTips.get(cell));
+      showCell(cell);
       return;
     }
     const plot = target?.closest?.(".t3plus-w-plot");
@@ -163,9 +184,7 @@ export function createHomeView(doc, { variant = "home" } = {}) {
     }
     const r = plot.getBoundingClientRect();
     const hit = hover(r.width > 0 ? Math.max(0, Math.min(1, (event.clientX - r.left) / r.width)) : 1);
-    if (!hit) return;
-    showMarker(plot, hit);
-    tip.show({ x: r.left + hit.frac * r.width, top: r.top, bottom: r.bottom }, hit.content);
+    if (hit) showHit(plot, hit, r);
   }
 
   element.addEventListener("pointermove", onPointerMove);
@@ -174,21 +193,79 @@ export function createHomeView(doc, { variant = "home" } = {}) {
     tip.hide();
   });
 
+  // ---------------- Keys: the same numbers without a pointer ----------------
+  const contentText = (c) => [`${c.label}:`, (c.rows ?? []).map((r) => `${r.name} ${r.value}`).join(", "), c.total ? `${c.total.name} ${c.total.value}` : ""].filter(Boolean).join(" ");
+  let heatSel = null; // the heatmap cell picked by keys
+  function clearHeatSel() {
+    heatSel?.removeAttribute("data-t3plus-sel");
+    heatSel = null;
+  }
+  function pick(chart, index) {
+    const entry = keyCharts.get(chart);
+    const i = Math.max(0, Math.min(entry.size - 1, index));
+    selected.set(chart, i);
+    const shown = entry.pick(i);
+    clearHeatSel();
+    if (shown.cell) {
+      heatSel = shown.cell;
+      heatSel.setAttribute("data-t3plus-sel", "");
+      showCell(shown.cell);
+    } else showHit(chart, shown.hit);
+    said.textContent = contentText(shown.content);
+  }
+  // A chart focused by a click (it is a Tab stop, so a click focuses it) is the pointer's:
+  // picked then, the latest day's tooltip and ring jumped over the one under the pointer.
+  let pointerDown = false;
+  element.addEventListener("pointerdown", () => (pointerDown = true));
+  for (const type of ["pointerup", "pointercancel", "pointerleave"]) element.addEventListener(type, () => (pointerDown = false));
+  element.addEventListener("focusin", (event) => {
+    const chart = event.target;
+    // The latest day (or now) first.
+    if (keyCharts.has(chart) && !pointerDown) pick(chart, selected.get(chart) ?? keyCharts.get(chart).size - 1);
+  });
+  element.addEventListener("focusout", (event) => {
+    if (!keyCharts.has(event.target)) return;
+    clearMarker();
+    clearHeatSel();
+    tip.hide();
+  });
+  element.addEventListener("keydown", (event) => {
+    const chart = event.target;
+    const entry = keyCharts.get(chart);
+    if (!entry || event.altKey || event.ctrlKey || event.metaKey) return;
+    if (event.key === "Escape") {
+      tip.hide();
+      return;
+    }
+    const at = selected.get(chart) ?? entry.size - 1;
+    const week = entry.key === "activity" ? 7 : 1; // the heatmap's columns are weeks
+    const day = entry.key === "activity" ? 1 : 0;
+    const to = { ArrowLeft: at - week, ArrowRight: at + week, ArrowUp: day ? at - day : undefined, ArrowDown: day ? at + day : undefined, Home: 0, End: entry.size - 1 }[event.key];
+    if (to === undefined) return;
+    event.preventDefault();
+    pick(chart, to);
+  });
+  /** A chart's attributes: one Tab stop, arrow keys inside (role application), its summary as its name. */
+  const chartAttrs = (key, label, extra) => ({ ...extra, tabindex: "0", role: "application", "aria-roledescription": "chart", "aria-label": label, "data-t3plus-chart": key });
+
   // ---------------- Pool (Codex / Claude) ----------------
 
   function poolCard(feed, kind, now) {
     const title = kind === "codex" ? "Codex pool" : "Claude pool";
     const nowMs = now.getTime();
     const DAY = 86400000;
+    const HOUR = 3600000;
     // Past usage only: this week so far (since the last weekly reset), over the
     // part of it that was recorded, so a pool recorded for a few hours fills the
     // chart with those hours instead of a sliver at the end of an empty week.
     const base = poolModel(feed, kind, nowMs);
-    const weekStart = base?.nextRefill ? base.nextRefill.at - 7 * DAY : nowMs - 3 * DAY;
+    // A reset more than a week out (the provider's clock a little ahead, right after a
+    // reset) put the week's start after now and the line far off the plot: that week
+    // has just begun, a minute ago.
+    const weekStart = Math.min(nowMs - 60000, base?.nextRefill ? base.nextRefill.at - 7 * DAY : nowMs - 3 * DAY);
     const firstSample = base ? (kind === "codex" ? feed.codexSeries : feed.claudeSeries).find((p) => p.t >= weekStart)?.t : undefined;
-    const HOUR = 3600000;
     const from = Math.max(weekStart, Math.min(firstSample ?? nowMs, nowMs - 2 * HOUR));
-    const pool = base && poolModel(feed, kind, nowMs, { back: (nowMs - from) / DAY, ahead: 0 });
+    const pool = base && poolModel(feed, kind, nowMs, { back: (nowMs - from) / DAY });
     if (!pool) return card(`pool t3plus-w-${kind}`, title, "gauge", null, [empty(feed ? "No limits reported." : "Waiting for the home feed…")]);
     const color = POOL_COLORS[kind];
     const W = 300;
@@ -224,8 +301,8 @@ export function createHomeView(doc, { variant = "home" } = {}) {
     }
     const frac = (points) => points.map((p) => [x(p.t) / W, y(p.left) / H]);
     const poolDither = dither([{ points: frac(recorded), color, fillAlpha: 0.85 }]);
-    const poolPlot = h("div", { class: "t3plus-w-plot", role: "img", "aria-label": `${title}: ${formatPercent(pool.left)} remaining of ${formatPercent(pool.cap)} this week` }, [poolDither, svg]);
-    plotHovers.set(poolPlot, (f) => {
+    const poolPlot = h("div", chartAttrs(`pool-${kind}`, `${title}: ${formatPercent(pool.left)} remaining of ${formatPercent(pool.cap)} this week`, { class: "t3plus-w-plot" }), [poolDither, svg]);
+    const poolHover = (f) => {
       const t = pool.from + f * span;
       let best = recorded[0];
       for (const p of recorded) if (Math.abs(p.t - t) < Math.abs(best.t - t)) best = p;
@@ -238,16 +315,28 @@ export function createHomeView(doc, { variant = "home" } = {}) {
           rows: [{ name: "Left", value: `${formatPercent(best.left)} of ${formatPercent(pool.cap)}`, color }],
         },
       };
+    };
+    plotHovers.set(poolPlot, poolHover);
+    // Keys step an hour at least: samples come every ten minutes, a thousand in a week.
+    const stops = [];
+    for (const p of recorded) if (!stops.length || p.t - stops.at(-1) >= HOUR) stops.push(p.t);
+    if (stops.at(-1) !== recorded.at(-1).t) stops.push(recorded.at(-1).t);
+    keyCharts.set(poolPlot, {
+      key: `pool-${kind}`,
+      size: stops.length,
+      pick: (i) => {
+        const hit = poolHover((stops[i] - pool.from) / span);
+        return { hit, content: hit.content };
+      },
     });
-    // Two plain lines: what is left, and when it resets. The corner stays empty.
-    const status = null;
+    // Two plain lines: what is left, and when it resets.
     // A pool of several accounts is larger than 100%: say what it is out of.
     const remaining = Math.round(pool.cap) === 100 ? "remaining" : `remaining of ${formatPercent(pool.cap)}`;
     // Old data says so: when the feed stops updating (T3's CLI or API broke), the
     // percentage would otherwise read as current for days.
     const age = feed.generatedAt ? nowMs - Date.parse(feed.generatedAt) : 0;
     const stale = age > HOUR ? h("div", { class: "t3plus-w-stale", text: `Updated ${age >= 2 * DAY ? `${Math.floor(age / DAY)} days` : age >= DAY ? "1 day" : `${Math.floor(age / HOUR)} h`} ago` }) : null;
-    return card(`pool t3plus-w-${kind}`, title, "gauge", status, [
+    return card(`pool t3plus-w-${kind}`, title, "gauge", null /* the corner stays empty */, [
       h("div", { class: "t3plus-w-pool-head" }, [
         h("span", { class: "t3plus-w-big-num", text: formatPercent(pool.left) }),
         h("span", { class: "t3plus-w-muted", text: remaining }),
@@ -263,15 +352,16 @@ export function createHomeView(doc, { variant = "home" } = {}) {
 
   // Fills its card: a weekday column (Mon / Wed / Fri), month labels on top,
   // and one square per day, scaled to the card's width.
-  function activityCard(feed, projects, now) {
+  function activityCard(feed, now) {
     if (!feed) return card("activity", "Activity", "activity", null, [empty("Waiting for the home feed…")]);
     // The activity source's numbers (AI tokens per day) when the feed has them; T3 turns otherwise.
     const tokens = feed.aiActivity.size > 0;
-    const daily = tokens ? tokenDaily(feed) : dailyActivity(feed, projects);
+    const daily = tokens ? tokenDaily(feed) : dailyActivity(feed);
     const map = heatmap(daily, now, HEAT_WEEKS);
     const unit = tokens ? "tokens" : "turns";
     const amount = (v) => (tokens ? formatTokens(v) : v.toLocaleString("en-US"));
-    const grid = h("div", { class: "t3plus-w-heat", role: "img", "aria-label": `Activity: ${amount(map.runs)} ${unit} over the last ${HEAT_WEEKS} weeks` });
+    const grid = h("div", chartAttrs("activity", `Activity: ${amount(map.runs)} ${unit} over the last ${HEAT_WEEKS} weeks`, { class: "t3plus-w-heat" }));
+    const days = []; // the cells up to today, a column (a week) after another
     grid.style.setProperty("--weeks", String(HEAT_WEEKS));
     const place = (el, col, row) => {
       el.style.gridColumn = String(col);
@@ -300,10 +390,12 @@ export function createHomeView(doc, { variant = "home" } = {}) {
             rows: providers.map(([p, n]) => ({ name: PROVIDER_LABELS[p] ?? p, value: formatTokens(n), color: PROVIDER_COLORS[p] ?? "var(--muted-foreground)" })),
             total: { name: tokens ? "Total" : "Turns", value: cell.runs ? amount(cell.runs) : "No activity" },
           });
+          days.push(el);
         }
         grid.append(place(el, w + 2, d + 2));
       });
     });
+    keyCharts.set(grid, { key: "activity", size: days.length, pick: (i) => ({ cell: days[i], content: cellTips.get(days[i]) }) });
     return card("activity", "Activity", "activity", [h("span", { class: "t3plus-w-muted", text: `${amount(map.runs)} ${unit}` })], [grid]);
   }
 
@@ -341,8 +433,8 @@ export function createHomeView(doc, { variant = "home" } = {}) {
     const usageDither = dither([...series]
       .sort((a, b) => b.values.reduce((n, v) => n + v, 0) - a.values.reduce((n, v) => n + v, 0))
       .map((s) => ({ points: s.values.map((v, i) => [i / (days.length - 1), y(v) / H]), color: PROVIDER_COLORS[s.provider] ?? "var(--muted-foreground)", fillAlpha: 0.75 })));
-    const usagePlot = h("div", { class: "t3plus-w-plot", role: "img", "aria-label": `Tokens per day by provider, last ${days.length} days` }, [usageDither, svg]);
-    plotHovers.set(usagePlot, (frac) => {
+    const usagePlot = h("div", chartAttrs("usage", `Tokens per day by provider, last ${days.length} days`, { class: "t3plus-w-plot" }), [usageDither, svg]);
+    const usageHover = (frac) => {
       const i = Math.round(frac * (days.length - 1));
       const key = days[i];
       const spend = Object.values(feed.spend.get(key) ?? {}).reduce((n, [cost]) => n + cost, 0);
@@ -356,6 +448,15 @@ export function createHomeView(doc, { variant = "home" } = {}) {
           total: { name: "Total", value: `${formatTokens(total)} · ${formatUsd(spend)}` },
         },
       };
+    };
+    plotHovers.set(usagePlot, usageHover);
+    keyCharts.set(usagePlot, {
+      key: "usage",
+      size: days.length,
+      pick: (i) => {
+        const hit = usageHover(i / (days.length - 1));
+        return { hit, content: hit.content };
+      },
     });
     // The middle date sits over its own day, not halfway: with an even number of days
     // no day is at the middle, and the halfway label named the day after it.
@@ -375,45 +476,64 @@ export function createHomeView(doc, { variant = "home" } = {}) {
     ]);
   }
 
+  /** The cards for `model`, in place of the ones shown. */
+  function rebuild(model, now) {
+    if (variant === "pool") {
+      element.replaceChildren(poolCard(model.feed, model.kind === "codex" ? "codex" : "claude", now));
+      // What this thread has cost so far, in the style of T3's Context row below.
+      if (model.spend) {
+        const usd = formatUsdExact(model.spend.usd);
+        element.append(
+          h("div", { class: "t3plus-w-spend", title: `${model.spend.tokens.toLocaleString("en-US")} tokens, priced like T3's Usage page` }, [
+            h("span", { class: "t3plus-w-spend-label", text: "Spend" }),
+            h("span", { class: "t3plus-w-spend-value" }, [h("span", { text: usd }), h("span", { class: "t3plus-w-muted", text: ` · ${formatTokens(model.spend.tokens)}` })]),
+          ]),
+        );
+      }
+      return;
+    }
+    // A provider that reports no limits (not connected) gives its place to the other pool.
+    const reported = ["codex", "claude"].filter((kind) => hasPool(model.feed, kind));
+    const pools = (reported.length === 1 ? reported : ["codex", "claude"]).map((kind) => poolCard(model.feed, kind, now));
+    if (pools.length === 1) pools[0].classList.add("t3plus-w-wide");
+    element.replaceChildren(...pools, activityCard(model.feed, now), usageCard(model.feed, now));
+  }
+
   return {
     element,
-    /** @param {{ feed, now?: Date }} model */
+    /** @param {{ feed, now?: Date, cell?: number }} model  cell: the dither cell size in CSS px (the backdrop's) */
     update(model) {
       const now = model.now ?? new Date();
+      cell = model.cell ?? cell;
       // The cards are rebuilt when the feed changes, and otherwise every five minutes:
-      // on a week-long axis the "now" line moves a hair in that time.
+      // on a week-long axis the "now" line moves a hair in that time. A feed without a
+      // generatedAt is still a feed: signed as none, it left "Waiting for the home feed…" up.
       const minute = Math.floor(now.getTime() / 300000);
-      const next = JSON.stringify([model.feed?.generatedAt ?? null, model.kind ?? null, minute, model.spend ?? null]);
+      const fed = model.feed ? (model.feed.generatedAt ?? "feed") : null;
+      const next = JSON.stringify([fed, model.kind ?? null, minute, model.spend ?? null]);
       if (next === signature) {
         // Same cards: repaint only if the pixel size or layout changed (a no-op otherwise).
-        for (const d of dithers) d.paint();
+        for (const d of dithers) d.paint({ cell });
         return false;
       }
       signature = next;
+      // A chart in use by keys is picked again in the new cards: rebuilt under it, the focus fell to the page.
+      const focused = keyCharts.get(doc.activeElement) && element.contains(doc.activeElement) ? doc.activeElement : null;
+      const refocus = focused && { key: keyCharts.get(focused).key, index: selected.get(focused) };
       tip.hide();
       marked = null;
+      heatSel = null;
       for (const d of dithers) d.disconnect();
       dithers = [];
-      if (variant === "pool") {
-        element.replaceChildren(poolCard(model.feed, model.kind === "codex" ? "codex" : "claude", now));
-        // What this thread has cost so far, in the style of T3's Context row below.
-        if (model.spend) {
-          const usd = formatUsdExact(model.spend.usd);
-          element.append(
-            h("div", { class: "t3plus-w-spend", title: `${model.spend.tokens.toLocaleString("en-US")} tokens, priced like T3's Usage page` }, [
-              h("span", { class: "t3plus-w-spend-label", text: "Spend" }),
-              h("span", { class: "t3plus-w-spend-value" }, [h("span", { text: usd }), h("span", { class: "t3plus-w-muted", text: ` · ${formatTokens(model.spend.tokens)}` })]),
-            ]),
-          );
+      rebuild(model, now);
+      element.append(said);
+      if (refocus) {
+        const chart = element.querySelector(`[data-t3plus-chart="${refocus.key}"]`);
+        if (chart && keyCharts.has(chart)) {
+          if (refocus.index !== undefined) selected.set(chart, Math.min(refocus.index, keyCharts.get(chart).size - 1));
+          chart.focus({ preventScroll: true });
         }
-        return true;
       }
-      const projects = model.feed ? projectSet(model.feed) : new Set();
-      // A provider that reports no limits (not connected) gives its place to the other pool.
-      const reported = ["codex", "claude"].filter((kind) => model.feed && poolModel(model.feed, kind, now.getTime()));
-      const pools = (reported.length === 1 ? reported : ["codex", "claude"]).map((kind) => poolCard(model.feed, kind, now));
-      if (pools.length === 1) pools[0].classList.add("t3plus-w-wide");
-      element.replaceChildren(...pools, activityCard(model.feed, projects, now), usageCard(model.feed, now));
       return true;
     },
     /**
@@ -432,4 +552,5 @@ export function createHomeView(doc, { variant = "home" } = {}) {
       tip.remove();
     },
   };
+
 }

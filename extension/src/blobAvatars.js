@@ -1,8 +1,13 @@
 // Blob avatars: soft, solid-color blobs with two black capsule eyes and no mouth: the
-// eyes carry the mood. Vector (SVG), not pixel art. Each blob is a smooth closed curve
+// eyes carry the mood. Vector shapes, not pixel art. Each blob is a smooth closed curve
 // through points made by a small radius function (original shapes: drops, pebbles,
 // squircles, lumpy blobs), turned a little for character, its eyes placed and tilted
 // to match. Each mood is a short looping animation on one sprite sheet.
+//
+// The sheet is drawn once into a canvas and kept as a PNG when the page can (a
+// rasterizer is set: setBlobRasterizer): a vector sheet of a hundred frames is laid out
+// and painted again whole on every frame step, where a picture is only moved. Without
+// one (tests, a page with no canvas), and where a face is drawn large, it is an SVG.
 
 const TAU = Math.PI * 2;
 
@@ -62,21 +67,22 @@ const paths = new Map(Object.entries(B).map(([k, b]) => [k, smoothPath(ring(b.r,
 const INK = "#0e0e11";
 const W = 2.5; // capsule width
 const H = 4.9; // and height
+// One eye, centered on its spot: a rounded rect [x, y, width, height, radius], or a stroked
+// path. The same shapes for the SVG and the canvas.
+const EYES = {
+  open: { rect: [-W / 2, -H / 2, W, H, W / 2] },
+  wide: { rect: [-W / 2, -H * 0.62, W, H * 1.24, W / 2] },
+  lidded: { rect: [-W / 2, -H * 0.05, W, H * 0.55, W / 2] },
+  closed: { rect: [-W * 0.62, 0.5, W * 1.24, 0.95, 0.47] },
+  happy: { stroke: "M-1.45 0.9Q0 -1.7 1.45 0.9", width: 1.35 },
+  x: { stroke: "M-1.1 -1.1L1.1 1.1M1.1 -1.1L-1.1 1.1", width: 1.2 },
+};
+const eyeShape = (glyph) => EYES[glyph] ?? EYES.open;
 function eye(glyph) {
-  switch (glyph) {
-    case "wide":
-      return `<rect x="${-W / 2}" y="${-H * 0.62}" width="${W}" height="${H * 1.24}" rx="${W / 2}"/>`;
-    case "lidded":
-      return `<rect x="${-W / 2}" y="${-H * 0.05}" width="${W}" height="${H * 0.55}" rx="${W / 2}"/>`;
-    case "closed":
-      return `<rect x="${-W * 0.62}" y="0.5" width="${W * 1.24}" height="0.95" rx="0.47"/>`;
-    case "happy":
-      return `<path d="M-1.45 0.9Q0 -1.7 1.45 0.9" fill="none" stroke="${INK}" stroke-width="1.35" stroke-linecap="round"/>`;
-    case "x":
-      return `<path d="M-1.1 -1.1L1.1 1.1M1.1 -1.1L-1.1 1.1" fill="none" stroke="${INK}" stroke-width="1.2" stroke-linecap="round"/>`;
-    default:
-      return `<rect x="${-W / 2}" y="${-H / 2}" width="${W}" height="${H}" rx="${W / 2}"/>`;
-  }
+  const e = eyeShape(glyph);
+  if (e.stroke) return `<path d="${e.stroke}" fill="none" stroke="${INK}" stroke-width="${e.width}" stroke-linecap="round"/>`;
+  const [x, y, w, h, r] = e.rect;
+  return `<rect x="${x}" y="${y}" width="${w}" height="${h}" rx="${r}"/>`;
 }
 
 const mix = (hex, toward, t) => {
@@ -102,7 +108,6 @@ const MOODS = {
   working: { duration: 2, eyes: "open", look: [[0, -1.5, 0.2], [0.3, -1.5, 0.2], [0.58, 1.5, 0.2], [0.9, 1.5, 0.2], [1.15, 0, 0.5], [1.75, 0, 0.5]], blinks: [1.4], breathe: 0.035 },
   attention: { duration: 1.5, eyes: "wide", look: [[0, 0, -0.3]], hops: [0.1, 0.6], blinks: [1.1], breathe: 0.02 },
 };
-export const BLOB_MOODS = Object.freeze(Object.keys(MOODS));
 
 const ease = (u) => u * u * (3 - 2 * u);
 /** Where the eyes look at time t (s) of a loop `duration` long: [dx, dy]. */
@@ -161,29 +166,109 @@ function phase(key, n) {
 }
 const n2 = (v) => String(Math.round(v * 100) / 100);
 
-/** A blob's sprite sheet for `mood`, in `fill` ("#rrggbb"): { url, frames, duration }. */
-export function blobArt(fill, shape, mood = "awake") {
-  const name = Object.hasOwn(B, shape) ? shape : "drop";
-  const key = Object.hasOwn(MOODS, mood) ? mood : "awake";
-  const m = MOODS[key];
-  const list = FRAMES.get(key);
-  const [ex, ey, gap, tilt] = B[name].eyes;
-  const body = m.dark ? mix(fill, "#000000", 0.28) : m.dim ? mix(fill, "#808080", 0.22) : fill;
-  // The body and one eye are drawn once; every frame reuses them.
-  const defs = `<defs><path id="b" fill="${body}" d="${paths.get(name)}"/><g id="e" fill="${INK}">${eye(m.eyes)}</g></defs>`;
-  const start = phase(`${fill}:${name}:${key}`, list.length);
-  const frames = list.map((_, i) => {
+// A face at rest: eyes centered and open (the mood's own eyes), no breath, hop or rock.
+const REST = Object.freeze([Object.freeze({ dx: 0, dy: 0, sx: 1, sy: 1, lift: 0, breathe: 0, sway: 0 })]);
+
+// Pixels per frame of a drawn sheet: a 30px face at twice the density (and the smaller
+// ones, 12 to 20px), crisp. Larger faces (Settings' 48px one) take the SVG.
+export const BLOB_RASTER_PX = 64;
+let rasterize = null;
+/**
+ * How sheets are drawn into a picture: `fn(width, height, draw)` makes a canvas of that
+ * size, calls draw(ctx) on its 2D context, and returns the picture as a data: URL (or
+ * null when it cannot). Null (the default) keeps every sheet an SVG.
+ */
+export function setBlobRasterizer(fn) {
+  rasterize = typeof fn === "function" ? fn : null;
+}
+
+/** Each frame's pose, in the sheet's 24x24 units: the body's stretch, hop and rock, and where the eyes are. */
+function framePoses(list, start, ex, ey) {
+  return list.map((_, i) => {
     const f = list[(i + start) % list.length];
     // Breathing stretches the blob from its foot (y 21.5); a hop lifts it, squashed a touch.
     const sy = 1 + f.breathe - 0.04 * f.lift;
     const sx = 1 - f.breathe * 0.6 + 0.03 * f.lift;
-    const rock = f.sway ? `rotate(${n2(f.sway)} 12 21.5)` : "";
-    const pose = `translate(${n2(12 * (1 - sx))} ${n2(21.5 * (1 - sy) - f.lift)})scale(${n2(sx)} ${n2(sy)})${rock}`;
-    const ox = ex + f.dx;
-    const oy = ey + f.dy;
-    const one = (d) => `<use href="#e" transform="translate(${n2(ox + d)} ${n2(oy)})scale(${n2(f.sx)} ${n2(f.sy)})"/>`;
-    return `<g transform="translate(${i * 24} 0)${pose}"><use href="#b"/><g transform="rotate(${tilt} ${n2(ox)} ${n2(oy)})">${one(-gap / 2)}${one(gap / 2)}</g></g>`;
+    return { sx, sy, tx: 12 * (1 - sx), ty: 21.5 * (1 - sy) - f.lift, sway: f.sway, ox: ex + f.dx, oy: ey + f.dy, esx: f.sx, esy: f.sy };
+  });
+}
+
+function svgSheet(name, body, glyph, poses, gap, tilt) {
+  // The body and one eye are drawn once; every frame reuses them.
+  const defs = `<defs><path id="b" fill="${body}" d="${paths.get(name)}"/><g id="e" fill="${INK}">${eye(glyph)}</g></defs>`;
+  const frames = poses.map((p, i) => {
+    const rock = p.sway ? `rotate(${n2(p.sway)} 12 21.5)` : "";
+    const pose = `translate(${n2(p.tx)} ${n2(p.ty)})scale(${n2(p.sx)} ${n2(p.sy)})${rock}`;
+    const one = (d) => `<use href="#e" transform="translate(${n2(p.ox + d)} ${n2(p.oy)})scale(${n2(p.esx)} ${n2(p.esy)})"/>`;
+    return `<g transform="translate(${i * 24} 0)${pose}"><use href="#b"/><g transform="rotate(${tilt} ${n2(p.ox)} ${n2(p.oy)})">${one(-gap / 2)}${one(gap / 2)}</g></g>`;
   });
   const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${24 * frames.length} 24">${defs}${frames.join("")}</svg>`;
-  return { url: `url("data:image/svg+xml,${encodeURIComponent(svg)}")`, frames: frames.length, duration: m.duration };
+  return `url("data:image/svg+xml,${encodeURIComponent(svg)}")`;
+}
+
+const bodyPaths = new Map(); // shape -> Path2D, made on first use (only where there is a canvas)
+const RAD = Math.PI / 180;
+/** The same frames as svgSheet, drawn on a canvas: a data: URL, or null. */
+function rasterSheet(name, body, glyph, poses, gap, tilt) {
+  const px = BLOB_RASTER_PX;
+  const shape = eyeShape(glyph);
+  const url = rasterize(px * poses.length, px, (ctx) => {
+    const Path = ctx.canvas?.ownerDocument?.defaultView?.Path2D ?? globalThis.Path2D;
+    if (!bodyPaths.has(name)) bodyPaths.set(name, new Path(paths.get(name)));
+    const outline = bodyPaths.get(name);
+    const stroke = shape.stroke ? new Path(shape.stroke) : null;
+    const k = px / 24;
+    ctx.fillStyle = body;
+    ctx.strokeStyle = INK;
+    ctx.lineCap = "round";
+    poses.forEach((p, i) => {
+      ctx.setTransform(k, 0, 0, k, i * px, 0);
+      ctx.translate(p.tx, p.ty);
+      ctx.scale(p.sx, p.sy);
+      if (p.sway) {
+        ctx.translate(12, 21.5);
+        ctx.rotate(p.sway * RAD);
+        ctx.translate(-12, -21.5);
+      }
+      ctx.fillStyle = body;
+      ctx.fill(outline);
+      // The eyes, turned about their center.
+      ctx.translate(p.ox, p.oy);
+      ctx.rotate(tilt * RAD);
+      ctx.translate(-p.ox, -p.oy);
+      ctx.fillStyle = INK;
+      for (const d of [-gap / 2, gap / 2]) {
+        ctx.save();
+        ctx.translate(p.ox + d, p.oy);
+        ctx.scale(p.esx, p.esy);
+        if (stroke) {
+          ctx.lineWidth = shape.width;
+          ctx.stroke(stroke);
+        } else {
+          ctx.beginPath();
+          ctx.roundRect(...shape.rect);
+          ctx.fill();
+        }
+        ctx.restore();
+      }
+    });
+  });
+  return typeof url === "string" && url.startsWith("data:image/") ? `url("${url}")` : null;
+}
+
+/**
+ * A blob's sprite sheet for `mood`, in `fill` ("#rrggbb"): { url, frames, duration }.
+ * `still`: one frame at rest instead (a subagent's face under its bot). `vector`: an
+ * SVG even where sheets are drawn (a face shown larger than BLOB_RASTER_PX / 2).
+ */
+export function blobArt(fill, shape, mood = "awake", { still = false, vector = false } = {}) {
+  const name = Object.hasOwn(B, shape) ? shape : "drop";
+  const key = Object.hasOwn(MOODS, mood) ? mood : "awake";
+  const m = MOODS[key];
+  const list = still ? REST : FRAMES.get(key);
+  const [ex, ey, gap, tilt] = B[name].eyes;
+  const body = m.dark ? mix(fill, "#000000", 0.28) : m.dim ? mix(fill, "#808080", 0.22) : fill;
+  const poses = framePoses(list, phase(`${fill}:${name}:${key}`, list.length), ex, ey);
+  const url = (!vector && rasterize && rasterSheet(name, body, m.eyes, poses, gap, tilt)) || svgSheet(name, body, m.eyes, poses, gap, tilt);
+  return { url, frames: poses.length, duration: still ? 0 : m.duration };
 }

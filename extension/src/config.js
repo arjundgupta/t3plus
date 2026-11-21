@@ -16,6 +16,21 @@
 // When one breaks, update it here and in src/styles/content.css (the CSS file
 // repeats the composer/backdrop selectors because manifest CSS cannot import JS).
 
+// Parts more than one selector below is built from, so a rename is one edit.
+/** The new-thread headline's classes: it hangs above the composer (ChatView.tsx). */
+const HANGING_HEADLINE = ".absolute.bottom-full";
+/** The thread breadcrumb in the top bar. */
+const THREAD_BREADCRUMB = '[aria-label="Thread breadcrumb"]';
+/** T3's letter monogram for a project with no icon. */
+const PROJECT_MONOGRAM = '[data-slot="project-monogram"]';
+/** A card row's body (its lines), relative to the row, and its first line, relative to the body. */
+const CARD_ROW_BODY = ":scope > .relative.z-10";
+const ROW_TOP_LINE = ":scope > .h-5";
+/** A folder header's data-sidebar-row value starts so (SIDEBAR_ROW_PREFIX.folder). */
+const FOLDER_ROW_PREFIX = "folder:";
+const SETTINGS_BREADCRUMB = 'nav[aria-label="Settings breadcrumb"]';
+const SKY_BACKDROP = ".sidebar-stage-backdrop";
+
 export const T3_SELECTORS = Object.freeze({
   /** Rounded composer card that wraps the body and footer. */
   composerSurface: '[data-chat-composer-surface="true"]',
@@ -40,7 +55,10 @@ export const T3_SELECTORS = Object.freeze({
   /** The chat canvas: holds the timeline and the composer lane; T3 keeps the lane's room (--chat-lane-inset-end) on it. */
   chatCanvas: "[data-chat-canvas]",
   /** The new-thread headline hanging above the composer (only in the centered hero state). */
-  heroHeadline: '[data-chat-composer-stack="true"] > .absolute.bottom-full',
+  heroHeadline: `[data-chat-composer-stack="true"] > ${HANGING_HEADLINE}`,
+  /** The same headline found from the overlay, without the stack hook (the health check
+   *  must still see the page when only the stack hook was renamed). */
+  overlayHeadline: `[data-chat-composer-overlay="true"] ${HANGING_HEADLINE}`,
   /** T3's banners under the composer (a usage-limit fallback, an upload error). */
   composerBanner: "[data-composer-banner-stack]",
   /** T3's terminal (the drawer and xterm's input): its keys belong to the program running there. */
@@ -54,11 +72,21 @@ export const T3_SELECTORS = Object.freeze({
    * and a preview's webview.
    */
   rightOverlays: 'aside[data-thread-details-panel], section[data-preview-mini-player], [data-preview-viewport]',
+  /** A user message's bubble (its color: --message-surface); used in content.css (chat bubbles). */
+  userBubble: '[data-message-role="user"] .bg-message',
+  /** T3's own trackpad back/forward swipe arrow: a round bubble in a fixed frame; used in content.css.
+   *  The bubble itself (size-14 first: a rare class keys the rule, not a common one). */
+  swipeArrow: '.pointer-events-none.fixed.overflow-hidden[aria-hidden="true"] > .size-14.rounded-full',
+  /** T3's night sky at the top of the sidebar (nightly builds): its container, and the art in it. */
+  skyBackdrop: SKY_BACKDROP,
+  nightSky: `${SKY_BACKDROP} svg[data-stage-art="nightly"]`,
   /** Appearance page sections, in render order. t3+ appends after the last one found. */
   appearanceSections: ["section#appearance", "section#appearance-interface"],
   /** T3's thread details panel card (ThreadDetailsPanel) and its usage limits section. */
   threadDetailsCard: "[data-thread-details-card]",
   threadDetailsUsage: 'section[aria-label="Usage limits"]',
+  /** Details card, Automations section: a task's schedule line and the panel's error are <p>s; the title is a span. */
+  automationScheduleLine: "p",
   /** The Usage page chart (UsageProviderChart): "Daily processed tokens by provider", "Hourly cost by provider".
    *  Builds after 2026-11-16 dropped the label (the svg is aria-hidden); those match by the chart's own viewBox. */
   usageChart: 'svg[role="img"][aria-label$=" by provider"], svg[viewBox="0 0 960 260"][preserveAspectRatio="none"]:has(> path[fill="none"][stroke])',
@@ -79,16 +107,31 @@ export const T3_SELECTORS = Object.freeze({
   /** <li> around a project folder header (Boring/project-grouped sidebar). */
   projectFolderItem: '[data-testid="sidebar-project-folder"]',
   /** A card row's first line (project badge, project name, status), relative to the row. */
-  cardRowTopLine: ":scope > .relative.z-10 > .h-5",
+  cardRowTopLine: `${CARD_ROW_BODY} > .h-5`,
+  /** A card row's body, its lines relative to it (top, then the meta line under the title), and
+   *  the top line's project name and badge, relative to the line. Without the body (a row in a
+   *  project's folder) the lines are the row's own. */
+  cardRowBody: CARD_ROW_BODY,
+  rowTopLine: ROW_TOP_LINE,
+  rowMetaLine: ":scope > .mt-0\\.5",
+  rowLineProject: ":scope > .truncate",
+  rowLineBadge: ":scope > img, :scope > span > img",
   /** A slim row's project badge slot (settled and snoozed rows outside a folder), relative to the row. */
   slimRowBadgeSlot: ":scope > * > span.shrink-0.items-center",
   /** A project's badge: its icon, or T3's letter monogram (an svg colored by its text color). */
-  projectBadge: 'img, [data-slot="project-monogram"] svg, [data-slot="project-monogram"]',
+  projectBadge: `img, ${PROJECT_MONOGRAM} svg, ${PROJECT_MONOGRAM}`,
+  projectMonogram: PROJECT_MONOGRAM,
   /** Inside a sidebar row: T3's hidden exact copy of the title (older builds), its visible
    *  title span, and that span without the copy (dir is left off a title with no letter). */
   rowSrOnlyTitle: ".sr-only:not([role])",
   rowVisibleTitle: 'span[aria-hidden="true"]',
   rowDirTitle: "span[dir]",
+  /** The visible title span with its dir (rowVisibleTitle alone can be an icon's wrapper). */
+  rowVisibleDirTitle: 'span[aria-hidden="true"][dir]',
+  /** A thread row's parent (data-sidebar-parent: a folder:<key>, shelf:<name> or a thread key). */
+  rowParent: "[data-sidebar-parent]",
+  /** A project folder's header row. */
+  folderHeader: `[data-sidebar-row^="${FOLDER_ROW_PREFIX}"]`,
   /** A folder header's project name. */
   folderTitle: ".truncate",
   /** The sidebar's scrolling viewport, around the thread list. */
@@ -99,18 +142,98 @@ export const T3_SELECTORS = Object.freeze({
   sidebarAny: '[data-slot="sidebar"]',
   sidebarWrapper: "[data-slot='sidebar-wrapper']",
   /** The open thread's heading in the top bar. */
-  breadcrumbHeading: '[aria-label="Thread breadcrumb"] h2',
+  breadcrumbHeading: `${THREAD_BREADCRUMB} h2`,
+  /** The breadcrumb itself, its items' text (a workspace's name) and the badges in it. */
+  breadcrumbNav: `nav${THREAD_BREADCRUMB}`,
+  breadcrumbText: '[data-slot="workspace-breadcrumb-text"]',
+  badge: '[data-slot="badge"]',
   /** T3's tooltips and popovers (hover cards are ones too), and a thread hover card's title line. */
   tooltipPopup: '[data-slot="tooltip-popup"]',
   hoverCardTitle: '[data-slot="tooltip-popup"] div.truncate:is(.font-medium, .font-semibold)',
+  /** A hover card's other lines (project, machine, branch, model), the model's icon in one, and
+   *  T3's warning and error lines. */
+  hoverCardLine: ".grid > div",
+  modelIcon: ".grayscale",
+  warningLine: ".text-warning, .text-error, .text-destructive",
+  /** A label T3 splits into parts (a project, then a branch): its parts are spans in a titled span. */
+  splitLabel: "span[title]:has(> span + span)",
+  titledLabel: "span[title]",
+  /** The new-thread page's project picker and headline. */
+  draftHero: ".group\\/draft-hero [data-draft-project-trigger], .group\\/draft-hero .font-medium",
+  /** The composer's context controls (workspace, branch) and the label in each. */
+  composerContextControl: "[data-composer-context-control], [aria-label^='Branch: ']",
+  composerLabel: "[data-composer-label]",
+  /** A row of the chat timeline, a message's markdown, a command run, monospace text. */
+  timelineRow: "[data-timeline-row-id]",
+  chatMarkdown: ".chat-markdown",
+  commandExecution: '[data-v2-item-type="command_execution"]',
+  monoText: ".font-mono",
+  /** T3's small text (a command palette item's second line). */
+  smallText: ".text-xs",
+  /** What T3 portals over the page: menus, listboxes, dialogs, popups, toasts and live statuses. */
+  portals: '[role="menu"], [role="listbox"], [role="dialog"], [role="alertdialog"], [data-slot$="-popup"], [data-sonner-toast], [role="status"][aria-live], [role="alert"]',
   /** The thread details panel (the floating card's outer element). */
   threadDetailsPanel: "aside[data-thread-details-panel]",
   /** Settings: the Appearance entry in the settings nav, the page's scroller and its sections' column. */
   settingsAppearanceLink: '[data-settings-section="/settings/appearance"]',
+  /** The settings nav's entry for the page shown (T3 marks it so; its workspace focus looks for it too). */
+  settingsNavCurrent: '[data-settings-section][aria-current="page"]',
   settingsPageScroll: "[data-settings-page-scroll]",
   settingsPage: "[data-settings-page-scroll] > div",
+  /** The Settings header's page actions (General's "Restore device defaults", Close). */
+  settingsHeaderActions: `${SETTINGS_BREADCRUMB} ~ div`,
+  // Used in content.css only (manifest CSS cannot import JS; manifest.test.js checks it
+  // still uses them): the Settings breadcrumb and T3's active nav entry (they defer to
+  // t3+'s while it is open), the inline details panel (hidden under the home cards), the
+  // conversation pane's own background (under the glow) and the Settled shelf's rows.
+  settingsBreadcrumb: SETTINGS_BREADCRUMB,
+  settingsNavActive: '[data-settings-section][data-active="true"]',
+  detailsPanelInline: 'aside[data-thread-details-panel="inline"]',
+  conversationBackground: '[data-workspace-area="conversation"] > .bg-background',
+  settledShelfRow: '[data-sidebar-parent="shelf:settled"]',
   /** The app's root element: not a popup. */
   appRootId: "root",
+});
+
+/**
+ * The selectors of a T3_SELECTORS list, one by one. A document-wide query of a list tests
+ * every element against each part (Blink's slow path, many times slower than the parts
+ * queried on their own), so per-check queries take the parts.
+ */
+export function selectorParts(list) {
+  const parts = [];
+  let depth = 0;
+  let start = 0;
+  for (let i = 0; i < list.length; i += 1) {
+    const ch = list[i];
+    if (ch === "(" || ch === "[") depth += 1;
+    else if (ch === ")" || ch === "]") depth -= 1;
+    else if (ch === "," && depth === 0) {
+      parts.push(list.slice(start, i).trim());
+      start = i + 1;
+    }
+  }
+  parts.push(list.slice(start).trim());
+  return parts;
+}
+
+/** Path of T3's Usage page (its chart takes the widgets' dither style, usageDither.js). */
+export const USAGE_ROUTE = "/usage";
+
+/** Attributes of T3's that t3+ reads (getAttribute / hasAttribute, not selectors). */
+export const T3_ATTRS = Object.freeze({
+  /** A thread row's <li> (T3_SELECTORS.threadItem): the thread key. */
+  threadItem: "data-thread-item",
+  sidebarRow: "data-sidebar-row",
+  sidebarParent: "data-sidebar-parent",
+  /** A timeline row's kind ("turn-fold", "work-toggle", "work", ...) and a message's role. */
+  timelineRowKind: "data-timeline-row-kind",
+  messageRole: "data-message-role",
+  /** A composer control's shortcut ("composer.workspace": the workspace picker). */
+  composerShortcut: "data-composer-shortcut",
+  /** The thread details card's sections: automations, side chats. */
+  automationsPanel: "data-thread-automations-panel",
+  sideChatsPanel: "data-thread-side-chats-panel",
 });
 
 /** Class names of T3's that t3+ checks for (classList, not selectors). */
@@ -121,11 +244,14 @@ export const T3_CLASSES = Object.freeze({
   composerLane: "chat-composer-lane",
   /** On the composer overlay while it is centered (the new-thread hero). */
   centered: "items-center",
+  /** A sidebar title's state classes (SidebarThreadRow.tsx), which a bot's drawn name copies
+   *  in content.css: seen, failed, and the slim rows' shades (as CSS escapes them). */
+  titleTones: Object.freeze(["font-normal", "text-foreground\\/75", "text-foreground\\/95", "text-muted-foreground", "text-secondary-label", "text-secondary-label\\/70"]),
 });
 
 /** Prefixes of data-sidebar-row / data-sidebar-parent values. */
 export const SIDEBAR_ROW_PREFIX = Object.freeze({
-  folder: "folder:",
+  folder: FOLDER_ROW_PREFIX,
   shelf: "shelf:",
   draft: "draft:",
 });
@@ -163,6 +289,8 @@ export const T3PLUS = Object.freeze({
   homeAttr: "data-t3plus-home",
   /** On elements t3+ inserted into T3's DOM (bot avatars). */
   ownedAttr: "data-t3plus-owned",
+  /** On a row of the sidebar's Status view (statusView.js): the thread it opens. */
+  statusThreadAttr: "data-thread",
 });
 
 /** The exact title token that marks a thread as a bot/orchestrator. */
@@ -170,29 +298,14 @@ export const DEFAULT_BOT_MARKER = "[[t3plus:bot:v1]]";
 /** Shape a configured marker must have: one [[...]] token, no spaces. */
 export const BOT_MARKER_PATTERN = /^\[\[[A-Za-z0-9:._-]{1,48}\]\]$/;
 
-export const STORAGE_KEYS = Object.freeze({
-  settings: "t3plus.settings.v1",
-  image: "t3plus.image.v1",
-  /** Per-bot presentation: shape and color. */
-  bots: "t3plus.bots.v1",
-  /** Threads made bots by Option-click (no title marker): { "<environmentId>:<threadId>": true }. */
-  manualBots: "t3plus.botKeys.v1",
-  /** Bot threads seen in the sidebar, so Settings can list them. */
-  knownBots: "t3plus.knownBots.v1",
-  /** Last good copy of t3plus-bots.json (latest message per bot). */
-  botFeedCache: "t3plus.botFeed.cache.v1",
-  /** Last good copy of t3plus-home.json (home widget data). */
-  homeFeedCache: "t3plus.homeFeed.cache.v1",
-  /** Profiles (src/profiles.js): { active, list: [{ id, name }], projects: { projectKey: profileId } }. */
-  profiles: "t3plus.profiles.v2",
-  /** The last t3+ version whose What's New was shown (whatsNew.js). */
-  whatsNew: "t3plus.whatsNew.v1",
-  /** Which window opens it, when several start at once (whatsNew.js). */
-  whatsNewClaim: "t3plus.whatsNew.claim.v1",
-});
+// Where each thing is stored (chrome.storage.local). In a module of its own: the background
+// worker mirrors the preferences to Chrome Sync (backup.js) without evaluating this file.
+export { STORAGE_KEYS } from "./storageKeys.js";
 
 export const GRADIENT_MODES = Object.freeze(["half-circle", "image"]);
 export const IMAGE_SOURCES = Object.freeze(["sample", "upload"]);
+/** A subagent's shape or color that follows its bot's (settings sidebar.subagentShape/Color). */
+export const SAME_AS_BOT = "same";
 
 export const DEFAULT_SETTINGS = Object.freeze({
   version: 2,
@@ -225,6 +338,18 @@ export const DEFAULT_SETTINGS = Object.freeze({
     botStyle: "classic",
     /** Profile dots at the bottom of the sidebar (src/profiles.js). */
     profiles: true,
+    /** The Status view (src/statusView.js): each bot wears its status's color, not its own. */
+    statusColors: false,
+    /** A small tile on each bot's face that shows what its thread is doing (botArt.js botBadge). */
+    statusBadges: false,
+    /** Subagents' faces under their bot: SAME_AS_BOT (its shape) or a BOT_SHAPES name. */
+    subagentShape: SAME_AS_BOT,
+    /** SAME_AS_BOT (its color, a status color too) or a pickable BOT_COLORS name. */
+    subagentColor: SAME_AS_BOT,
+  }),
+  chat: Object.freeze({
+    /** Your messages' bubbles: "theme" (T3's own) or a #rrggbb color (src/bubbles.js). */
+    bubble: "theme",
   }),
   home: Object.freeze({
     /** Activity, limits, spend and automations under the new-thread composer. */
@@ -266,6 +391,9 @@ const STRAWBERRY = radial(48, (a) => {
   return 46 - 10 * down ** 3 + 4 * (1 - down) ** 4;
 });
 
+/** The Blobs set's shapes (blobAvatars.js draws them). Their names are no other shape's. */
+const BLOB_SHAPES = Object.freeze(["drop", "pebble", "squircle", "bean", "trefoil", "cloud", "egg", "mochi", "wobble", "lean", "tilt", "pudding"]);
+
 export const BOT_SHAPES = Object.freeze({
   circle: "circle(50% at 50% 50%)",
   square: "inset(4% round 26%)",
@@ -279,7 +407,8 @@ export const BOT_SHAPES = Object.freeze({
   robot: "polygon(14% 22%, 46% 22%, 46% 10%, 41% 10%, 41% 0%, 59% 0%, 59% 10%, 54% 10%, 54% 22%, 86% 22%, 92% 28%, 92% 46%, 100% 46%, 100% 70%, 92% 70%, 92% 90%, 86% 96%, 14% 96%, 8% 90%, 8% 70%, 0% 70%, 0% 46%, 8% 46%, 8% 28%)",
   heart: "polygon(50% 26%, 50.3% 24%, 51.9% 18.9%, 56% 12.4%, 62.7% 6.8%, 71.6% 4%, 81.2% 5.3%, 89.8% 10.6%, 95.8% 19%, 98% 29.1%, 95.8% 39.7%, 89.8% 49.9%, 81.2% 59.4%, 71.6% 68.2%, 62.7% 76.5%, 56% 84.1%, 51.9% 90.3%, 50.3% 94.5%, 50% 96%, 49.7% 94.5%, 48.1% 90.3%, 44% 84.1%, 37.3% 76.5%, 28.4% 68.2%, 18.8% 59.4%, 10.2% 49.9%, 4.2% 39.7%, 2% 29.1%, 4.2% 19%, 10.2% 10.6%, 18.8% 5.3%, 28.4% 4%, 37.3% 6.8%, 44% 12.4%, 48.1% 18.9%, 49.7% 24%)",
   shield: "polygon(6% 6%, 94% 6%, 94% 48%, 88% 66%, 74% 82%, 50% 97%, 26% 82%, 12% 66%, 6% 48%)",
-  drop: "polygon(50% 2%, 78.4% 39.8%, 82.6% 46.7%, 85.2% 54.3%, 86% 62.3%, 85% 70.2%, 82.4% 77.8%, 78.1% 84.6%, 72.4% 90.2%, 65.6% 94.5%, 58% 97.1%, 50% 98%, 42% 97.1%, 34.4% 94.5%, 27.6% 90.2%, 21.9% 84.6%, 17.6% 77.8%, 15% 70.2%, 14% 62.3%, 14.8% 54.3%, 17.4% 46.7%, 21.6% 39.8%)",
+  // "teardrop": the blob set took the name "drop" (0.22.3), which hid this one.
+  teardrop: "polygon(50% 2%, 78.4% 39.8%, 82.6% 46.7%, 85.2% 54.3%, 86% 62.3%, 85% 70.2%, 82.4% 77.8%, 78.1% 84.6%, 72.4% 90.2%, 65.6% 94.5%, 58% 97.1%, 50% 98%, 42% 97.1%, 34.4% 94.5%, 27.6% 90.2%, 21.9% 84.6%, 17.6% 77.8%, 15% 70.2%, 14% 62.3%, 14.8% 54.3%, 17.4% 46.7%, 21.6% 39.8%)",
   octagon: "polygon(30% 2%, 70% 2%, 98% 30%, 98% 70%, 70% 98%, 30% 98%, 2% 70%, 2% 30%)",
   pentagon: "polygon(50% 2%, 98% 38%, 80% 96%, 20% 96%, 2% 38%)",
   pill: "inset(16% 2% round 34%)",
@@ -310,7 +439,7 @@ export const BOT_SHAPES = Object.freeze({
   lime: "circle(46% at 50% 52%)",
   strawberry: STRAWBERRY,
   // Blobs (blobAvatars.js): vector blobs that keep inside their own outline, unclipped.
-  ...Object.fromEntries(["drop", "pebble", "squircle", "bean", "trefoil", "cloud", "egg", "mochi", "wobble", "lean", "tilt", "pudding"].map((k) => [k, "inset(0)"])),
+  ...Object.fromEntries(BLOB_SHAPES.map((k) => [k, "inset(0)"])),
 });
 
 /**
@@ -356,12 +485,13 @@ export const BOT_STYLES = Object.freeze({
   sports: Object.freeze({ label: "Sports", shapes: ["football", "basketball", "soccer", "baseball", "tennis", "volleyball", "eightball", "bowling", "golf", "beachball"] }),
   space: Object.freeze({ label: "Space", shapes: ["earth", "moon", "mars", "jupiter", "saturn", "sun"] }),
   fruit: Object.freeze({ label: "Fruit", shapes: ["orange", "apple", "lemon", "watermelon", "lime", "strawberry"] }),
-  blobs: Object.freeze({ label: "Blobs", shapes: ["drop", "pebble", "squircle", "bean", "trefoil", "cloud", "egg", "mochi", "wobble", "lean", "tilt", "pudding"] }),
+  blobs: Object.freeze({ label: "Blobs", shapes: BLOB_SHAPES }),
 });
 
 /**
  * Bot avatar colors. Each is a fixed light -> mid -> dark ramp, rendered as an
  * ordered-dither gradient (src/botArt.js). Users pick the color, never the stops.
+ * A `status` color is only for Status colors (an idle bot): no picker offers it.
  */
 export const BOT_COLORS = Object.freeze({
   blue: Object.freeze({ label: "Blue", stops: ["#a8d1ff", "#3b82f6", "#1e2f8a"] }),
@@ -374,6 +504,9 @@ export const BOT_COLORS = Object.freeze({
   pink: Object.freeze({ label: "Pink", stops: ["#ffc6e4", "#ec4899", "#831843"] }),
   gray: Object.freeze({ label: "Gray", stops: ["#ececf0", "#7a7a85", "#26262c"] }),
 });
+
+/** BOT_COLORS names a bot or a subagent can be given. */
+export const PICKABLE_BOT_COLORS = Object.freeze(Object.keys(BOT_COLORS));
 
 export const IMAGE_LIMITS = Object.freeze({
   /** Files above this are rejected before decoding. */
@@ -403,9 +536,6 @@ export const BOT_LIMITS = Object.freeze({
 export const BOT_FEED_POLL_MS = 60 * 1000;
 /** How often the home feed is re-read while the tab is visible. */
 export const HOME_FEED_POLL_MS = 2 * 60 * 1000;
-
-/** Largest feed accepted, in characters (the home feed allows four times this). */
-export const CONFIG_LIMITS = Object.freeze({ maxChars: 256 * 1024 });
 
 /** Minimum gap between DOM checks triggered by mutations, in ms. */
 export const DOM_CHECK_THROTTLE_MS = 200;

@@ -1,5 +1,5 @@
-import { T3_SELECTORS } from "./config.js";
-import { createDitherCanvas } from "./ditherChart.js";
+import { T3_SELECTORS, selectorParts } from "./config.js";
+import { PAINTED_ATTR, createDitherCanvas } from "./ditherChart.js";
 
 // T3's Usage page chart (UsageProviderChart.tsx) in the widgets' dither style.
 // T3 renders it with React as one SVG: gridlines, an area per provider, then a
@@ -46,6 +46,10 @@ export function readUsageSeries(svg) {
     .filter((s) => s.points.length > 1);
 }
 
+// Each of the chart's hooks on its own: as one list (the second with :has()) the
+// document was walked the slow way.
+const CHART_HOOKS = selectorParts(T3_SELECTORS.usageChart);
+
 export function createUsageDither(doc) {
   const charts = new Map(); // T3's chart <svg> -> { dither, signature }
 
@@ -53,22 +57,27 @@ export function createUsageDither(doc) {
     entry.dither.disconnect();
     const plot = entry.dither.canvas.parentElement;
     entry.dither.canvas.remove();
-    plot?.removeAttribute("data-t3plus-dithered");
+    plot?.removeAttribute(PAINTED_ATTR);
     plot?.removeAttribute("data-t3plus-usage-plot");
     charts.delete(svg);
   }
 
   return {
-    /** Cheap when nothing changed: compares path data, repaints only on a change. */
-    sync() {
+    /**
+     * Cheap when nothing changed: compares path data, repaints only on a change. `search`:
+     * look for charts (the Usage page; elsewhere the ones gone are only dropped); `cell`:
+     * the dither cell size in CSS px.
+     */
+    sync({ search = true, cell } = {}) {
       for (const [svg, entry] of charts) if (!svg.isConnected || entry.dither.canvas.parentElement !== svg.parentElement) drop(svg, entry);
-      for (const svg of doc.querySelectorAll(T3_SELECTORS.usageChart)) {
+      if (!search) return;
+      for (const svg of new Set(CHART_HOOKS.flatMap((hook) => [...doc.querySelectorAll(hook)]))) {
         const plot = svg.parentElement;
         if (!plot) continue;
         const signature = [...svg.querySelectorAll(T3_SELECTORS.usageChartLine)].map((p) => `${p.getAttribute("stroke")}|${p.getAttribute("d")}`).join("\n");
         let entry = charts.get(svg);
         if (!entry) {
-          entry = { dither: createDitherCanvas(doc, [], { className: "t3plus-usage-dither" }), signature: null };
+          entry = { dither: createDitherCanvas(doc, [], { className: "t3plus-usage-dither", cell }), signature: null };
           charts.set(svg, entry);
           plot.setAttribute("data-t3plus-usage-plot", "");
           // First child, so it paints under the SVG; React only appends after it.
@@ -76,9 +85,9 @@ export function createUsageDither(doc) {
         }
         if (entry.signature !== signature) {
           entry.signature = signature;
-          entry.dither.setSeries(readUsageSeries(svg));
+          entry.dither.setSeries(readUsageSeries(svg), { cell });
         } else {
-          entry.dither.paint(); // no-op unless the pixel size or layout changed
+          entry.dither.paint({ cell }); // no-op unless the pixel size or layout changed
         }
       }
     },

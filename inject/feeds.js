@@ -1,6 +1,7 @@
-// t3+ data feeds inside T3 Code's main process. Two feeds, written to ~/.t3plus/feeds:
-//   t3plus-bots.json  latest message, subagents and spend of each bot thread
-//   t3plus-home.json  pools, recorded pool history, activity, usage and automations
+// t3+ data feeds inside T3 Code's main process. Three feeds, written to ~/.t3plus/feeds:
+//   t3plus-bots.json     latest message, subagents and spend of each bot thread
+//   t3plus-threads.json  each thread's status, for the sidebar's Status view
+//   t3plus-home.json     pools, recorded pool history, activity, usage and automations
 //
 // All the work (T3's database, session logs, T3's API, shaping, writing) runs in
 // one worker thread (inject/feeds-worker.js): T3's main thread only sends a
@@ -66,6 +67,7 @@ module.exports = function createFeeds({ home, log }) {
 
   return {
     publishBots: (ids) => call("bots", { ids }),
+    publishThreads: () => call("threads", {}),
     publishHome: () => call("home", {}),
     config: { t3Home, t3Cli, timeZone },
     dispose() {
@@ -73,7 +75,8 @@ module.exports = function createFeeds({ home, log }) {
       const w = worker;
       worker = null;
       if (!w) return;
-      // Its T3 session revoked first (the worker keeps one between publishes), then stopped.
+      // Its T3 session revoked (the worker keeps one between publishes) and its spend cache
+      // written (kept in memory between its timed writes) first, then stopped.
       try { w.postMessage({ id: 0, op: "dispose", args: {} }); } catch {}
       const stop = setTimeout(() => w.terminate().catch(() => {}), 3000);
       if (stop.unref) stop.unref();

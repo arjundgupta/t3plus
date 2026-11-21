@@ -1,14 +1,16 @@
 import assert from "node:assert/strict";
-import { after, test } from "node:test";
-import { createProfiles, normalizeProfiles } from "../src/profiles.js";
+import { test } from "node:test";
+import { createProfiles, normalizeProfiles, profileOf } from "../src/profiles.js";
 import { clearBotDecoration } from "../src/bots.js";
+import { LOOK, lookValue } from "../src/composer.js";
 import { STORAGE_KEYS } from "../src/config.js";
-import { createDom, createFakeChromeStorage, settle } from "./helpers.js";
+import { createDom, createFakeChromeStorage, virtualClock } from "./helpers.js";
 
 // The slide between profiles: the open list moves out sideways and a copy of the next
 // profile's list moves in beside it (by a click, the keys, or a swipe that follows the
 // fingers). jsdom has no animations, so a small stand-in records them: `start()` is the
-// compositor taking one over, `finish()` its end.
+// compositor taking one over, `finish()` its end, `progress` how far it has eased (as
+// effect.getComputedTiming() reports it; unset: it cannot say).
 
 const folder = (key) =>
   `<li data-testid="sidebar-project-folder"><button data-sidebar-row="folder:${key}" aria-expanded="true" id="h-${key.replace("/", "-")}"><span class="truncate">${key}</span></button></li>`;
@@ -18,22 +20,23 @@ const ROWS = folder("p/a") + thread("env:a1", "folder:p/a", true) + folder("p/b"
 const TWO = { active: "main", list: [{ id: "main", name: "Main" }, { id: "work", name: "Work" }], projects: { "p/a": "main", "p/b": "work" }, adopted: true };
 // T3's night art at the top of the sidebar (nightly builds), its colors from the theme.
 const SKY = '<div class="sidebar-stage-backdrop" style="--stage-night-mid: oklch(22.7% .086 278)"><svg data-stage-art="nightly"></svg></div>';
-const windows = [];
-after(() => windows.forEach((w) => w.close()));
 
-function setup({ rows = ROWS, stored = TWO, reduced = false, path = "/env/a1", enabled = () => true, demo = () => false } = {}) {
+function setup({ rows = ROWS, stored = TWO, reduced = false, path = "/env/a1", enabled = () => true, demo = () => false, trackpad = null, scoped = null, storage: storageOptions } = {}) {
   const dom = createDom(
     path,
     `<div data-slot="sidebar-inner"><div data-slot="scroll-area-viewport"><div id="group"><ul id="list">${rows}</ul></div></div><div data-slot="sidebar-footer"></div></div>${SKY}<div data-workspace-area="conversation"><div data-chat-canvas><div class="messages-timeline-scroll" id="msgs"><div data-timeline-row-id="a1-m1">a1</div></div><div class="composer"></div></div></div>`,
   );
   const win = dom.window;
-  windows.push(win);
   const doc = win.document;
+  // Time moves only when a test moves it: a busy machine never reads a finger's pace as
+  // a flick, nor sleeps past a spring-back's end.
+  const clock = virtualClock(win);
   const anims = [];
   win.Element.prototype.animate = function (keyframes, options) {
     let start;
     const a = {
-      el: this, keyframes, options, onfinish: null, cancelled: false,
+      el: this, keyframes, options, onfinish: null, cancelled: false, progress: undefined,
+      effect: { getComputedTiming: () => ({ progress: a.progress }) },
       ready: new Promise((resolve) => (start = resolve)),
       start: () => start(),
       cancel() { this.cancelled = true; },
@@ -61,12 +64,12 @@ function setup({ rows = ROWS, stored = TWO, reduced = false, path = "/env/a1", e
     const [env, id] = row.getAttribute("data-sidebar-row").split(":");
     win.history.pushState({}, "", `/${env}/${id}`);
   });
-  const storage = createFakeChromeStorage();
+  const storage = createFakeChromeStorage(storageOptions);
   storage.area.data.set(STORAGE_KEYS.profiles, stored);
-  const profiles = createProfiles({ win, doc, area: storage.area, changedEvent: storage.onChanged, isEnabled: () => enabled(), isDemo: () => demo() });
+  const profiles = createProfiles({ win, doc, area: storage.area, changedEvent: storage.onChanged, isEnabled: () => enabled(), isDemo: () => demo(), trackpad, scoped });
   const live = () => anims.filter((a) => !a.cancelled);
   return {
-    win, doc, list, storage, profiles, anims,
+    win, doc, list, storage, profiles, anims, clock,
     route: () => win.location.pathname,
     go: (path) => {
       win.history.pushState({}, "", path);
@@ -78,9 +81,9 @@ function setup({ rows = ROWS, stored = TWO, reduced = false, path = "/env/a1", e
     /** The compositor has the slide: the thread may be asked for now. */
     async started() {
       for (const a of live()) a.start();
-      await settle();
-      await new Promise((r) => win.requestAnimationFrame(r));
-      await settle();
+      await clock.advance(0); // their ready promises settle
+      await clock.frames(1); // the frame after
+      await clock.advance(0);
     },
     finish: () => live().find((a) => a.el === list)?.finish(),
     key: (digit, repeat = false) => doc.body.dispatchEvent(new win.KeyboardEvent("keydown", { code: `Digit${digit}`, key: String(digit), ctrlKey: true, shiftKey: true, repeat, bubbles: true, cancelable: true })),
@@ -91,7 +94,6 @@ function setup({ rows = ROWS, stored = TWO, reduced = false, path = "/env/a1", e
     },
   };
 }
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 test("a switch slides: a copy of the next profile's list comes in beside the open one, and the real list takes over when it is in place", async () => {
   const t = setup();
@@ -173,12 +175,12 @@ test("a swipe moves the lists with the fingers: a short one springs back, past a
   await t.profiles.start();
   // Short: 30 px of a 212 px slide, at a finger's pace (not a flick).
   for (let i = 0; i < 5; i += 1) {
-    assert.equal(t.wheel(6), true, "a sideways swipe is not a scroll");
-    if (i < 4) await sleep(16);
+    assert.equal(t.wheel(6), false, "never canceled: Chromium then starts its scroll gesture, which T3 reports as a touch");
+    if (i < 4) await t.clock.advance(16);
   }
   assert.equal(t.list.style.transform, "translate3d(-30px, 0px, 0)", "the list follows the fingers");
   assert.equal(t.copy().style.transform, "translate3d(182px, 0px, 0)", "and Work's comes in beside it");
-  await sleep(170); // the fingers stop
+  await t.clock.advance(170); // the fingers stop
   t.finish();
   assert.equal(t.profiles.state.active, "main", "sprang back");
   assert.equal(t.copy(), null);
@@ -186,7 +188,7 @@ test("a swipe moves the lists with the fingers: a short one springs back, past a
 
   // Past a third.
   for (let i = 0; i < 15; i += 1) t.wheel(6);
-  await sleep(300);
+  await t.clock.advance(300);
   await t.started();
   t.finish();
   assert.equal(t.profiles.state.active, "work");
@@ -194,11 +196,11 @@ test("a swipe moves the lists with the fingers: a short one springs back, past a
 
   // Up and down (and mostly so): the list scrolls, nothing slides.
   for (let i = 0; i < 6; i += 1) assert.equal(t.wheel(0, 8), false, "scrolling is left alone");
-  await sleep(300);
+  await t.clock.advance(300);
   for (let i = 0; i < 6; i += 1) t.wheel(3, 8);
   assert.equal(t.copy(), null);
   assert.equal(t.list.style.transform, "");
-  await sleep(300);
+  await t.clock.advance(300);
   assert.equal(t.profiles.state.active, "work");
   t.profiles.stop();
 });
@@ -211,7 +213,7 @@ test("swiping past the last profile only gives a little and springs back; turnin
   assert.equal(t.copy(), null, "nothing to bring in");
   const x = Number(/translate3d\((-?[\d.]+)px/.exec(t.list.style.transform)[1]);
   assert.ok(x < 0 && x > -80, `gives a little (${x}px for 160px of fingers)`);
-  await sleep(300);
+  await t.clock.advance(300);
   t.finish();
   assert.equal(t.profiles.state.active, "work");
   assert.equal(t.list.style.transform, "");
@@ -220,7 +222,7 @@ test("swiping past the last profile only gives a little and springs back; turnin
   for (let i = 0; i < 16; i += 1) t.wheel(-8); // ...then back the other way, toward Main
   assert.ok(t.copy(), "Main comes in from the left");
   assert.match(t.copy().style.transform, /^translate3d\(-/);
-  await sleep(300);
+  await t.clock.advance(300);
   await t.started();
   t.finish();
   assert.equal(t.profiles.state.active, "main");
@@ -271,10 +273,10 @@ test("one swipe is one switch: its momentum (even arriving in bursts after T3 dr
   t.finish();
   assert.equal(t.profiles.state.active, "work");
   for (const dx of [7, 15, 30, 6, 4, 3, 2, 1]) t.wheel(dx); // momentum, merged into bigger events by a stall
-  await sleep(100);
+  await t.clock.advance(100);
   for (const dx of [12, 9, 5]) t.wheel(dx);
   assert.equal(t.copy(), null, "nothing moves");
-  await sleep(300);
+  await t.clock.advance(300);
   assert.equal(t.profiles.state.active, "work", "still one switch");
   for (let i = 0; i < 40; i += 1) t.wheel(8); // after a pause: a new swipe
   await t.started();
@@ -289,10 +291,145 @@ test("one swipe is one switch: its momentum (even arriving in bursts after T3 dr
   const r = setup({ rows: ROWS4, stored: FOUR, reduced: true }); // the instant switch, the same
   await r.profiles.start();
   for (let i = 0; i < 12; i += 1) r.wheel(8);
-  await sleep(100);
+  await r.clock.advance(100);
   for (let i = 0; i < 12; i += 1) r.wheel(8);
   assert.equal(r.profiles.state.active, "work");
+  for (let i = 0; i < 12; i += 1) r.wheel(-8); // right away, the other way: a new swipe too
+  assert.equal(r.profiles.state.active, "main");
   r.profiles.stop();
+});
+
+test("fingers back on the pad (T3 reports each touch): the next swipe switches right away, even while the last one's momentum still arrives", async () => {
+  let touch = null;
+  let unsubscribed = false;
+  const trackpad = { onBegin: (fn) => ((touch = fn), () => (unsubscribed = true)) };
+  const t = setup({ rows: ROWS4, stored: FOUR, trackpad });
+  await t.profiles.start();
+  const swipe = async (dx) => {
+    for (let i = 0; i < 40; i += 1) t.wheel(dx);
+    await t.started();
+    t.finish();
+  };
+  touch(); // reported before the swipe's first event
+  await swipe(8);
+  assert.equal(t.profiles.state.active, "work");
+  for (const dx of [7, 5, 3, 2]) t.wheel(dx); // its momentum
+  assert.equal(t.copy(), null, "the momentum moves nothing");
+  touch(); // fingers down again, no pause at all
+  await swipe(8);
+  assert.equal(t.profiles.state.active, "c", "a second swipe, straight after the first");
+  // A swipe whose touch is reported only after its first events (T3 busy drawing a
+  // thread): that report is its own, and does not let its momentum switch again.
+  await t.clock.advance(300); // a pause: the next events start a gesture before any report
+  await swipe(8);
+  assert.equal(t.profiles.state.active, "d");
+  touch(); // late: this swipe's own touch
+  for (const dx of [9, 6, 4]) t.wheel(dx);
+  assert.equal(t.copy(), null, "its momentum still moves nothing");
+  assert.equal(t.profiles.state.active, "d");
+  touch();
+  await swipe(-8);
+  assert.equal(t.profiles.state.active, "c", "the next touch is a new swipe");
+  t.profiles.stop();
+  assert.equal(unsubscribed, true, "stops listening to touches");
+});
+
+test("T3's own trackpad back/forward step is not taken during a swipe over the sidebar (nor its arrow shown); after it, and elsewhere, it is", async () => {
+  const t = setup({ rows: ROWS4, stored: FOUR });
+  const steps = [];
+  // T3 calls window.history.back(): stood in for by History's own method.
+  t.win.History.prototype.back = function () { steps.push("back"); };
+  t.win.History.prototype.forward = function () { steps.push("forward"); };
+  await t.profiles.start();
+  for (let i = 0; i < 6; i += 1) t.wheel(8);
+  t.win.history.back(); // T3 finishing the same gesture as a history swipe
+  assert.deepEqual(steps, [], "not taken mid-swipe");
+  assert.equal(t.doc.documentElement.hasAttribute("data-t3plus-profile-swipe"), true, "T3's arrow is hidden (content.css)");
+  await t.clock.advance(450);
+  assert.equal(t.doc.documentElement.hasAttribute("data-t3plus-profile-swipe"), false);
+  t.win.history.back();
+  assert.deepEqual(steps, ["back"], "a back step of its own, later, is taken");
+  for (let i = 0; i < 6; i += 1) t.wheel(0, 8); // scrolling the list up and down guards nothing
+  t.win.history.forward();
+  assert.deepEqual(steps, ["back", "forward"]);
+  t.finish();
+  t.profiles.stop();
+  assert.equal(Object.hasOwn(t.win.history, "back"), false, "History's own methods back on stop");
+});
+
+test("with T3's report of a gesture's end, the guard holds until it: fingers resting long before lifting still keep T3's step from being taken", async () => {
+  let begin = null;
+  let end = null;
+  const trackpad = { onBegin: (fn) => ((begin = fn), () => {}), onEnd: (fn) => ((end = fn), () => (end = null)) };
+  const t = setup({ rows: ROWS4, stored: FOUR, trackpad });
+  const steps = [];
+  t.win.History.prototype.back = function () { steps.push("back"); };
+  await t.profiles.start();
+  begin(); // fingers on the pad: T3 reports the touch
+  for (let i = 0; i < 6; i += 1) t.wheel(8);
+  await t.clock.advance(700); // fingers resting on the pad, no events
+  t.win.history.back();
+  assert.deepEqual(steps, [], "still held");
+  end(); // fingers lifted: T3 steps now, if at all
+  t.win.history.back();
+  assert.deepEqual(steps, [], "T3's step right at the end is not taken");
+  for (let i = 0; i < 3; i += 1) t.wheel(4); // events held back, arriving after the end report
+  await t.clock.advance(450);
+  t.win.history.back();
+  assert.deepEqual(steps, ["back"], "a moment later, back steps are taken again (late events hold it only briefly)");
+  t.finish();
+  t.profiles.stop();
+  assert.equal(end, null, "stops listening for the end too");
+});
+
+test("a sideways swipe's own touch, reported late, holds the guard to its end; a touch after that end (another gesture) does not", async () => {
+  let begin = null;
+  let end = null;
+  const trackpad = { onBegin: (fn) => ((begin = fn), () => {}), onEnd: (fn) => ((end = fn), () => {}) };
+  const t = setup({ rows: ROWS4, stored: FOUR, trackpad });
+  const steps = [];
+  t.win.History.prototype.back = function () { steps.push("back"); };
+  await t.profiles.start();
+  for (let i = 0; i < 6; i += 1) t.wheel(8); // a swipe, its touch not reported yet
+  begin(); // its own touch, reported late (after its first events): holds the guard until its end
+  await t.clock.advance(450); // fingers resting: past the guard's own time
+  t.win.history.back();
+  assert.deepEqual(steps, [], "held by the late report");
+  for (let i = 0; i < 34; i += 1) t.wheel(8); // on to the switch
+  await t.started();
+  t.finish();
+  end(); // its end
+  await t.clock.advance(250);
+  begin(); // the next touch: a back swipe over the chat, say (no sidebar events)
+  t.win.history.back();
+  assert.deepEqual(steps, ["back"], "T3's own back swipe elsewhere is taken");
+  assert.equal(t.doc.documentElement.hasAttribute("data-t3plus-profile-swipe"), false, "and its arrow shown");
+  t.profiles.stop();
+});
+
+test("a sideways wheel with no touch reported (a mouse's thumb wheel, Shift+wheel) holds T3's back and forward only briefly, also where T3 reports touches", async () => {
+  let begin = null;
+  const trackpad = { onBegin: (fn) => ((begin = fn), () => {}), onEnd: () => () => {} };
+  const t = setup({ rows: ROWS4, stored: FOUR, trackpad });
+  const steps = [];
+  t.win.History.prototype.back = function () { steps.push("back"); };
+  await t.profiles.start();
+  for (let i = 0; i < 6; i += 1) t.wheel(8); // no touch, so no end report to wait for
+  await t.clock.advance(450);
+  t.win.history.back();
+  assert.deepEqual(steps, ["back"], "taken: not held 15 s for an end that never comes");
+  assert.equal(t.doc.documentElement.hasAttribute("data-t3plus-profile-swipe"), false, "and T3's arrow shown again");
+  t.finish();
+  // Stopped mid-touch, its end no longer reported: started again, no touch is in progress.
+  begin();
+  t.profiles.stop();
+  await t.profiles.start();
+  for (let i = 0; i < 6; i += 1) t.wheel(8);
+  await t.clock.advance(450);
+  t.win.history.back();
+  assert.deepEqual(steps, ["back", "back"], "nor after a restart in the middle of a touch");
+  t.finish();
+  t.profiles.stop();
 });
 
 test("a key switch during a swipe's momentum is not overridden by it; held keys switch once", async () => {
@@ -304,7 +441,7 @@ test("a key switch during a swipe's momentum is not overridden by it; held keys 
   await t.started();
   t.finish();
   assert.equal(t.profiles.state.active, "c");
-  await sleep(300);
+  await t.clock.advance(300);
   t.key(4);
   t.key(4, true);
   t.key(4, true); // held down
@@ -364,18 +501,26 @@ test("turning profiles off mid-switch drops it; a double-click on New makes one 
 
 test("fingers back on the pad while the list springs back: it carries on from where it is", async () => {
   const t = setup();
+  const { clock } = t;
   await t.profiles.start();
-  for (let i = 0; i < 5; i += 1) t.wheel(6);
-  await sleep(170); // let go: springing back
+  for (let i = 0; i < 5; i += 1) {
+    t.wheel(6);
+    await clock.advance(16); // 30 px at a finger's pace, not a flick
+  }
+  await clock.advance(140); // let go: springing back
   assert.equal(live(t).length > 0, true);
-  // Partway back, as Chromium reports it (the animation's current value, as a matrix).
+  // Partway back, as Chromium reports it: 60% of the way from -30 px to 0, -12 px.
+  live(t).find((a) => a.el === t.list).progress = 0.6;
   const computed = t.win.getComputedStyle;
-  t.win.getComputedStyle = (el, ...rest) => (el === t.list ? { transform: "matrix(1, 0, 0, 1, -12, 0)", position: "relative" } : computed.call(t.win, el, ...rest));
+  t.win.getComputedStyle = (el, ...rest) => {
+    assert.notEqual(el, t.list, "where the list is comes from its animation, not a style read");
+    return computed.call(t.win, el, ...rest);
+  };
   t.wheel(6);
   t.win.getComputedStyle = computed;
   assert.equal(t.list.style.transform, "translate3d(-18px, 0px, 0)", "from where it was on screen, not from the start or the last drag");
   assert.equal(live(t).length, 0, "the spring-back stopped");
-  await sleep(170);
+  await clock.advance(170);
   t.finish();
   assert.equal(t.profiles.state.active, "main");
   t.profiles.stop();
@@ -391,19 +536,19 @@ test("a switch made from the keyboard on the dots keeps the focus there when T3 
   work.click(); // Enter or Space on a focused button: a click with detail 0
   await t.started();
   composer.focus(); // T3 opening the thread
-  await new Promise((r) => t.win.requestAnimationFrame(() => t.win.requestAnimationFrame(r)));
+  await t.clock.frames(2);
   assert.equal(t.doc.activeElement, work, "back on the dot");
   t.finish();
   composer.dispatchEvent(new t.win.MouseEvent("pointerdown", { bubbles: true }));
   composer.focus(); // then a click in the composer, on purpose
-  await new Promise((r) => t.win.requestAnimationFrame(() => t.win.requestAnimationFrame(r)));
+  await t.clock.frames(2);
   assert.equal(t.doc.activeElement, composer);
 
   const main = t.dot("main");
   main.dispatchEvent(new t.win.MouseEvent("click", { bubbles: true, cancelable: true, detail: 1 }));
   await t.started();
   composer.focus();
-  await new Promise((r) => t.win.requestAnimationFrame(() => t.win.requestAnimationFrame(r)));
+  await t.clock.frames(2);
   assert.equal(t.doc.activeElement, composer, "a mouse click leaves the focus to T3");
   t.finish();
   t.profiles.stop();
@@ -420,7 +565,7 @@ test("quick switches one after another (Work, Main, an empty one) end on the las
   for (let i = 0; i < 3; i += 1) {
     await t.started();
     for (const a of live(t)) a.finish();
-    await sleep(5);
+    await t.clock.advance(5);
     t.profiles.sync();
   }
   assert.equal(t.profiles.state.active, "e", "no switch back to Work for the thread it opened");
@@ -430,14 +575,6 @@ test("quick switches one after another (Work, Main, an empty one) end on the las
   t.profiles.stop();
 });
 
-const busy = (ms) => {
-  const end = Date.now() + ms;
-  while (Date.now() < end); // the main thread held (T3 drawing a thread): no frames
-};
-const frames = (t, n = 2) => new Promise((r) => {
-  const step = (k) => (k ? t.win.requestAnimationFrame(() => step(k - 1)) : r());
-  step(n);
-});
 
 test("momentum T3 held back for longer than the pause (no frames painted) still moves nothing", async () => {
   const t = setup({ rows: ROWS4, stored: FOUR });
@@ -445,10 +582,10 @@ test("momentum T3 held back for longer than the pause (no frames painted) still 
   for (let i = 0; i < 40; i += 1) t.wheel(8);
   await t.started();
   t.finish();
-  busy(350);
+  t.clock.stall(350); // the main thread held (T3 drawing a thread): no frames
   for (const dx of [40, 12, 6]) t.wheel(dx); // all at once, after the stall
   assert.equal(t.copy(), null);
-  await sleep(400);
+  await t.clock.advance(400);
   assert.equal(t.profiles.state.active, "work");
   t.profiles.stop();
 });
@@ -460,7 +597,7 @@ test("a switch made before a swipe's direction is known uses the swipe up: no sl
     t.wheel(2); // too little to tell sideways from up and down
     act(t);
     for (let i = 0; i < 8; i += 1) t.wheel(6);
-    await sleep(300);
+    await t.clock.advance(300);
     await t.started();
     for (const a of live(t)) a.finish();
     assert.equal(t.copy(), null);
@@ -479,13 +616,13 @@ test("a finger slowing down past half way is still on the pad: going back cancel
   await t.profiles.start();
   for (const dx of [14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2]) {
     t.wheel(dx); // 104 px of 212, slowing down
-    await sleep(16);
+    await t.clock.advance(16);
   }
   for (let i = 0; i < 20; i += 1) {
     t.wheel(-6); // and back
-    await sleep(16);
+    await t.clock.advance(16);
   }
-  await sleep(170);
+  await t.clock.advance(170);
   for (const a of live(t)) a.finish();
   assert.equal(t.profiles.state.active, "main");
   assert.deepEqual(visited, [], "no switch on the way: Work's thread was never opened");
@@ -573,7 +710,7 @@ test("the focus kept on the dots after a keyboard switch gives way to a dialog T
   dialog.append(ok);
   t.doc.body.append(dialog);
   ok.focus();
-  await frames(t, 4);
+  await t.clock.frames(4);
   assert.equal(t.doc.activeElement, ok);
   t.finish();
   t.profiles.stop();
@@ -591,15 +728,15 @@ test("the thread swaps smoothly too: the chat fades out, stays hidden until T3 h
   assert.equal(t.route(), "/env/a1", "T3 is asked for the thread only once the fade runs too");
   await t.started();
   assert.equal(t.route(), "/env/b1");
-  await frames(t, 4);
+  await t.clock.frames(4);
   assert.equal(onCanvas().length, 1, "still hidden: T3 has not drawn it yet");
   const more = t.doc.createElement("div"); // the old thread still streaming
   more.setAttribute("data-timeline-row-id", "a1-m2");
   canvas.append(more);
-  await frames(t, 4);
+  await t.clock.frames(4);
   assert.equal(onCanvas().length, 1, "more of the old thread is not the new one");
   canvas.innerHTML = '<div data-timeline-row-id="b1-m1">b1</div>'; // T3 draws the thread
-  await frames(t, 4);
+  await t.clock.frames(4);
   const [, inn] = onCanvas();
   assert.deepEqual(inn?.keyframes.map((k) => k.opacity), [0, 1], "then in");
   assert.ok(out.cancelled, "the hold is let go");
@@ -624,7 +761,7 @@ test("a switch with no other thread to open does not fade the chat; one overtake
   for (const a of live(t)) a.finish();
   t.dot("work").click(); // fades out...
   t.dot("e").click(); // ...and is overtaken by a switch with nothing to open
-  await frames(t, 3);
+  await t.clock.frames(3);
   const last = t.anims.filter((a) => a.el === canvas).at(-1);
   assert.equal(last.keyframes.at(-1).opacity, 1, "faded back in");
   t.profiles.stop();
@@ -642,30 +779,39 @@ test("the open profile's name sits beside the dots in its color, and T3's sky ta
   const root = t.doc.documentElement;
   assert.equal(name.textContent, "Main");
   assert.equal(name.style.getPropertyValue("--t3plus-profile-color"), "", "the default color: T3's text color");
-  assert.equal(root.style.getPropertyValue("--t3plus-sky-mix"), "0", "and T3's own sky");
+  const sky = (name) => lookValue(t.doc, LOOK.sky, `--t3plus-sky-${name}`);
+  assert.equal(sky("mix"), "0", "and T3's own sky");
   assert.equal(root.hasAttribute("data-t3plus-sky-ready"), false, "no glide in from T3's sky on load");
   t.dot("work").click();
   assert.equal(name.textContent, "Work", "named as soon as it slides in");
   assert.equal(name.style.getPropertyValue("--t3plus-profile-color"), "#3b82f6", "the name in the dot's color");
   assert.ok(root.hasAttribute("data-t3plus-sky"));
-  assert.equal(root.style.getPropertyValue("--t3plus-sky-turn"), "129.6", "the sky in its own pick: from the theme's 278° to orange's 47.6°, the short way round");
-  assert.equal(root.style.getPropertyValue("--t3plus-sky-mix"), "1", "the sky in the profile's color");
+  assert.equal(sky("turn"), "129.6", "the sky in its own pick: from the theme's 278° to orange's 47.6°, the short way round");
+  assert.equal(sky("mix"), "1", "the sky in the profile's color");
+  assert.equal(root.getAttribute("style"), null, "on the sky, not on <html> (inherited by the whole page)");
   // Another theme (Ember: an orange sky): the same pick turns it far less.
   t.doc.querySelector(".sidebar-stage-backdrop").style.setProperty("--stage-night-mid", "oklch(25% .08 31.1)");
   t.doc.documentElement.setAttribute("data-theme-id", "ember"); // T3 switching theme
   t.profiles.sync();
-  assert.equal(root.style.getPropertyValue("--t3plus-sky-turn"), "16.5", "measured from the theme's own sky");
+  assert.equal(sky("turn"), "16.5", "measured from the theme's own sky");
   t.finish();
   t.profiles.stop();
   assert.equal(root.hasAttribute("data-t3plus-sky"), false, "T3's sky as it was");
-  assert.equal(root.style.getPropertyValue("--t3plus-sky-turn"), "");
+  assert.equal(sky("turn"), "");
 });
 
-test("the profile editor: an icon, and one row of colors for the dot, the sky or the dither glow", async () => {
-  const t = setup({ stored: { ...TWO, list: [{ id: "main", name: "Main" }, { id: "work", name: "Work", color: "blue" }] } });
+// A profile's glow and bubble colors are its settings (settingsScopes.js): the editor
+// reads and writes them through the app, here a plain map.
+function fakeScoped() {
+  const values = new Map();
+  return { values, get: (id, path) => values.get(`${id} ${path}`), set: (id, path, value) => (value === null ? values.delete(`${id} ${path}`) : values.set(`${id} ${path}`, value)) };
+}
+
+test("the profile editor: an icon, and one row of colors for the dot, the sky, the glow or the bubbles", async () => {
+  const scoped = fakeScoped();
+  const t = setup({ stored: { ...TWO, list: [{ id: "main", name: "Main" }, { id: "work", name: "Work", color: "blue" }] }, scoped });
   await t.profiles.start();
   assert.equal(t.profiles.state.list[1].sky, "default", "T3's sky until one is picked");
-  assert.equal(t.profiles.state.list[1].dither, "default", "and the glow's own color");
   t.dot("work").dispatchEvent(new t.win.MouseEvent("contextmenu", { bubbles: true, cancelable: true }));
   const editor = t.doc.querySelector(".t3plus-profile-editor");
   // The icon.
@@ -678,7 +824,7 @@ test("the profile editor: an icon, and one row of colors for the dot, the sky or
   t.finish();
   // One row of colors; the tabs say what it colors.
   const tabs = [...editor.querySelectorAll(".t3plus-profile-tab")].map((b) => b.textContent);
-  assert.deepEqual(tabs, ["Dot", "Sky", "Dither"]);
+  assert.deepEqual(tabs, ["Dot", "Sky", "Glow", "Bubble"]);
   assert.equal(editor.querySelectorAll(".t3plus-profile-colors").length, 1, "not a row each");
   const row = () => editor.querySelector(".t3plus-profile-colors");
   row().querySelector('[aria-label="Teal"]').click();
@@ -687,14 +833,21 @@ test("the profile editor: an icon, and one row of colors for the dot, the sky or
   assert.equal(row().getAttribute("aria-label"), "Sky color");
   assert.equal(row().querySelector('[aria-checked="true"]').getAttribute("aria-label"), "Default");
   row().querySelector('[aria-label="Orange"]').click();
-  editor.querySelector('.t3plus-profile-tab[data-field="dither"]').click();
+  editor.querySelector('.t3plus-profile-tab[data-field="glow"]').click();
+  assert.equal(row().querySelector('[aria-checked="true"]').getAttribute("aria-label"), "Default", "no glow of its own: the one for all profiles");
   row().querySelector('[aria-label="Pink"]').click();
-  assert.deepEqual([t.profiles.state.list[1].color, t.profiles.state.list[1].sky, t.profiles.state.list[1].dither], ["teal", "orange", "pink"], "each its own");
-  // A custom color (made in Settings) shows as one more choice, picked.
-  await t.profiles.update("work", { dither: "#12AB34" });
-  assert.equal(t.profiles.state.list[1].dither, "#12ab34", "kept, lowercased");
-  editor.querySelector('.t3plus-profile-tab[data-field="color"]').click();
-  editor.querySelector('.t3plus-profile-tab[data-field="dither"]').click();
+  editor.querySelector('.t3plus-profile-tab[data-field="bubble"]').click();
+  row().querySelector('[aria-label="Blue"]').click();
+  assert.deepEqual([t.profiles.state.list[1].color, t.profiles.state.list[1].sky], ["teal", "orange"], "the dot and sky are the profile's own");
+  assert.equal(scoped.get("work", "composerGradient.accent"), "#ec4899", "the glow is its setting, as a color");
+  assert.equal(scoped.get("work", "chat.bubble"), "#3b82f6");
+  assert.equal("dither" in t.profiles.state.list[1], false, "nothing of it kept on the profile");
+  // A color set in Settings shows as one more choice, picked; Default lets it follow all profiles.
+  scoped.set("work", "composerGradient.accent", "#12ab34");
+  editor.querySelector('.t3plus-profile-tab[data-field="glow"]').click();
+  assert.equal(row().querySelector('[aria-checked="true"]').getAttribute("aria-label"), "Custom");
+  row().querySelector('[aria-label="Default"]').click();
+  assert.equal(scoped.get("work", "composerGradient.accent"), undefined, "cleared");
   t.profiles.stop();
 });
 
@@ -704,7 +857,7 @@ test("the editor has no Sky tab where T3 draws no sky; each row is one Tab stop 
   await t.profiles.start();
   t.dot("work").dispatchEvent(new t.win.MouseEvent("contextmenu", { bubbles: true, cancelable: true }));
   const editor = t.doc.querySelector(".t3plus-profile-editor");
-  assert.deepEqual([...editor.querySelectorAll(".t3plus-profile-tab")].map((b) => b.textContent), ["Dot", "Dither"]);
+  assert.deepEqual([...editor.querySelectorAll(".t3plus-profile-tab")].map((b) => b.textContent), ["Dot"], "no sky, and without the app's settings no glow or bubbles");
   const radios = [...editor.querySelectorAll(".t3plus-profile-colors [role=radio]")];
   assert.deepEqual(radios.filter((r) => r.tabIndex === 0).map((r) => r.getAttribute("aria-label")), ["Blue"], "one Tab stop: the picked one");
   radios[1].focus();
@@ -715,25 +868,33 @@ test("the editor has no Sky tab where T3 draws no sky; each row is one Tab stop 
 
 test("bad colors and icons are dropped; a custom color or a preset is kept", () => {
   const n = normalizeProfiles({ list: [{ id: "a", name: "A", color: "#GGGGGG", sky: "#0A0B0C", dither: "nope", icon: "<svg>" }, { id: "b", name: "B", color: "teal", icon: "rocket" }] });
-  assert.deepEqual(n.list[0], { id: "a", name: "A", color: "default", sky: "#0a0b0c", dither: "default" });
-  assert.deepEqual(n.list[1], { id: "b", name: "B", color: "teal", sky: "default", dither: "default", icon: "rocket" });
+  assert.deepEqual(n.list[0], { id: "a", name: "A", color: "default", sky: "#0a0b0c" }, "an old glow color is not a profile's (settingsScopes.js moves it)");
+  assert.deepEqual(n.list[1], { id: "b", name: "B", color: "teal", sky: "default", icon: "rocket" });
+  // A backup that repeats an id: one profile (one dot), the first entry of it.
+  const twice = normalizeProfiles({ list: [{ id: "a", name: "A" }, { id: "a", name: "Again" }, { id: "b", name: "B" }], projects: { "p/x": "b" } });
+  assert.deepEqual(twice.list.map((p) => p.name), ["A", "B"]);
+  // A folder key named like one of an object's own built-ins is no inherited value.
+  assert.equal(profileOf(twice, "constructor"), "a", "an unplaced folder: the first profile's");
+  assert.equal(profileOf(twice, "p/x"), "b");
 });
 
-test("the open profile's dither color is the glow's (and the app is told when it changes)", async () => {
-  const looks = [];
+test("the app is told which profile is on screen (one sliding in counts), and that none is once profiles stop", async () => {
+  const shown = [];
+  const deleted = [];
   const dom = createDom("/env/a1", `<div data-slot="sidebar-inner"><ul id="list">${ROWS}</ul><div data-slot="sidebar-footer"></div></div>`);
-  windows.push(dom.window);
   const storage = createFakeChromeStorage();
-  storage.area.data.set(STORAGE_KEYS.profiles, { ...TWO, list: [{ id: "main", name: "Main" }, { id: "work", name: "Work", dither: "#112233" }] });
-  const profiles = createProfiles({ win: dom.window, doc: dom.window.document, area: storage.area, changedEvent: storage.onChanged, onLook: (hex) => looks.push(hex) });
+  storage.area.data.set(STORAGE_KEYS.profiles, TWO);
+  const profiles = createProfiles({ win: dom.window, doc: dom.window.document, area: storage.area, changedEvent: storage.onChanged, onShown: (id) => shown.push(id), onDelete: (id) => deleted.push(id) });
   await profiles.start();
-  assert.equal(profiles.ditherAccent(), null, "Main: the glow's own color");
+  assert.equal(shown.at(-1), "main");
   profiles.switchTo("work");
-  assert.equal(profiles.ditherAccent(), "#112233");
-  profiles.switchTo("main");
+  assert.equal(shown.at(-1), "work");
+  // Deleting Work (from its dot's editor) tells the app, so its settings go too.
+  dom.window.document.querySelector('.t3plus-profile-dot[data-profile="work"]').dispatchEvent(new dom.window.MouseEvent("contextmenu", { bubbles: true, cancelable: true }));
+  dom.window.document.querySelector(".t3plus-profile-editor .t3plus-profile-delete").click();
+  assert.deepEqual(deleted, ["work"]);
   profiles.stop();
-  assert.deepEqual(looks, ["#112233", null]);
-  assert.equal(profiles.ditherAccent(), null);
+  assert.deepEqual(shown, ["main", "work", "main", null]);
 });
 
 test("profiles turned off mid-switch leave the chat visible", async () => {
@@ -744,7 +905,7 @@ test("profiles turned off mid-switch leave the chat visible", async () => {
   t.dot("work").click();
   on = false;
   t.profiles.sync();
-  await frames(t, 3);
+  await t.clock.frames(3);
   const last = t.anims.filter((a) => a.el === list).at(-1);
   assert.equal(last.keyframes.at(-1).opacity, 1, "faded back in");
   t.profiles.stop();
@@ -759,8 +920,8 @@ test("a backup import keeps profiles' icons and colors, and drops anything that 
       [STORAGE_KEYS.profiles]: {
         active: "main",
         list: [
-          { id: "main", name: "Main", color: "#3B82F6", sky: "url(x)", dither: "#123456; background: red", icon: '<img src=x onerror="alert(1)">' },
-          { id: "w", name: "<b>Work</b>", color: "pink", sky: "teal", dither: "#a1b2c3", icon: "rocket" },
+          { id: "main", name: "Main", color: "#3B82F6", sky: "url(x)", icon: '<img src=x onerror="alert(1)">' },
+          { id: "w", name: "<b>Work</b>", color: "pink", sky: "teal", icon: "rocket" },
         ],
         projects: {},
       },
@@ -768,8 +929,8 @@ test("a backup import keeps profiles' icons and colors, and drops anything that 
   };
   await importAll(storage.area, backup, { [STORAGE_KEYS.profiles]: normalizeProfiles });
   const saved = storage.area.data.get(STORAGE_KEYS.profiles);
-  assert.deepEqual(saved.list[0], { id: "main", name: "Main", color: "#3b82f6", sky: "default", dither: "default" }, "a custom hex kept; css and markup dropped");
-  assert.deepEqual(saved.list[1], { id: "w", name: "<b>Work</b>", color: "pink", sky: "teal", dither: "#a1b2c3", icon: "rocket" });
+  assert.deepEqual(saved.list[0], { id: "main", name: "Main", color: "#3b82f6", sky: "default" }, "a custom hex kept; css and markup dropped");
+  assert.deepEqual(saved.list[1], { id: "w", name: "<b>Work</b>", color: "pink", sky: "teal", icon: "rocket" });
   const out = await exportAll(storage.area, "0.21.0");
   assert.deepEqual(out.data[STORAGE_KEYS.profiles].list[1].icon, "rocket", "and exported again");
 
@@ -784,29 +945,16 @@ test("a backup import keeps profiles' icons and colors, and drops anything that 
 });
 
 test("this window's own saves coming back late (as Chrome's storage does) never undo a newer one", async () => {
-  const t = setup();
-  // Chrome-style: the change event arrives a moment after the write, not inside it.
-  const listeners = new Set();
-  const data = t.storage.area.data;
-  const area = {
-    data,
-    get: async (k) => ({ [k]: structuredClone(data.get(k)) }),
-    set: async (items) => {
-      for (const [k, v] of Object.entries(items)) data.set(k, structuredClone(v));
-      const change = Object.fromEntries(Object.entries(items).map(([k, v]) => [k, { newValue: structuredClone(v) }]));
-      setTimeout(() => listeners.forEach((fn) => fn(change, "local")), 5);
-      await sleep(10); // and the write resolves after its event has arrived
-    },
-  };
-  const profiles = createProfiles({ win: t.win, doc: t.doc, area, changedEvent: { addListener: (fn) => listeners.add(fn), removeListener: (fn) => listeners.delete(fn) } });
-  await profiles.start();
-  profiles.update("work", { icon: "rocket" });
-  await sleep(1);
-  profiles.update("work", { icon: "star" });
-  await sleep(60);
-  assert.equal(profiles.state.list[1].icon, "star", "in memory");
-  assert.equal(data.get(STORAGE_KEYS.profiles).list[1].icon, "star", "and stored");
-  profiles.stop();
+  // Chrome-style: the change event arrives a moment after the write, and the write resolves after its event.
+  const t = setup({ storage: { eventDelayMs: 5, writeDelayMs: 10 } });
+  await t.profiles.start();
+  t.profiles.update("work", { icon: "rocket" });
+  await t.clock.advance(1);
+  t.profiles.update("work", { icon: "star" });
+  await t.clock.advance(60);
+  assert.equal(t.profiles.state.list[1].icon, "star", "in memory");
+  assert.equal(t.storage.area.data.get(STORAGE_KEYS.profiles).list[1].icon, "star", "and stored");
+  t.profiles.stop();
 });
 
 test("Settings cannot change profiles before the stored ones have loaded", async () => {
@@ -831,7 +979,7 @@ test("the sky's own hue is read as resolved, also where a theme mixes it", async
   t.doc.querySelector(".sidebar-stage-backdrop").style.setProperty("--stage-night-mid", "oklch(0.25 0.09 304)");
   await t.profiles.start();
   t.profiles.switchTo("work");
-  assert.equal(t.doc.documentElement.style.getPropertyValue("--t3plus-sky-turn"), "103.6", "from 304° to orange's 47.6°");
+  assert.equal(lookValue(t.doc, LOOK.sky, "--t3plus-sky-turn"), "103.6", "from 304° to orange's 47.6°");
   t.finish();
   t.profiles.stop();
 });
@@ -841,52 +989,57 @@ test("the editor shows the colors as stored now, after a change from Settings", 
   await t.profiles.start();
   t.dot("work").dispatchEvent(new t.win.MouseEvent("contextmenu", { bubbles: true, cancelable: true }));
   const editor = t.doc.querySelector(".t3plus-profile-editor");
-  await t.profiles.update("work", { dither: "#12ab34" });
-  editor.querySelector('.t3plus-profile-tab[data-field="dither"]').click();
+  await t.profiles.update("work", { sky: "#12ab34" });
+  editor.querySelector('.t3plus-profile-tab[data-field="sky"]').click();
   const picked = editor.querySelector('.t3plus-profile-colors [aria-checked="true"]');
   assert.equal(picked.getAttribute("aria-label"), "Custom", "the custom color, picked");
   assert.equal(picked.style.getPropertyValue("--t3plus-profile-color"), "#12ab34");
   t.profiles.stop();
 });
 
-// Storage as Chrome's: events after the write (not inside it), none for a value that did not change.
-function chromeLikeArea(data) {
-  const listeners = new Set();
-  return {
-    data,
-    listeners,
-    get: async (k) => ({ [k]: structuredClone(data.get(k)) }),
-    set: async (items) => {
-      const changed = {};
-      for (const [k, v] of Object.entries(items)) {
-        if (JSON.stringify(data.get(k)) === JSON.stringify(v)) continue;
-        data.set(k, structuredClone(v));
-        changed[k] = { newValue: structuredClone(v) };
-      }
-      if (Object.keys(changed).length) setTimeout(() => listeners.forEach((fn) => fn(changed, "local")), 3);
-    },
-    changedEvent: { addListener: (fn) => listeners.add(fn), removeListener: (fn) => listeners.delete(fn) },
-  };
-}
-
 test("a save that changes nothing leaves no echo behind to swallow another window's same write; saved data matches its echo whatever the key order", async () => {
-  const t = setup();
-  const area = chromeLikeArea(t.storage.area.data);
-  const profiles = createProfiles({ win: t.win, doc: t.doc, area, changedEvent: area.changedEvent });
-  await profiles.start();
-  await profiles.update("work", { icon: "rocket" });
-  await sleep(10);
-  await profiles.update("work", { icon: "rocket" }); // the same again: nothing written
-  await sleep(10);
+  // Chrome-style: events a moment after the write, none for a value that did not change.
+  const t = setup({ storage: { eventDelayMs: 3 } });
+  const { area } = t.storage;
+  await t.profiles.start();
+  await t.profiles.update("work", { icon: "rocket" });
+  await t.clock.advance(10);
+  await t.profiles.update("work", { icon: "rocket" }); // the same again: nothing written
+  await t.clock.advance(10);
   // Another window: switches to Work and back to Main (Main is the value this one holds).
   const other = structuredClone(area.data.get(STORAGE_KEYS.profiles));
   await area.set({ [STORAGE_KEYS.profiles]: { ...other, active: "work" } });
-  await sleep(10);
-  assert.equal(profiles.state.active, "work");
+  await t.clock.advance(10);
+  assert.equal(t.profiles.state.active, "work");
   await area.set({ [STORAGE_KEYS.profiles]: { ...other, active: "main" } });
-  await sleep(10);
-  assert.equal(profiles.state.active, "main", "the other window's write is taken, not mistaken for an echo");
-  profiles.stop();
+  await t.clock.advance(10);
+  assert.equal(t.profiles.state.active, "main", "the other window's write is taken, not mistaken for an echo");
+  t.profiles.stop();
+});
+
+test("a save storage turns down (T3's storage full) is written by the next save of the same, and leaves no echo to swallow another window's write of it", async () => {
+  const t = setup();
+  const { area } = t.storage;
+  const set = area.set;
+  await t.profiles.start();
+  area.set = () => Promise.reject(new Error("Not enough room left in T3's storage to save this."));
+  await assert.rejects(t.profiles.update("work", { icon: "rocket" }));
+  area.set = set;
+  await t.profiles.update("work", { icon: "rocket" }); // the same again, with room now
+  assert.equal(area.data.get(STORAGE_KEYS.profiles).list[1].icon, "rocket", "written, not taken as stored already");
+
+  area.set = () => {
+    throw new Error("Extension context invalidated."); // thrown, not rejected: the same
+  };
+  await assert.rejects(t.profiles.update("work", { icon: "star" }));
+  area.set = set;
+  const unsaved = structuredClone(t.profiles.state);
+  // Another window switches to Work, then writes just what this one could not.
+  await area.set({ [STORAGE_KEYS.profiles]: { ...unsaved, active: "work" } });
+  assert.equal(t.profiles.state.active, "work");
+  await area.set({ [STORAGE_KEYS.profiles]: unsaved });
+  assert.equal(t.profiles.state.active, "main", "taken, not mistaken for the echo of the write that failed");
+  t.profiles.stop();
 });
 
 test("the editor keeps a name being typed when another dot is right-clicked; deleting from the keyboard leaves the focus on the open profile's dot", async () => {
@@ -963,4 +1116,302 @@ test("Settings is told when profiles load and change (its card follows)", async 
   await t.storage.area.set({ [STORAGE_KEYS.profiles]: { ...profiles.state, list: profiles.state.list.map((p) => (p.id === "work" ? { ...p, name: "Elsewhere" } : p)) } });
   assert.ok(told > mid, "and on one from another window");
   profiles.stop();
+});
+
+// ---------- A switch costs no forced style or layout read ----------
+
+/** Counts the theme's sky probes (getComputedStyle on the probe t3+ puts beside the sky). */
+function countProbes(t) {
+  let probes = 0;
+  const computed = t.win.getComputedStyle;
+  t.win.getComputedStyle = (el, ...rest) => {
+    if (/var\(--stage-night-mid\)/.test(el.style?.cssText ?? "")) probes += 1;
+    return computed(el, ...rest);
+  };
+  return () => probes;
+}
+
+test("the theme's sky is probed once per theme: t3+'s own values on <html> are no theme change", async () => {
+  const t = setup({ reduced: true, stored: { ...TWO, list: [{ id: "main", name: "Main", sky: "teal" }, { id: "work", name: "Work", sky: "orange" }] } });
+  t.profiles = createProfiles({ win: t.win, doc: t.doc, area: t.storage.area, changedEvent: t.storage.onChanged });
+  const probes = countProbes(t);
+  await t.profiles.start();
+  assert.equal(probes(), 1, "measured once");
+  const root = t.doc.documentElement;
+  for (let i = 0; i < 4; i += 1) {
+    t.profiles.switchTo(i % 2 ? "main" : "work");
+    root.style.setProperty("--t3plus-something", String(i)); // t3+ writing its own values there
+    t.profiles.sync();
+  }
+  assert.equal(probes(), 1, "not again on a switch, nor for a value of t3+'s on <html>");
+  assert.equal(root.getAttribute("style"), "--t3plus-something: 3;", "the switches wrote nothing on <html>");
+  root.style.setProperty("--app-theme-primary", "red"); // T3's own inline theme values
+  t.profiles.switchTo("work");
+  assert.equal(probes(), 2, "T3's own inline theme values are a new theme");
+  root.setAttribute("data-theme-id", "ember");
+  t.profiles.switchTo("main");
+  assert.equal(probes(), 3, "and so is another palette");
+  t.profiles.stop();
+});
+
+test("the sky's values sit on T3's sky (one T3 mounts anew has them from its first frame); with no sky nothing is written on <html>", async () => {
+  const t = setup({ stored: { ...TWO, list: [{ id: "main", name: "Main" }, { id: "work", name: "Work", sky: "orange" }] } });
+  await t.profiles.start();
+  t.dot("work").click();
+  assert.equal(lookValue(t.doc, LOOK.sky, "--t3plus-sky-turn"), "129.6");
+  const old = t.doc.querySelector(".sidebar-stage-backdrop");
+  const fresh = old.cloneNode(true);
+  old.replaceWith(fresh); // T3 re-renders its sky
+  assert.ok(fresh.matches(LOOK.sky), "the rule names the new one too");
+  assert.equal(t.doc.documentElement.getAttribute("style"), null);
+  t.finish();
+  t.profiles.stop();
+
+  const bare = setup({ stored: { ...TWO, list: [{ id: "main", name: "Main" }, { id: "work", name: "Work", sky: "orange" }] } });
+  bare.doc.querySelector(".sidebar-stage-backdrop").remove();
+  await bare.profiles.start();
+  bare.dot("work").click();
+  assert.equal(bare.doc.documentElement.getAttribute("style"), null, "nothing on <html> (inherited by every element)");
+  bare.finish();
+  bare.profiles.stop();
+});
+
+test("a dot switch reads the list's place once, before its first write, and neither the chat's nor the list's style", async () => {
+  const t = setup();
+  const scroller = t.doc.querySelector('[data-slot="scroll-area-viewport"]');
+  let top = 0;
+  const reads = [];
+  const writes = [];
+  Object.defineProperty(scroller, "scrollTop", { get: () => (reads.push(top), top), set: (v) => (writes.push(v), (top = v)), configurable: true });
+  const canvas = t.doc.querySelector(".messages-timeline-scroll");
+  const styled = [];
+  const computed = t.win.getComputedStyle;
+  t.win.getComputedStyle = (el, ...rest) => (styled.push(el), computed(el, ...rest));
+  await t.profiles.start();
+  reads.length = 0;
+  styled.length = 0;
+  t.dot("work").click();
+  assert.equal(reads.length, 1, "the list's place read once, before anything was written");
+  assert.equal(styled.filter((el) => el === canvas || el === t.list).length, 0, "the fade and the slide take where they are from their animations");
+  await t.started();
+  t.finish();
+  assert.deepEqual(writes, [], "both lists at the top: no scrollTop written (even unchanged, a forced layout)");
+  top = 40; // Work scrolled down; Main was left at the top
+  t.dot("main").click();
+  await t.started();
+  t.finish();
+  assert.deepEqual(writes, [0], "Main back at the top");
+  t.profiles.stop();
+});
+
+test("a switch made mid-fade starts from where the running fade is, as its animation reports it", async () => {
+  const t = setup({ rows: ROWS4, stored: FOUR });
+  await t.profiles.start();
+  const canvas = t.doc.querySelector(".messages-timeline-scroll");
+  const onCanvas = () => t.anims.filter((a) => a.el === canvas);
+  t.dot("work").click();
+  const [out] = onCanvas();
+  out.progress = 0.6; // eased 60% of the way out: the chat at 0.4
+  t.dot("c").click();
+  const next = onCanvas().at(-1);
+  assert.notEqual(next, out);
+  assert.equal(next.keyframes[0].opacity, 0.4, "from 0.4, not snapped back to full");
+  assert.equal(next.options.duration, 36, "and only the rest of the way (90 ms for all of it)");
+  await t.started();
+  next.progress = 1;
+  t.doc.querySelector(".messages-timeline-scroll").innerHTML = '<div data-timeline-row-id="c1-m1">c1</div>'; // T3 draws C's thread
+  await t.clock.frames(4);
+  assert.deepEqual(onCanvas().at(-1).keyframes.map((k) => k.opacity), [0, 1], "back in from where the fade-out is");
+  t.profiles.stop();
+});
+
+test("no slide while T3's list is not shown and nothing of the app's is in its place: the switch is made at once", async () => {
+  const t = setup();
+  t.list.checkVisibility = () => false;
+  await t.profiles.start();
+  t.dot("work").click();
+  assert.equal(t.copy(), null);
+  assert.equal(t.anims.filter((a) => a.el === t.list).length, 0);
+  assert.equal(t.profiles.state.active, "work");
+  assert.equal(t.route(), "/env/b1", "Work's thread opened");
+  t.profiles.stop();
+});
+
+test("swiping back and forth across the start reuses the copy made the first time, never two at once", async () => {
+  const t = setup({ rows: ROWS4, stored: { ...FOUR, active: "work" }, path: "/env/b1" });
+  const { clock } = t;
+  await t.profiles.start();
+  const copies = () => t.doc.querySelectorAll("[data-t3plus-profile-next]").length;
+  const seen = [];
+  const swipe = async (dx, n) => {
+    for (let i = 0; i < n; i += 1) {
+      t.wheel(dx);
+      assert.ok(copies() <= 1, "one copy at a time");
+      seen.push(t.copy());
+      await clock.advance(16); // a finger's pace, not a flick
+    }
+  };
+  await swipe(8, 3); // toward C
+  const first = t.copy();
+  await swipe(-8, 6); // back past the start: Main's comes in
+  assert.notEqual(t.copy(), first);
+  await swipe(8, 6); // and C's again
+  assert.equal(t.copy(), first, "the copy made the first time");
+  await clock.advance(170); // let go short of a third: springs back
+  t.finish();
+  assert.equal(copies(), 0, "none left");
+  assert.equal(t.profiles.state.active, "work");
+  t.profiles.stop();
+});
+
+test("the copy drops ids and references deep inside a row too", async () => {
+  const deep = `<li data-thread-item="env:b2"><div role="button" tabindex="0" data-sidebar-row="env:b2" data-sidebar-parent="folder:p/b" aria-label="env:b2"><span><span id="deep" aria-controls="menu-1" aria-describedby="tip">b2</span></span></div></li>`;
+  const t = setup({ rows: ROWS + deep });
+  await t.profiles.start();
+  t.dot("work").click();
+  const copy = t.copy();
+  assert.equal(copy.querySelectorAll("[id], [aria-controls], [aria-describedby], [tabindex], [data-sidebar-row], [data-thread-item]").length, 0);
+  assert.equal(copy.querySelector('[data-sidebar-parent="folder:p/b"] span span').textContent, "b2", "the row itself copied as is");
+  t.finish();
+  t.profiles.stop();
+});
+
+test("a row T3 nests under another thread (a fork) slides in with that thread's profile, and is an empty stand-in in the others", async () => {
+  const t = setup({ rows: ROWS + thread("env:b1fork", "env:b1") });
+  await t.profiles.start();
+  const fork = () => t.copy().children[t.list.children.length - 1]; // its place in the copy
+  t.dot("work").click();
+  assert.equal(fork().hasAttribute("data-t3plus-profile-off"), false, "Work's copy shows it");
+  assert.equal(fork().textContent.includes("env:b1fork"), true);
+  await t.started();
+  t.finish();
+  t.dot("main").click();
+  assert.equal(fork().hasAttribute("data-t3plus-profile-off"), true, "Main's has a stand-in for it");
+  assert.equal(fork().childElementCount, 0);
+  t.finish();
+  t.profiles.stop();
+});
+
+test("a row shown in the copy that T3 or the app changes while it slides (its bot face for the profile's own look) is copied again", async () => {
+  const t = setup();
+  await t.profiles.start();
+  t.dot("work").click();
+  // The first check after the click draws Work's own bot look on its rows (the app's decoration).
+  const row = t.list.querySelector('[data-sidebar-row="env:b1"]');
+  const face = t.doc.createElement("span");
+  face.className = "t3plus-bot-avatar";
+  face.setAttribute("data-t3plus-shape", "earth");
+  row.append(face);
+  t.profiles.sync();
+  assert.equal(t.copy().querySelector('[aria-label="env:b1"] .t3plus-bot-avatar')?.getAttribute("data-t3plus-shape"), "earth", "the real list takes over with nothing on it changing");
+  face.setAttribute("data-t3plus-shape", "moon");
+  t.profiles.sync();
+  assert.equal(t.copy().querySelector('[aria-label="env:b1"] .t3plus-bot-avatar').getAttribute("data-t3plus-shape"), "moon");
+  t.finish();
+  t.profiles.stop();
+});
+
+test("a switch opens the profile's thread through T3's own row click, its row's inert lifted for it", async () => {
+  for (const reduced of [false, true]) {
+    const t = setup({ reduced });
+    await t.profiles.start();
+    const row = t.list.querySelector('[data-sidebar-row="env:b1"]');
+    let clicks = 0;
+    row.addEventListener("click", () => {
+      clicks += 1;
+      assert.equal(row.closest("[inert]"), null, "not inert while clicked");
+    });
+    let popstates = 0;
+    t.win.addEventListener("popstate", () => (popstates += 1));
+    t.dot("work").click();
+    if (!reduced) await t.started();
+    assert.equal(clicks, 1, `T3's navigation (${reduced ? "at once" : "sliding"})`);
+    assert.equal(popstates, 0, "not an address pushed past T3's router");
+    assert.equal(t.route(), "/env/b1");
+    if (!reduced) {
+      assert.ok(row.closest("li").hasAttribute("inert"), "inert again until the switch lands");
+      t.finish();
+    }
+    t.profiles.stop();
+  }
+});
+
+test("with profiles off, checks do not search the page for rows to show again (once, for rows an earlier copy hid)", async () => {
+  let on = true;
+  const t = setup({ enabled: () => on });
+  await t.profiles.start();
+  assert.equal(t.off(t.list, '[data-sidebar-parent="folder:p/b"]'), true);
+  let scans = 0;
+  const all = t.doc.querySelectorAll.bind(t.doc);
+  t.doc.querySelectorAll = (selector) => {
+    if (selector.includes("data-t3plus-profile-off")) scans += 1;
+    return all(selector);
+  };
+  on = false;
+  for (let i = 0; i < 100; i += 1) t.profiles.sync();
+  assert.equal(scans, 1);
+  assert.equal(t.off(t.list, '[data-sidebar-parent="folder:p/b"]'), false, "Work's rows shown again");
+  t.profiles.stop();
+});
+
+test("a switch looks the sidebar up once a task, not a dozen times", async () => {
+  const t = setup();
+  await t.profiles.start();
+  await t.clock.advance(0);
+  let lookups = 0;
+  const one = t.doc.querySelector.bind(t.doc);
+  const all = t.doc.querySelectorAll.bind(t.doc);
+  const counted = (fn) => (selector) => {
+    if (selector.includes("sidebar-inner") || selector.includes('[data-slot="sidebar"]')) lookups += 1;
+    return fn(selector);
+  };
+  t.doc.querySelector = counted(one);
+  t.doc.querySelectorAll = counted(all);
+  t.dot("work").click();
+  assert.ok(lookups <= 2, `the click: ${lookups}`);
+  await t.clock.advance(0);
+  lookups = 0;
+  await t.started();
+  assert.ok(lookups <= 2, `opening the thread: ${lookups}`);
+  lookups = 0;
+  t.finish();
+  assert.ok(lookups <= 2, `landing: ${lookups}`);
+  t.profiles.stop();
+});
+
+test("a copy kept from earlier in a swipe shows what changed in its rows while the other side's was shown", async () => {
+  const t = setup({ rows: ROWS4, stored: { ...FOUR, active: "work" }, path: "/env/b1" });
+  const { clock } = t;
+  await t.profiles.start();
+  const swipe = async (dx, n) => {
+    for (let i = 0; i < n; i += 1) {
+      t.wheel(dx);
+      await clock.advance(16);
+    }
+  };
+  await swipe(8, 3); // toward C: its copy
+  const first = t.copy();
+  await swipe(-8, 6); // back past the start: Main's
+  assert.notEqual(t.copy(), first);
+  // T3 marks C's thread open (or the app draws its face) while Main's copy is the one shown.
+  t.list.querySelector('[data-sidebar-row="env:c1"]').setAttribute("aria-current", "page");
+  t.profiles.sync();
+  await swipe(8, 6); // C's again: the copy made the first time, brought up to date
+  assert.equal(t.copy(), first);
+  assert.equal(t.copy().querySelector('[aria-label="env:c1"]')?.getAttribute("aria-current"), "page");
+  await clock.advance(170);
+  t.finish();
+  t.profiles.stop();
+});
+
+test("busy() while a switch slides, so other main-thread work (the glow warming) waits", async () => {
+  const t = setup();
+  await t.profiles.start();
+  assert.equal(t.profiles.busy(), false);
+  t.dot("work").click();
+  assert.ok(t.copy(), "the switch slides");
+  assert.equal(t.profiles.busy(), true);
+  t.finish();
+  assert.equal(t.profiles.busy(), false, "landed");
+  t.profiles.stop();
 });

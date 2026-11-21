@@ -9,6 +9,18 @@ import { STORAGE_KEYS, T3PLUS } from "./config.js";
 
 export const WHATS_NEW = Object.freeze([
   {
+    version: "Unreleased",
+    notes: [
+      ["Settings per profile and machine", "at the top of Settings → t3+, \"Applying t3+ for All profiles on All devices\": pick a profile (or one of T3's machines) and every setting below is set for it alone. A row it sets is marked, with a reset."],
+      ["Status view", "the button at the right of the profile dots groups your threads by what they need: Needs you, Working, Done and Idle, threads in collapsed folders too, with T3's exact words (Limited and Waiting included). Turn on Status colors to see every bot in its status's color: orange needs you, red failed, amber working, green done, blue idle."],
+      ["Subagents", "the small faces under a bot are its own character now: the same shape (a blob under a blob) and the same color. Pick a shape and color of their own in Settings → t3+ → Subagents."],
+      ["Faster and lighter", "switching profiles restyles far less of T3 and lands sooner, animated faces cost a fraction of what they did while idle, and memory stays flat however often you switch."],
+      ["Swipes", "swipe between profiles as often as you like: each swipe switches again right away, and T3 no longer steps back a thread underneath."],
+      ["Chat bubbles", "your messages in a color of your own, blue included, for all profiles or one. The text turns white or dark to stay readable."],
+      ["Move to profile", "right-click a project folder for Move to profile, beside T3's own items: pick a profile, or a new one. Dragging the folder onto a dot still works."],
+    ],
+  },
+  {
     version: "0.22.3",
     notes: [
       ["Blobs", "a new bot style: soft, solid blobs in the bot's color with two black capsule eyes. They're always gently alive: the eyes glance around and blink, the body breathes, and the mood shows (quick glances while working, a hop when it needs you, a smile when done). Pick it in Bot style, or one blob per bot."],
@@ -123,10 +135,20 @@ export function createWhatsNew({ win, doc, area, version, entries = WHATS_NEW })
   let sheet = null;
   let returnFocus = null;
   let openTimer = null;
+  let autoOpen = null; // the open after an update (start): its next attempt, until called off
   let running = false;
   let lastKey = -Infinity;
   let walled = []; // the page behind the sheet, made inert while it is open
   const onType = () => (lastKey = win.performance.now());
+
+  /** The open after an update is called off: it opened, the sheet was opened by hand, or t3+ stopped. */
+  function cancelAutoOpen() {
+    if (!autoOpen) return;
+    win.clearTimeout(openTimer);
+    win.removeEventListener("keydown", onType, true);
+    doc.removeEventListener("visibilitychange", autoOpen);
+    autoOpen = null;
+  }
 
   function close() {
     if (!sheet) return;
@@ -171,7 +193,8 @@ export function createWhatsNew({ win, doc, area, version, entries = WHATS_NEW })
   /** The sheet with every version's notes, over T3. */
   function open() {
     if (sheet) return;
-    win.clearTimeout(openTimer);
+    // Opened by hand first (Settings → t3+): it is not opened again on its own once closed.
+    cancelAutoOpen();
     returnFocus = doc.activeElement instanceof win.HTMLElement ? doc.activeElement : null;
     sheet = doc.createElement("div");
     sheet.className = "t3plus-whatsnew";
@@ -263,7 +286,7 @@ export function createWhatsNew({ win, doc, area, version, entries = WHATS_NEW })
       // Once T3 has settled in, where it can be seen, and not while you type (its close
       // button takes the focus).
       const attempt = async () => {
-        if (!running) return;
+        if (autoOpen !== attempt) return; // called off
         if (doc.visibilityState === "hidden") {
           doc.addEventListener("visibilitychange", attempt, { once: true });
           return;
@@ -273,15 +296,16 @@ export function createWhatsNew({ win, doc, area, version, entries = WHATS_NEW })
           return;
         }
         const mine = (await area.get(STORAGE_KEYS.whatsNewClaim).catch(() => ({})))?.[STORAGE_KEYS.whatsNewClaim] === claim;
-        win.removeEventListener("keydown", onType, true);
-        if (running && mine) open();
+        if (autoOpen !== attempt) return; // called off while the claim was read
+        cancelAutoOpen();
+        if (mine) open();
       };
+      autoOpen = attempt;
       openTimer = win.setTimeout(attempt, 1500);
     },
     stop() {
       running = false;
-      win.clearTimeout(openTimer);
-      win.removeEventListener("keydown", onType, true);
+      cancelAutoOpen();
       win.removeEventListener("keydown", onKey, true);
       close();
     },
