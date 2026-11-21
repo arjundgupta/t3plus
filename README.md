@@ -51,11 +51,11 @@ Every thread becomes a little pixel-art bot with a face, its name and its latest
 
 Five styles for bots you haven't customized (Settings → t3+ → Bot style):
 
-| Classic | Sports | Space | Fruit |
-|:---:|:---:|:---:|:---:|
-| <img src="media/style-classic.png" width="180" alt="Classic bots"> | <img src="media/style-sports.png" width="180" alt="Sports bots"> | <img src="media/style-space.png" width="180" alt="Space bots"> | <img src="media/style-fruit.png" width="180" alt="Fruit bots"> |
+| Classic | Sports | Space | Fruit | Blobs |
+|:---:|:---:|:---:|:---:|:---:|
+| <img src="media/style-classic.png" width="150" alt="Classic bots"> | <img src="media/style-sports.png" width="150" alt="Sports bots"> | <img src="media/style-space.png" width="150" alt="Space bots"> | <img src="media/style-fruit.png" width="150" alt="Fruit bots"> | <img src="media/style-blobs.gif" width="150" alt="Blobs bots, gently animated"> |
 
-And **Blobs**: soft blobs in the bot's color with two capsule eyes, always gently alive. They glance around, blink and breathe, and show the mood.
+**Blobs** are soft blobs in the bot's color with two capsule eyes, always gently alive: they glance around, blink and breathe, and show the mood.
 
 ## Profiles
 
