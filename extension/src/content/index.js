@@ -130,7 +130,7 @@ const app = createT3Plus({
         : null,
   }),
   version: chrome.runtime.getManifest?.().version,
-  // After an update, what changed (once); always in Settings → t3+.
+  // After an update, what changed (once); every version's notes are in Settings → t3+ → Changelog too.
   whatsNew: createWhatsNew({ win: window, doc: document, area, version: chrome.runtime.getManifest?.().version }),
   settingsStore: createSettingsStore(area, changed),
   scopesStore: createScopesStore(area, changed),

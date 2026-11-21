@@ -91,10 +91,52 @@ test("the teardrop is drawn as a pixel face, as Classic's drop was before Blobs 
   assert.notEqual(art.url, botArt("blue", "circle", "awake").url, "its own eyes, not a fallback");
 });
 
-test("Settings promises right-click → Move to profile only where T3's folder menu has it (the desktop app)", () => {
-  for (const desktop of [false, true]) {
-    const dom = createDom("/settings/appearance", "");
-    const panel = createAppearancePanel(dom.window.document, new Proxy({}, { get: () => () => {} }), { desktop });
-    assert.equal(panel.element.textContent.includes("Move to profile"), desktop, desktop ? "desktop" : "extension");
-  }
+test("the Profiles row says how to switch, in one short line, and names no other app", () => {
+  const dom = createDom("/settings/appearance", "");
+  const panel = createAppearancePanel(dom.window.document, new Proxy({}, { get: () => () => {} }), { desktop: true });
+  const row = [...panel.element.querySelectorAll(".t3plus-row")].find((r) => r.querySelector(".t3plus-row-title").textContent === "Profiles");
+  const words = row.querySelector(".t3plus-row-desc").textContent;
+  assert.match(words, /Ctrl\+Shift\+1–9/, "the shortcut");
+  assert.match(words, /swipe/, "the swipe");
+  assert.match(words, /Right-click a dot/, "where renaming is");
+  assert.doesNotMatch(words, /Dia/);
+  assert.ok(words.split(/\s+/).length <= 20, words);
+});
+
+/** The panel alone, shown with `settings` (DEFAULT_SETTINGS changed by `edit`) and `extra` state. */
+function panelShowing(edit = () => {}, extra = {}) {
+  const dom = createDom("/settings/appearance", "");
+  const panel = createAppearancePanel(dom.window.document, new Proxy({}, { get: () => () => {} }), { desktop: true });
+  const settings = structuredClone(DEFAULT_SETTINGS);
+  edit(settings);
+  panel.update({ settings, image: null, imageUrl: "", message: "", bots: [], botMarker: "🤖", health: [], ...extra });
+  const desc = (title) => [...panel.element.querySelectorAll(".t3plus-row")].find((r) => r.querySelector(".t3plus-row-title").textContent === title).querySelector(".t3plus-row-desc").textContent;
+  return { panel, desc };
+}
+
+test("Reset names what it resets (background and glass): not the Look row alone, not the chat bubbles beside them", () => {
+  const all = panelShowing().desc("Reset");
+  assert.match(all, /background and glass/);
+  assert.doesNotMatch(all, /\blook\b/i, "Look is one row of what it resets");
+  const scope = { edit: { profile: "work", device: "*" }, name: "Work", live: { profile: "main", device: "*" }, profiles: [{ id: "main", name: "Main" }, { id: "work", name: "Work" }], devices: [], own: {}, elsewhere: {} };
+  assert.equal(panelShowing(() => {}, { scope }).desc("Reset"), "Clear Work's own background and glass.");
+});
+
+test("Screenshot mode says which views it leaves real: terminals, diffs and files", () => {
+  assert.match(panelShowing().desc("Screenshot mode"), /Terminals, diffs and files stay real/);
+});
+
+test("the image caption reads as a sentence in Screenshot mode too, where the upload is \"your image\"", () => {
+  const image = { name: "passport-scan.png", width: 800, height: 600 };
+  const captionOf = (demo) => {
+    const { panel } = panelShowing((s) => {
+      s.demo.enabled = demo;
+      s.composerGradient.mode = "image";
+      s.composerGradient.imageSource = "sample";
+    }, { image });
+    const row = [...panel.element.querySelectorAll(".t3plus-row")].find((r) => r.querySelector(".t3plus-row-title").textContent === "Image");
+    return [...row.querySelectorAll(".t3plus-row-desc")].at(-1).textContent;
+  };
+  assert.equal(captionOf(false), "Using the sample; passport-scan.png is still saved.");
+  assert.equal(captionOf(true), "Using the sample; your image is still saved.", "no sentence starting in lower case");
 });

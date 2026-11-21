@@ -269,7 +269,7 @@ export function createT3Plus(deps) {
   /**
    * For All profiles on All devices: each setting some scope sets itself, and those scopes'
    * names. The ones that apply to what is open come first; the one deciding what you see
-   * now (the narrowest) is marked "open now". A profile's scope while profiles are off
+   * now (the narrowest) is marked "open". A profile's scope while profiles are off
    * applies nowhere: not named.
    */
   function elsewhereNames(profiles, devices) {
@@ -283,7 +283,7 @@ export function createT3Plus(deps) {
       const applying = liveLayers.filter((key) => keys.includes(key));
       const deciding = applying.at(-1);
       const ordered = [...applying.reverse(), ...keys.filter((key) => !applying.includes(key))];
-      names[path] = ordered.map((key) => `${scopeName(parseScopeKey(key), profiles, devices)}${key === deciding ? " (open now)" : ""}`);
+      names[path] = ordered.map((key) => `${scopeName(parseScopeKey(key), profiles, devices)}${key === deciding ? " (open)" : ""}`);
     }
     return names;
   }
@@ -1734,7 +1734,6 @@ export function createT3Plus(deps) {
   }
 
   const actions = {
-    openWhatsNew: () => deps.whatsNew?.open(),
     setEnabled: (enabled) => persist(gradient({ enabled })),
     setMode: (mode) => persist(gradient({ mode })),
     previewAccent: (accent) => preview(gradient({ accent })),
@@ -1752,7 +1751,7 @@ export function createT3Plus(deps) {
     setDitherSize: (ditherSize) => persist(gradient({ ditherSize })),
     setDitherStyle: (ditherStyle) => persist(gradient({ ditherStyle })),
     setLook: (look) => persist(gradient(look === "smooth" ? { dither: false } : { dither: true, ditherStyle: look })),
-    useSample: () => persist(gradient({ imageSource: "sample" }), "Using the packaged sample image."),
+    useSample: () => persist(gradient({ imageSource: "sample" }), "Using the sample image."),
     setGlass: (enabled) => persist(glass({ enabled })),
     previewGlassStrength: (strength) => preview(glass({ strength })),
     setGlassStrength: (strength) => persist(glass({ strength })),
@@ -1812,7 +1811,7 @@ export function createT3Plus(deps) {
         const { keys, skipped } = await deps.backup.import(backup);
         // The stores follow storage changes, so every open T3 tab updates by itself.
         // Screenshot mode: a backup's file name can be personal ("acme-client-backup.json").
-        const left = shrunk === false || skipped.includes(STORAGE_KEYS.image) ? " The background image did not fit in T3's storage, so it was left out." : "";
+        const left = shrunk === false || skipped.includes(STORAGE_KEYS.image) ? " The background image did not fit, so it was left out." : "";
         state.message = `Restored ${keys.length} saved setting${keys.length === 1 ? "" : "s"} from ${covered ? "the backup file" : file.name}.${left}`;
       } catch (error) {
         state.message = error instanceof SyntaxError ? "That file is not valid JSON." : error instanceof Error ? error.message : "Could not import.";
@@ -1897,7 +1896,7 @@ export function createT3Plus(deps) {
     },
   };
 
-  const panel = createAppearancePanel(doc, actions, { desktop: Boolean(deps.desktop), version: deps.version ?? null, whatsNew: Boolean(deps.whatsNew) });
+  const panel = createAppearancePanel(doc, actions, { desktop: Boolean(deps.desktop), version: deps.version ?? null });
   const home = createHomeView(doc);
   const detailsPool = createHomeView(doc, { variant: "pool" });
   const usageDither = createUsageDither(doc);

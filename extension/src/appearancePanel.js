@@ -1,10 +1,11 @@
 import { botArt, botClipPath, botEdgeColor, botFillUrl, botShapeHasOwnColors, botStill } from "./botArt.js";
-import { WHATS_NEW, renderNotes } from "./whatsNew.js";
+import { renderNotes } from "./whatsNew.js";
 import { PROFILE_COLORS, profileHex } from "./profiles.js";
 import { PROFILE_ICONS, profileIconSvg } from "./profileIcons.js";
 import { applyAvatarVars, botPaintColor, PROJECT_COLOR, resolveBotPresentation, shownBotPrefs, subagentFace } from "./bots.js";
 import { APPEARANCE_ROUTE, BOT_COLORS, BOT_SHAPES, BOT_STYLES, DEFAULT_BOT_MARKER, IMAGE_LIMITS, PICKABLE_BOT_COLORS, SAME_AS_BOT, T3_SELECTORS, T3PLUS } from "./config.js";
 import { createBuilder, setAttr, setHidden, setText, uniqueId as id } from "./dom.js";
+import { createBadgeSample, createGlowSwatches, createStatusColorsSample, createSubagentSample, drawStyleFace, glowColorCss, glowSwatch, styleFace } from "./settingsPreviews.js";
 import { ALL, isBaseScope } from "./settingsScopes.js";
 
 // lucide icons (T3's set) for the scope bar.
@@ -66,7 +67,7 @@ export function ensurePanelMounted(container, panel) {
  *   scope: { edit, name, live, profiles, devices, own, elsewhere },
  * }
  */
-export function createAppearancePanel(doc, actions, { desktop = false, version = null, whatsNew = false } = {}) {
+export function createAppearancePanel(doc, actions, { desktop = false, version = null } = {}) {
   // The desktop build keeps everything in T3's own storage on this computer, not a browser's.
   const where = desktop ? "on this computer" : "in this browser";
   const h = createBuilder(doc);
@@ -138,6 +139,21 @@ export function createAppearancePanel(doc, actions, { desktop = false, version =
     };
   };
 
+  // One choice of a few, as radio inputs in labels: `choices` [value, label]; `icon(value)`
+  // a picture before a choice's label (a preview of it), or none.
+  const segmented = (label, choices, onPick, icon = () => null) => {
+    const name = id("choice");
+    const inputs = {};
+    const group = h("div", { class: "t3plus-segmented", role: "radiogroup", "aria-label": label },
+      choices.map(([value, text]) => {
+        const input = h("input", { type: "radio", name, value, class: "t3plus-sr-only" });
+        input.addEventListener("change", () => input.checked && onPick(value));
+        inputs[value] = input;
+        return h("label", { class: "t3plus-segment" }, [input, icon(value), h("span", { text })]);
+      }));
+    return { group, inputs };
+  };
+
   // Arrow keys move and pick within a row of choices; one Tab stop each.
   const rovingRow = (group) =>
     group.addEventListener("keydown", (e) => {
@@ -173,7 +189,7 @@ export function createAppearancePanel(doc, actions, { desktop = false, version =
         return b;
       }));
     rovingRow(swatches);
-    const custom = h("input", { type: "color", class: "t3plus-pp-custom", "aria-label": `Custom ${aria.toLowerCase()}`, title: "A color of your own" });
+    const custom = h("input", { type: "color", class: "t3plus-pp-custom", "aria-label": `Custom ${aria.toLowerCase()}`, title: "Your own color" });
     custom.addEventListener("input", () => onPreview(custom.value.toLowerCase()));
     custom.addEventListener("change", () => onPick(custom.value.toLowerCase()));
     const el = row({ title, description, paths, control: h("div", { class: "t3plus-pp-row-picks" }, [swatches, custom]) });
@@ -193,16 +209,7 @@ export function createAppearancePanel(doc, actions, { desktop = false, version =
   // ---------- Background + glass ----------
   const backgroundToggle = switchButton("Background", (on) => actions.setEnabled(on));
 
-  const modeName = id("mode");
-  const modeInputs = {};
-  const modeGroup = h("div", { class: "t3plus-segmented", role: "radiogroup", "aria-label": "Background style" },
-    [["half-circle", "Glow"], ["image", "Image"]].map(([value, label]) => {
-      const input = h("input", { type: "radio", name: modeName, value, class: "t3plus-sr-only" });
-      input.addEventListener("change", () => input.checked && actions.setMode(value));
-      modeInputs[value] = input;
-      return h("label", { class: "t3plus-segment" }, [input, h("span", { text: label })]);
-    }),
-  );
+  const { group: modeGroup, inputs: modeInputs } = segmented("Background style", [["half-circle", "Glow"], ["image", "Image"]], (value) => actions.setMode(value));
 
   const fileInput = h("input", { type: "file", accept: IMAGE_LIMITS.acceptedTypes.join(","), class: "t3plus-sr-only", tabindex: "-1", "aria-hidden": "true" });
   fileInput.addEventListener("change", () => {
@@ -217,7 +224,7 @@ export function createAppearancePanel(doc, actions, { desktop = false, version =
   const imageCaption = h("p", { class: "t3plus-row-desc" });
   const imageRow = row({
     title: "Image",
-    description: `Stored only ${where}. Large images are resized and saved as WebP.`,
+    description: `Saved only ${where}.`,
     control: [thumb, uploadButton, sampleButton, removeButton, fileInput],
     extra: imageCaption,
     paths: ["composerGradient.imageSource"],
@@ -225,7 +232,7 @@ export function createAppearancePanel(doc, actions, { desktop = false, version =
 
   const glow = colorRow({
     title: "Glow color",
-    description: "The glow behind the chat and composer. Theme follows your T3 theme's own color.",
+    description: "The glow's color. Theme matches your T3 theme.",
     aria: "Glow color",
     field: "glow",
     ownName: "Theme",
@@ -236,41 +243,28 @@ export function createAppearancePanel(doc, actions, { desktop = false, version =
     onPreview: (value) => actions.previewAccent(value),
   });
 
-  const ditherSizeName = id("dither-size");
-  const ditherSizeInputs = {};
-  const ditherSizeGroup = h("div", { class: "t3plus-segmented", role: "radiogroup", "aria-label": "Dither pixel size" },
-    [["fine", "Fine"], ["medium", "Medium"], ["large", "Large"]].map(([value, label]) => {
-      const input = h("input", { type: "radio", name: ditherSizeName, value, class: "t3plus-sr-only" });
-      input.addEventListener("change", () => input.checked && actions.setDitherSize(value));
-      ditherSizeInputs[value] = input;
-      return h("label", { class: "t3plus-segment" }, [input, h("span", { text: label })]);
-    }),
-  );
-  const lookName = id("look");
-  const lookInputs = {};
-  const lookGroup = h("div", { class: "t3plus-segmented", role: "radiogroup", "aria-label": "Look" },
-    [["bayer", "Bayer"], ["grain", "Grain"], ["spectrum", "Spectrum"], ["smooth", "Smooth"]].map(([value, label]) => {
-      const input = h("input", { type: "radio", name: lookName, value, class: "t3plus-sr-only" });
-      input.addEventListener("change", () => input.checked && actions.setLook(value));
-      lookInputs[value] = input;
-      return h("label", { class: "t3plus-segment" }, [input, h("span", { text: label })]);
-    }),
-  );
+  // Each look and each pixel size shows a pinch of the glow drawn that way (settingsPreviews.js).
+  const sizeSwatches = new Map();
+  const lookSwatches = new Map();
+  const swatchIn = (swatches) => (value) => swatches.set(value, glowSwatch(h)).get(value);
+  const { group: ditherSizeGroup, inputs: ditherSizeInputs } = segmented("Dither pixel size", [["fine", "Fine"], ["medium", "Medium"], ["large", "Large"]], (value) => actions.setDitherSize(value), swatchIn(sizeSwatches));
+  const { group: lookGroup, inputs: lookInputs } = segmented("Look", [["bayer", "Bayer"], ["grain", "Grain"], ["spectrum", "Spectrum"], ["smooth", "Smooth"]], (value) => actions.setLook(value), swatchIn(lookSwatches));
+  const paintGlowSwatches = createGlowSwatches(lookSwatches, sizeSwatches);
   const lookRow = row({
     title: "Look",
-    description: "Pixel art like the bot avatars: Bayer crosshatch, scattered Grain, or hue-drifting Spectrum. Smooth is a plain gradient.",
+    description: "The glow's pixel pattern, or a smooth gradient.",
     control: lookGroup,
     paths: ["composerGradient.dither", "composerGradient.ditherStyle"],
   });
-  const ditherSizeRow = row({ title: "Pixel size", description: "Size of each dither dot, the same on every screen.", control: ditherSizeGroup, paths: ["composerGradient.ditherSize"] });
+  const ditherSizeRow = row({ title: "Pixel size", description: "How big the glow's pixels are.", control: ditherSizeGroup, paths: ["composerGradient.ditherSize"] });
   const intensity = slider("Intensity", (v) => actions.previewIntensity(v), (v) => actions.setIntensity(v));
 
   const glassToggle = switchButton("Glass composer", (on) => actions.setGlass(on));
   const glassStrength = slider("Glass strength", (v) => actions.previewGlassStrength(v), (v) => actions.setGlassStrength(v));
-  const glassStrengthRow = row({ title: "Glass composer", description: "How much of the background shows through the composer card.", control: [glassStrength.output, glassStrength.input], paths: ["glass.strength"] });
+  const glassStrengthRow = row({ title: "Glass composer", description: "How much background shows through the composer.", control: [glassStrength.output, glassStrength.input], paths: ["glass.strength"] });
 
   const resetButton = button("Reset", () => actions.reset(), "t3plus-button-ghost");
-  const RESET_TEXT = "Restore appearance defaults. A stored upload is kept until you remove it.";
+  const RESET_TEXT = "Restore the default background and glass. Your upload stays.";
   const resetRow = row({ title: "Reset", description: RESET_TEXT, control: resetButton });
   const resetDesc = resetRow.querySelector(".t3plus-row-desc");
 
@@ -471,18 +465,18 @@ export function createAppearancePanel(doc, actions, { desktop = false, version =
       next.edit.device,
     );
     const own = Object.keys(next.own).length;
-    setText(scopeOwn, base ? "" : own ? `${own} setting${own === 1 ? "" : "s"} of its own` : "Nothing of its own yet: change a setting below.");
+    setText(scopeOwn, base ? "" : own ? `${own} setting${own === 1 ? "" : "s"} of its own` : "No settings of its own yet.");
     setHidden(scopeClear, base || own === 0);
     setAttr(scopeClear, "aria-label", `Clear ${next.name}'s own settings`);
     for (const r of settingRows) {
       let note = "";
       let mine = false;
       let others = false;
-      if (r.shared) note = base ? "" : "The same for every profile and device.";
+      if (r.shared) note = base ? "" : "Same for all profiles and devices.";
       else if (base) {
         const names = [...new Set(r.paths.flatMap((path) => next.elsewhere[path] ?? []))];
         others = names.length > 0;
-        if (others) note = `${listNames(names)} ${names.length === 1 ? "keeps its" : "keep their"} own, so a change here does not show there.`;
+        if (others) note = names.length === 1 ? `${names[0]} has its own value.` : `${listNames(names)} have their own values.`;
       } else if (r.paths.some((path) => Object.hasOwn(next.own, path))) {
         mine = true;
         note = `Set for ${next.name}.`;
@@ -507,7 +501,7 @@ export function createAppearancePanel(doc, actions, { desktop = false, version =
         }
       }
     }
-    setText(resetDesc, base ? RESET_TEXT : `Clear ${next.name}'s own appearance (background and glass): it follows the wider settings again.`);
+    setText(resetDesc, base ? RESET_TEXT : `Clear ${next.name}'s own background and glass.`);
   }
   const exportButton = button("Export…", () => actions.exportSettings());
   const importFile = h("input", { type: "file", accept: "application/json,.json", class: "t3plus-sr-only", tabindex: "-1", "aria-hidden": "true" });
@@ -605,7 +599,7 @@ export function createAppearancePanel(doc, actions, { desktop = false, version =
   // Your messages' bubbles: T3's, one of the nine, or your own.
   const bubbles = colorRow({
     title: "Chat bubbles",
-    description: "The color of your messages in the chat.",
+    description: "The color of your messages.",
     aria: "Chat bubble color",
     field: "bubble",
     ownName: "T3's",
@@ -619,12 +613,12 @@ export function createAppearancePanel(doc, actions, { desktop = false, version =
   const lookCard = h("div", { class: "t3plus-card" }, [
     row({
       title: "Background",
-      description: "A pixel-art glow (or your own image) behind the conversation and composer.",
+      description: "A glow or image behind the chat.",
       control: backgroundToggle,
       extra: preview,
       paths: ["composerGradient.enabled"],
     }),
-    row({ title: "Style", description: "A glow rising behind the composer, or an image.", control: modeGroup, paths: ["composerGradient.mode"] }),
+    row({ title: "Style", description: "A pixel glow, or your own image.", control: modeGroup, paths: ["composerGradient.mode"] }),
     imageRow,
     lookRow,
     glow.row,
@@ -638,19 +632,22 @@ export function createAppearancePanel(doc, actions, { desktop = false, version =
   const botsToggle = switchButton("Bot rows", (on) => actions.setSidebarFeature("bots", on));
   const botsDefaultToggle = switchButton("Every thread is a bot", (on) => actions.setSidebarFeature("botsDefault", on));
   const profilesToggle = switchButton("Profiles", (on) => actions.setSidebarFeature("profiles", on));
-  const botStyleName = id("bot-style");
-  const botStyleInputs = {};
-  const botStyleGroup = h("div", { class: "t3plus-segmented", role: "radiogroup", "aria-label": "Bot style" },
-    Object.entries(BOT_STYLES).map(([value, style]) => {
-      const input = h("input", { type: "radio", name: botStyleName, value, class: "t3plus-sr-only" });
-      input.addEventListener("change", () => input.checked && actions.setSidebarFeature("botStyle", value));
-      botStyleInputs[value] = input;
-      return h("label", { class: "t3plus-segment" }, [input, h("span", { text: style.label })]);
-    }),
-  );
+  // Each style with a face of its own, drawn on the first update (the panel is made at start,
+  // and Settings may never be opened).
+  const styleFaces = new Map();
+  const { group: botStyleGroup, inputs: botStyleInputs } = segmented("Bot style", Object.entries(BOT_STYLES).map(([value, style]) => [value, style.label]), (value) => actions.setSidebarFeature("botStyle", value), (value) => styleFaces.set(value, styleFace(h)).get(value));
+  let styleFacesDrawn = false;
+  const drawStyleFaces = () => {
+    if (styleFacesDrawn) return;
+    styleFacesDrawn = true;
+    for (const [value, el] of styleFaces) drawStyleFace(el, BOT_STYLES[value]);
+  };
   const homeToggle = switchButton("Usage widgets", (on) => actions.setHomeWidgets(on));
   const statusColorsToggle = switchButton("Status colors", (on) => actions.setSidebarFeature("statusColors", on));
   const statusBadgesToggle = switchButton("Status badges", (on) => actions.setSidebarFeature("statusBadges", on));
+  const statusColorsSample = createStatusColorsSample(h);
+  const badgeSample = createBadgeSample(h);
+  const subagentSample = createSubagentSample(h);
   // Subagents' faces: their bot's shape and color unless picked here.
   const subagentShapePick = picker("Subagent shape", (value) => actions.setSidebarFeature("subagentShape", value));
   const subagentColorPick = picker("Subagent color", (value) => actions.setSidebarFeature("subagentColor", value));
@@ -659,53 +656,49 @@ export function createAppearancePanel(doc, actions, { desktop = false, version =
   const healthText = h("p", { class: "t3plus-row-desc t3plus-health", role: "status", "aria-live": "polite" });
   const featuresCard = h("div", { class: "t3plus-card" }, [
     row({ title: "Status", extra: healthText }),
-    row({ title: "Bot rows", description: "Bots get a face, their name, their latest message, and a small face for each subagent they run.", control: botsToggle, paths: ["sidebar.bots"] }),
-    row({ title: "Every thread is a bot", description: `On: every thread is a bot. Off: only threads whose title starts with ${DEFAULT_BOT_MARKER}.`, control: botsDefaultToggle, paths: ["sidebar.botsDefault"] }),
-    // "Move to profile" is in T3's native folder menu, which only the desktop app's loader can add to.
-    row({ title: "Profiles", description: `Dots at the bottom of the sidebar, like Dia's profiles: each shows its own projects. Swipe sideways with two fingers on the sidebar, click a dot, or press Ctrl+Shift+1–9 to switch; drag a project folder onto a profile${desktop ? ", or right-click it → Move to profile," : ""} to move it; right-click a dot to rename or delete it.`, control: profilesToggle, shared: true }),
-    row({ title: "Bot style", description: "What bots look like when you have not picked a shape for one: Classic shapes in the project's color, Sports balls, Space planets, Fruit, or Blobs (soft shapes with two eyes).", control: botStyleGroup, paths: ["sidebar.botStyle"] }),
-    row({
-      title: "Status colors",
-      description: "The button beside the profile dots groups your threads by status (Needs you, Working, Done, Idle). With this on, every bot in that Status view wears its status's color: orange when it needs you, red failed, amber working, green done, blue idle. Everywhere else (your projects in the sidebar, the thread's header, hover cards, the preview above) bots keep their own colors, and balls, planets and fruit always do.",
-      control: statusColorsToggle,
-      paths: ["sidebar.statusColors"],
-    }),
-    row({ title: "Status badges", description: "A small tile on each bot's face that shows what the thread is doing.", control: statusBadgesToggle, paths: ["sidebar.statusBadges"] }),
+    row({ title: "Bot rows", description: "Bots get a face and show their latest message.", control: botsToggle, paths: ["sidebar.bots"] }),
+    row({ title: "Every thread is a bot", description: `When off, only titles starting with ${DEFAULT_BOT_MARKER} are bots.`, control: botsDefaultToggle, paths: ["sidebar.botsDefault"] }),
+    row({ title: "Profiles", description: "Switch with a dot, a two-finger swipe, or Ctrl+Shift+1–9. Right-click a dot to rename it.", control: profilesToggle, shared: true }),
+    row({ title: "Bot style", description: "How bots look until you pick a shape.", control: botStyleGroup, paths: ["sidebar.botStyle"] }),
+    row({ title: "Status colors", description: "In the Status view, bots wear their status's color.", control: statusColorsToggle, extra: statusColorsSample.element, paths: ["sidebar.statusColors"] }),
+    row({ title: "Status badges", description: "A tile on each face that shows its status.", control: [badgeSample.element, statusBadgesToggle], paths: ["sidebar.statusBadges"] }),
     row({
       title: "Subagents",
-      description: "The small faces under a bot while it runs subagents: in its shape and its color, or the ones picked here. Balls, planets and fruit keep their own colors. They stay still; one that has ended is dimmed, and a failed one has x eyes.",
-      control: h("div", { class: "t3plus-subagent-picks" }, [subagentShapePick.el, subagentColorPick.el]),
+      description: "Small faces under a bot, one per subagent.",
+      control: [subagentSample.element, h("div", { class: "t3plus-subagent-picks" }, [subagentShapePick.el, subagentColorPick.el])],
       paths: ["sidebar.subagentShape", "sidebar.subagentColor"],
     }),
-    row({
-      title: "Screenshot mode",
-      description:
-        "Swap thread titles, projects, branches, machine names and message text for believable stand-ins: in the sidebar, the header, the chat, the composer, hover cards, menus and ⌘K. Terminals, diffs, file views and Settings pages still show real content, so keep them out of the shot. Widgets stay real. Nothing in T3 changes.",
-      control: demoToggle,
-      shared: true,
-    }),
-    row({ title: "Usage widgets", description: "Pools, activity and usage under the new-thread composer, and the current provider's pool in thread details (Usage limits).", control: homeToggle, paths: ["home.widgets"] }),
+    row({ title: "Screenshot mode", description: "Swaps names and messages for stand-ins. Terminals, diffs and files stay real.", control: demoToggle, shared: true }),
+    row({ title: "Usage widgets", description: "Usage and limits under the new-thread composer.", control: homeToggle, paths: ["home.widgets"] }),
   ]);
 
-  // What changed in the installed version (the notes of the latest one, in a build
-  // newer than any), and every version in the What's New sheet.
-  const notesEntry = WHATS_NEW.find((e) => e.version === version) ?? WHATS_NEW[0];
-  const whatsNewCard = whatsNew && notesEntry
-    ? h("div", { class: "t3plus-card" }, [
-      row({
-        title: notesEntry.version === "Unreleased" ? "What's new in the next update" : `What's new in ${notesEntry.version}`,
-        control: button("All versions", () => actions.openWhatsNew?.()),
-        extra: renderNotes(doc, { version, entries: [notesEntry], titles: false }),
-      }),
-    ])
-    : null;
+  // ---------- Changelog ----------
+  // Every version's notes (newest first, the installed one marked), opened in place
+  // under a disclosure button. Built on the first open, then kept: the panel is made at
+  // start, and Settings may never be opened.
+  const changelogToggle = h("button", { type: "button", class: "t3plus-changelog-toggle", id: id("changelog-toggle"), "aria-expanded": "false", text: "Changelog" });
+  const changelogNotes = h("div", { class: "t3plus-card t3plus-changelog-notes", id: id("changelog"), role: "region", "aria-labelledby": changelogToggle.id, hidden: "" });
+  changelogToggle.setAttribute("aria-controls", changelogNotes.id);
+  // At the end of the notes too, so a long read can be folded without scrolling back
+  // up; the focus goes back to the toggle, not to the page with the button gone.
+  const changelogHide = button("Hide changelog", () => {
+    showChangelog(false);
+    changelogToggle.focus();
+  }, "t3plus-button-ghost t3plus-changelog-hide");
+  function showChangelog(open) {
+    if (open && !changelogNotes.firstChild) changelogNotes.append(renderNotes(doc, { version }), changelogHide);
+    setAttr(changelogToggle, "aria-expanded", String(open));
+    setHidden(changelogNotes, !open);
+  }
+  changelogToggle.addEventListener("click", () => showChangelog(changelogToggle.getAttribute("aria-expanded") !== "true"));
+  const changelog = h("div", { class: "t3plus-changelog" }, [changelogToggle, changelogNotes]);
 
   const advanced = h("details", { class: "t3plus-advanced" }, [
     h("summary", { class: "t3plus-advanced-summary", text: "Advanced" }),
     h("div", { class: "t3plus-card" }, [
       ditherSizeRow,
-      row({ title: "Glass", description: "Turn the translucent composer card off. Falls back to a solid card when the browser cannot blur.", control: glassToggle, paths: ["glass.enabled"] }),
-      row({ title: "Backup", description: "Save your t3+ settings, profiles, bots and uploaded image to a file, to keep a copy or move them to another computer.", control: [exportButton, importButton, importFile] }),
+      row({ title: "Glass", description: "A see-through composer card.", control: glassToggle, paths: ["glass.enabled"] }),
+      row({ title: "Backup", description: "Save all of t3+ to a file, or load one.", control: [exportButton, importButton, importFile] }),
       resetRow,
     ]),
   ]);
@@ -833,7 +826,7 @@ export function createAppearancePanel(doc, actions, { desktop = false, version =
     });
     // Status colors on (the switch above, in the scope edited): bots wear their status's
     // color, and the one picked here shows once it is off.
-    const colorNote = h("p", { class: "t3plus-row-desc", id: id("bot-color-note"), hidden: "", text: "Status colors is on, so in the Status view bots wear their status's color: this one shows everywhere else." });
+    const colorNote = h("p", { class: "t3plus-row-desc", id: id("bot-color-note"), hidden: "", text: "Status colors is on: this color shows outside the Status view." });
     const colorField = h("div", { class: "t3plus-bot-set", "data-set": "color" }, [h("span", { class: "t3plus-bot-set-label", text: "Color" }), colors.group, colorNote]);
     const face = h("span", { class: "t3plus-bot-swatch t3plus-bot-hero-face", "aria-hidden": "true" });
     const title = h("h4", { class: "t3plus-bot-hero-name" });
@@ -1035,8 +1028,8 @@ export function createAppearancePanel(doc, actions, { desktop = false, version =
   // the nine (as in the sidebar), or a color of your own. The preview shows them with the
   // profile's own glow (its glow color is a setting: the scope bar above picks the profile).
   const PROFILE_FIELDS = [
-    ["color", "Dot", "The dot and the name beside it."],
-    ["sky", "Sky", "The night sky at the top of the sidebar."],
+    ["color", "Dot", "The dot and its name."],
+    ["sky", "Sky", "The sky at the top of the sidebar."],
   ];
   let profiles = null; // { list, active, sky }
   let editing = null; // the profile shown
@@ -1089,7 +1082,7 @@ export function createAppearancePanel(doc, actions, { desktop = false, version =
     // A color of your own: the preview follows while you drag, and it is kept on letting go.
     // Only this card's preview shows a draft (painted here): the app has nothing to redraw
     // for it, and asking it to ran a whole page check on every step of the drag.
-    const custom = h("input", { type: "color", class: "t3plus-pp-custom", "aria-label": `Custom ${label.toLowerCase()} color`, title: "A color of your own" });
+    const custom = h("input", { type: "color", class: "t3plus-pp-custom", "aria-label": `Custom ${label.toLowerCase()} color`, title: "Your own color" });
     custom.addEventListener("input", () => {
       draft = { ...draft, [field]: custom.value.toLowerCase() };
       paintProfiles();
@@ -1115,13 +1108,13 @@ export function createAppearancePanel(doc, actions, { desktop = false, version =
   const profilesCard = h("div", { class: "t3plus-card", hidden: "" }, [
     row({
       title: "Profiles",
-      description: "Each profile's icon, and the colors of its dot and the sidebar's sky: one of these, or your own (the last button in a row). Its glow, bubbles and everything else: pick it in \"Applying t3+ for\" at the top. Right-click a dot in the sidebar for the same.",
+      description: "Pick an icon and colors for each profile.",
       shared: true,
       extra: h("div", { class: "t3plus-pp-body" }, [
         ppChips,
         ppPreview,
         h("div", { class: "t3plus-pp-row", "data-field": "icon" }, [
-          h("div", { class: "t3plus-pp-row-text" }, [h("span", { class: "t3plus-pp-row-title", text: "Icon" }), h("span", { class: "t3plus-pp-row-hint", text: "Before its name, beside the dots." })]),
+          h("div", { class: "t3plus-pp-row-text" }, [h("span", { class: "t3plus-pp-row-title", text: "Icon" }), h("span", { class: "t3plus-pp-row-hint", text: "Shown before its name." })]),
           ppIcons,
         ]),
         ...PROFILE_FIELDS.map(([field]) => ppRows[field].row),
@@ -1230,7 +1223,7 @@ export function createAppearancePanel(doc, actions, { desktop = false, version =
     // The profile's own glow color (with the background off or an image, none shows).
     ppPane.toggleAttribute("data-glow-off", !glowOn);
     const accent = profileAccents[editing] ?? "theme";
-    ppPane.style.setProperty("--t3plus-accent", accent === "theme" ? "var(--primary, #6d7cff)" : accent);
+    ppPane.style.setProperty("--t3plus-accent", glowColorCss(accent));
   }
 
   function updateProfiles(next, demo) {
@@ -1265,8 +1258,8 @@ export function createAppearancePanel(doc, actions, { desktop = false, version =
     featuresCard,
     botsCard,
     profilesCard,
-    whatsNewCard,
     advanced,
+    changelog,
   ]);
 
   function update(state) {
@@ -1293,14 +1286,15 @@ export function createAppearancePanel(doc, actions, { desktop = false, version =
     setText(imageCaption, usingUpload
       ? `Using ${fileName} (${image.width}×${image.height}).`
       : image
-        ? `Using the packaged sample. Your upload ${fileName} is still stored.`
-        : "Using the packaged sample image.");
+        ? `Using the sample; ${fileName} is still saved.`
+        : "Using the sample image.");
 
     intensity.set(g.intensity);
     const look = g.dither ? g.ditherStyle : "smooth";
     for (const [value, input] of Object.entries(lookInputs)) input.checked = look === value;
     for (const [value, input] of Object.entries(ditherSizeInputs)) input.checked = g.ditherSize === value;
     setHidden(ditherSizeRow, !g.dither);
+    paintGlowSwatches({ look, size: g.ditherSize, accent: g.accent });
 
     setAttr(glassToggle, "aria-checked", String(settings.glass.enabled));
     glassStrength.set(settings.glass.strength);
@@ -1313,17 +1307,21 @@ export function createAppearancePanel(doc, actions, { desktop = false, version =
 
     // Sidebar
     const problems = state.health ?? [];
-    setText(healthText, problems.length
-      ? `Not found in this T3 version, so these are off until t3+ is updated: ${problems.map((p) => `${p.feature} (${p.missing.join(", ")})`).join("; ")}.`
-      : "Everything t3+ needs was found in this T3 version.");
+    setText(healthText, problems.length ? `Off until t3+ updates: ${problems.map((p) => p.feature).join("; ")}.` : "Everything works with this T3 version.");
+    // The parts not found, for a bug report: on hover, not in the words.
+    setAttr(healthText, "title", problems.length ? problems.map((p) => `${p.feature}: ${p.missing.join(", ")}`).join("\n") : null);
     healthText.toggleAttribute("data-problem", problems.length > 0);
     setAttr(botsToggle, "aria-checked", String(settings.sidebar.bots));
     setAttr(botsDefaultToggle, "aria-checked", String(settings.sidebar.botsDefault));
     setAttr(profilesToggle, "aria-checked", String(settings.sidebar.profiles));
     for (const [value, input] of Object.entries(botStyleInputs)) input.checked = settings.sidebar.botStyle === value;
+    drawStyleFaces();
     setAttr(homeToggle, "aria-checked", String(settings.home.widgets));
     setAttr(statusColorsToggle, "aria-checked", String(settings.sidebar.statusColors));
     setAttr(statusBadgesToggle, "aria-checked", String(settings.sidebar.statusBadges));
+    statusColorsSample.update(settings.sidebar.statusColors);
+    badgeSample.update(settings.sidebar.statusBadges);
+    subagentSample.update({ shape: settings.sidebar.subagentShape, color: settings.sidebar.subagentColor });
     subagentShapePick.set(subagentShapeOptions(settings.sidebar.subagentColor), settings.sidebar.subagentShape);
     subagentColorPick.set(SUBAGENT_COLOR_OPTIONS, settings.sidebar.subagentColor);
     setAttr(demoToggle, "aria-checked", String(settings.demo.enabled));
@@ -1332,7 +1330,7 @@ export function createAppearancePanel(doc, actions, { desktop = false, version =
     const marker = state.botMarker;
     setText(botsEmpty, bots.length
       ? ""
-      : `No bots yet. Turn on "Every thread is a bot", or put ${marker} at the start of a thread's title.`);
+      : `No bots yet. Start a thread's title with ${marker}.`);
     setHidden(botsEmpty, bots.length > 0);
     botsWearStatus = settings.sidebar.statusColors;
     updateBots(bots);

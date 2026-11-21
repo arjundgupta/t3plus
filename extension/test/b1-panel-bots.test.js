@@ -94,7 +94,7 @@ test("with Status colors on, the Color row says why the color picked does not sh
   assert.equal(group.hasAttribute("aria-describedby"), false);
   p.show(bots, { statusColors: true });
   assert.equal(note.hidden, false);
-  assert.match(note.textContent, /Status colors is on, so in the Status view/, "where they paint it: the Status view only");
+  assert.match(note.textContent, /Status colors is on.*outside the Status view/, "where they paint it: the Status view only");
   assert.equal(group.getAttribute("aria-describedby"), note.id, "read out with the colors");
   p.show(bots);
   assert.equal(note.hidden, true);

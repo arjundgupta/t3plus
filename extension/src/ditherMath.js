@@ -88,7 +88,8 @@ export function grainThreshold(x, y) {
 /** The three background styles. All are pixel art in the bot avatars' style. */
 export const DITHER_STYLES = Object.freeze(["bayer", "grain", "spectrum"]);
 
-const thresholdFor = (style) => (style === "grain" ? grainThreshold : bayerThreshold);
+/** The threshold a style dithers with: grain its own, bayer and spectrum Bayer's. */
+export const thresholdFor = (style) => (style === "grain" ? grainThreshold : bayerThreshold);
 
 function rgbToHsl([r, g, b]) {
   const [rn, gn, bn] = [r / 255, g / 255, b / 255];

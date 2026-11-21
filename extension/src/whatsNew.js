@@ -1,23 +1,30 @@
 import { STORAGE_KEYS, T3PLUS } from "./config.js";
 
 // What's New: what changed in each t3+ version, in plain words. After an update it
-// opens once on its own (a sheet over T3, like an editor's "What's New" tab); it is
-// always in Settings → t3+ too. A fresh install opens nothing.
+// opens once on its own (a sheet over T3, like an editor's "What's New" tab); every
+// version's notes are in Settings → t3+ → Changelog too. A fresh install opens nothing.
 //
 // For a release: name the "Unreleased" entry after the new version (package.json),
 // as in CHANGELOG.md. Each note is [lead, text]: "Lead: text."
 
 export const WHATS_NEW = Object.freeze([
   {
+    version: "0.23.1",
+    notes: [
+      ["Simpler settings", "every row in Settings → t3+ is one short line, with small previews where a picture helps."],
+      ["Changelog", "every version's notes, from the button at the bottom of Settings → t3+."],
+    ],
+  },
+  {
     version: "0.23.0",
     notes: [
-      ["Settings per profile and machine", "at the top of Settings → t3+, \"Applying t3+ for All profiles on All devices\": pick a profile (or one of T3's machines) and every setting below is set for it alone. A row it sets is marked, with a reset."],
-      ["Status view", "the button at the right of the profile dots groups your threads by what they need: Needs you, Working, Done and Idle, threads in collapsed folders too, with T3's exact words (Limited and Waiting included). Turn on Status colors to see every bot in its status's color: orange needs you, red failed, amber working, green done, blue idle."],
-      ["Subagents", "the small faces under a bot are its own character now: the same shape (a blob under a blob) and the same color. Pick a shape and color of their own in Settings → t3+ → Subagents."],
-      ["Faster and lighter", "switching profiles restyles far less of T3 and lands sooner, animated faces cost a fraction of what they did while idle, and memory stays flat however often you switch."],
-      ["Swipes", "swipe between profiles as often as you like: each swipe switches again right away, and T3 no longer steps back a thread underneath."],
-      ["Chat bubbles", "your messages in a color of your own, blue included, for all profiles or one. The text turns white or dark to stay readable."],
-      ["Move to profile", "right-click a project folder for Move to profile, beside T3's own items: pick a profile, or a new one. Dragging the folder onto a dot still works."],
+      ["Settings per profile", "pick a profile or machine at the top of Settings → t3+ to give it its own settings."],
+      ["Status view", "the button beside the profile dots sorts threads into Needs you, Working, Done and Idle. Turn on Status colors to color bots by status."],
+      ["Subagents", "their faces match their bot, or get a shape and color of their own."],
+      ["Faster", "switching profiles is quicker and uses less memory."],
+      ["Swipes", "switch profiles as fast as you can swipe."],
+      ["Chat bubbles", "pick a color for your messages. The text stays readable."],
+      ["Move to profile", "right-click a project folder to move it to another profile."],
     ],
   },
   {
@@ -57,7 +64,7 @@ export const WHATS_NEW = Object.freeze([
     version: "0.21.0",
     date: "2026-11-19",
     notes: [
-      ["Profiles slide like Dia", "the open profile's list slides away as the next one slides in beside it. The sidebar is never blank."],
+      ["Profiles slide", "the open profile's list slides away as the next one slides in beside it. The sidebar is never blank."],
       ["Swipe with your fingers", "a two-finger swipe on the sidebar moves the lists as you go. Let go past a third of the way (or flick) to switch, or it springs back. One swipe is one switch, however long its momentum."],
       ["Smoother switching", "the profile's thread opens while the list slides, and T3 drawing it no longer stalls the slide. Each profile keeps its place in the list."],
       ["Keyboard", "Enter or Space on a profile dot keeps the focus on the dots, and holding Ctrl+Shift+1–9 switches once."],
@@ -99,7 +106,7 @@ export function shouldShowWhatsNew(seen, version, entries = WHATS_NEW) {
 }
 
 /** The notes as headings and lists; the installed version is marked. */
-export function renderNotes(doc, { version, entries = WHATS_NEW, headingLevel = "h3", titles = true } = {}) {
+export function renderNotes(doc, { version, entries = WHATS_NEW, headingLevel = "h3" } = {}) {
   const root = doc.createElement("div");
   root.className = "t3plus-notes";
   for (const entry of entries) {
@@ -123,8 +130,7 @@ export function renderNotes(doc, { version, entries = WHATS_NEW, headingLevel = 
       li.append(strong, ` ${text}`);
       list.append(li);
     }
-    if (titles) block.append(head);
-    block.append(list);
+    block.append(head, list);
     root.append(block);
   }
   return root;
@@ -193,7 +199,7 @@ export function createWhatsNew({ win, doc, area, version, entries = WHATS_NEW })
   /** The sheet with every version's notes, over T3. */
   function open() {
     if (sheet) return;
-    // Opened by hand first (Settings → t3+): it is not opened again on its own once closed.
+    // Opened by hand first: it is not opened again on its own once closed.
     cancelAutoOpen();
     returnFocus = doc.activeElement instanceof win.HTMLElement ? doc.activeElement : null;
     sheet = doc.createElement("div");

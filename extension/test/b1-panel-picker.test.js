@@ -56,15 +56,18 @@ test("a closed shape list draws no faces; the picked one is drawn for its button
   });
   const p = setup();
   p.show();
-  assert.equal(grayFaces + blobSheets, 0, "the bot's own on the button, nothing drawn for a closed list");
+  // The one blob drawn: Bot style's Blobs face, in its segment.
+  const styleBlobs = blobSheets;
+  assert.equal(styleBlobs, 1, "Bot style's Blobs face");
+  assert.equal(grayFaces, 0, "the bot's own on the button, nothing drawn for a closed list");
   p.show({ subagentShape: "robot" });
   assert.equal(grayFaces, 1, "the robot, for the button");
   assert.ok(p.trigger(SHAPE).querySelector(".t3plus-face-icon"));
-  assert.equal(blobSheets, 0);
+  assert.equal(blobSheets, styleBlobs);
   p.trigger(SHAPE).click();
   const classic = Object.keys(BOT_SHAPES).filter((s) => !Object.values(BOT_STYLES).some((style) => style.shapes?.includes(s)));
   assert.equal(grayFaces, classic.length, "every classic shape in gray (the robot drawn once)");
-  assert.equal(blobSheets, BOT_STYLES.blobs.shapes.length, "and every blob");
+  assert.equal(blobSheets - styleBlobs, BOT_STYLES.blobs.shapes.length, "and every blob");
   const shown = p.options(SHAPE);
   assert.equal(shown.length, 1 + Object.keys(BOT_SHAPES).length);
   assert.ok(shown.slice(1).every((o) => o.querySelector(".t3plus-face-icon")), "each shape with its face");

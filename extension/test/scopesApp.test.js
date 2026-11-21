@@ -72,7 +72,7 @@ test("the scope bar: pick a profile (keys work), change a setting: it is that pr
   assert.equal(menu.hidden, true);
   assert.equal(t.doc.activeElement, profile, "focus back on the picker");
   assert.equal(profile.textContent, "Work");
-  assert.equal(t.panel.querySelector(".t3plus-scope-own").textContent, "Nothing of its own yet: change a setting below.");
+  assert.match(t.panel.querySelector(".t3plus-scope-own").textContent, /no settings of its own/i);
 
   // Blue bubbles for Work: Work's own, the base untouched.
   t.panel.querySelector('[aria-label="Chat bubble color"] [aria-label="Blue"]').click();
@@ -86,12 +86,12 @@ test("the scope bar: pick a profile (keys work), change a setting: it is that pr
   assert.equal(bubbles.querySelector(".t3plus-row-scope-text").textContent, "Set for Work.");
   assert.equal(t.panel.querySelector(".t3plus-scope-own").textContent, "1 setting of its own");
   // A shared setting in Work's scope still changes it for everyone.
-  assert.equal(t.row("Profiles").querySelector(".t3plus-row-scope-text").textContent, "The same for every profile and device.");
+  assert.match(t.row("Profiles").querySelector(".t3plus-row-scope-text").textContent, /same for all profiles and devices/i);
 
   // Back to All profiles: the base again, and the row says Work differs.
   t.app.actions.setEditScope({ profile: "*", device: "*" });
   assert.equal(t.bubble(), "", "T3's bubbles for all profiles");
-  assert.equal(bubbles.querySelector(".t3plus-row-scope-text").textContent, "Work keeps its own, so a change here does not show there.");
+  assert.equal(bubbles.querySelector(".t3plus-row-scope-text").textContent, "Work has its own value.");
   assert.equal(bubbles.hasAttribute("data-scope-own"), false);
   // "Use for all": Work follows All profiles for it again.
   const useAll = bubbles.querySelector(".t3plus-row-use-all");
@@ -183,7 +183,7 @@ test("Use for all: who keeps their own (the one deciding what is open marked), i
   await settle();
   t.app.actions.setEditScope({ profile: "*", device: "*" });
   const glass = t.row("Glass");
-  assert.equal(glass.querySelector(".t3plus-row-scope-text").textContent, "Main on Test Mac (open now), All profiles on Test Mac and Work keep their own, so a change here does not show there.", "the deciding scope first and marked, the other one that applies next");
+  assert.equal(glass.querySelector(".t3plus-row-scope-text").textContent, "Main on Test Mac (open), All profiles on Test Mac and Work have their own values.", "the deciding scope first and marked, the other one that applies next");
   const useAll = glass.querySelector(".t3plus-row-use-all");
   assert.equal(useAll.getAttribute("aria-label"), "Use for all: Glass, for every profile and device", "its words first, whatever the title's number");
   assert.equal(t.row("Profiles").querySelector(".t3plus-row-use-all"), null, "a shared row has none");
@@ -193,7 +193,7 @@ test("Use for all: who keeps their own (the one deciding what is open marked), i
   t.app.actions.setEditScope({ profile: "*", device: "*" });
   t.app.actions.setSidebarFeature("profiles", false);
   await settle();
-  assert.equal(glass.querySelector(".t3plus-row-scope-text").textContent, "All profiles on Test Mac (open now) keeps its own, so a change here does not show there.");
+  assert.equal(glass.querySelector(".t3plus-row-scope-text").textContent, "All profiles on Test Mac (open) has its own value.");
   t.app.actions.setSidebarFeature("profiles", true);
   useAll.click();
   await settle();
@@ -250,7 +250,7 @@ test("Settings → Status badges: off to start, a switch of its own per profile;
   const toggle = () => t.panel.querySelector('[role="switch"][aria-label="Status badges"]');
   const row = t.row("Status badges");
   assert.ok(row.contains(toggle()), "its switch, in its own row");
-  assert.equal(row.querySelector(".t3plus-row-desc").textContent, "A small tile on each bot's face that shows what the thread is doing.");
+  assert.match(row.querySelector(".t3plus-row-desc").textContent, /tile.*status/, "a tile that shows the status");
   const previewBadges = () => [...t.panel.querySelectorAll(".t3plus-preview-avatar")].map((a) => a.querySelector(".t3plus-bot-badge") !== null);
   assert.equal(toggle().getAttribute("aria-checked"), "false");
   assert.deepEqual(previewBadges(), [false, false], "the preview's faces have none");
@@ -275,6 +275,26 @@ test("Settings → Status badges: off to start, a switch of its own per profile;
   t.profiles.switchTo("work", 0, { open: false });
   t.app.watcher.flush();
   assert.equal(t.app.state.settings.sidebar.statusBadges, true, "Work's own");
+  t.app.stop();
+  t.profiles.stop();
+});
+
+test("Settings' previews show the scope edited: Work's own Status colors and Look in Work, the base's in All profiles", async () => {
+  const t = await setup();
+  const statusFaces = () => [...t.row("Status colors").querySelectorAll(".t3plus-status-sample .t3plus-bot-swatch")].map((f) => f.style.getPropertyValue("--t3plus-bot-fill"));
+  const bayerMask = () => t.row("Look").querySelector('.t3plus-glow-swatch[data-look="bayer"]').style.getPropertyValue("--t3plus-swatch-mask");
+  const { ditherSwatchMask } = await import("../src/settingsPreviews.js");
+  const off = statusFaces();
+  const baseMask = bayerMask();
+  t.app.actions.setEditScope({ profile: "work", device: "*" });
+  t.app.actions.setSidebarFeature("statusColors", true);
+  t.app.actions.setDitherSize("large");
+  await settle();
+  assert.notDeepEqual(statusFaces(), off, "Work's bots wear their status");
+  assert.equal(bayerMask(), ditherSwatchMask("bayer", "large"), "at Work's pixel size");
+  t.app.actions.setEditScope({ profile: "*", device: "*" });
+  assert.deepEqual(statusFaces(), off, "All profiles: still off");
+  assert.equal(bayerMask(), baseMask);
   t.app.stop();
   t.profiles.stop();
 });

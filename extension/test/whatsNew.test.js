@@ -2,7 +2,8 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { readFile } from "node:fs/promises";
 import { WHATS_NEW, compareVersions, createWhatsNew, renderNotes, shouldShowWhatsNew } from "../src/whatsNew.js";
-import { STORAGE_KEYS } from "../src/config.js";
+import { createAppearancePanel } from "../src/appearancePanel.js";
+import { DEFAULT_SETTINGS, STORAGE_KEYS } from "../src/config.js";
 import { createDom, createFakeChromeStorage, settle, virtualClock } from "./helpers.js";
 
 // The sheet's own delays (1.5 s to settle in, 1 s retries, 2 s after the last key) run
@@ -87,7 +88,8 @@ test("notes render as 'Lead: text' items", () => {
   assert.equal(el.querySelector("li").textContent, "Bots: a row of chips.");
   assert.equal(el.querySelector("strong").textContent, "Bots:");
   assert.match(el.querySelector(".t3plus-notes-title").textContent, /Installed/);
-  assert.equal(renderNotes(doc, { entries: [{ version: "1.0.0", notes: [["A", "b"]] }], titles: false }).querySelector(".t3plus-notes-title"), null);
+  const block = renderNotes(doc, { entries: [{ version: "1.0.0", notes: [["A", "b"]] }] }).querySelector(".t3plus-notes-version");
+  assert.deepEqual([...block.children].map((el) => el.className || el.tagName), ["t3plus-notes-title", "UL"], "each version: its heading, then its notes");
 });
 
 test("the first update with What's New shows it to someone who had t3+ before; a failed read marks nothing", async () => {
@@ -207,7 +209,7 @@ test("opened by hand before it opened on its own: it does not open again once cl
   await t.whatsNew.start();
   assert.equal(listening.size, 2, "its keys, and the typing it waits out");
   await clock.advance(1600);
-  t.whatsNew.open(); // Settings → t3+ → What's New
+  t.whatsNew.open(); // by hand
   t.whatsNew.close();
   assert.equal(listening.size, 1, "the typing watch is gone");
   visibility = "visible";
@@ -229,4 +231,90 @@ test("opened by hand before it opened on its own: it does not open again once cl
   assert.equal(sheet(early), null, "the timed open was called off");
   assert.equal(earlyListening.size, 1);
   early.whatsNew.stop();
+});
+
+/** Settings → t3+ in `t`'s page, with the actions it calls. */
+function settingsPanel(t, version = "0.21.0") {
+  const calls = [];
+  const actions = new Proxy({}, { get: (_, name) => (...args) => calls.push(name) });
+  const panel = createAppearancePanel(t.doc, actions, { desktop: true, version });
+  t.doc.body.append(panel.element);
+  panel.update({ settings: structuredClone(DEFAULT_SETTINGS), image: null, imageUrl: "", message: "", bots: [], botMarker: "🤖", health: [], profiles: null, profileAccents: {} });
+  const toggle = panel.element.querySelector(".t3plus-changelog-toggle");
+  const notes = t.doc.getElementById(toggle.getAttribute("aria-controls"));
+  return { panel, calls, toggle, notes };
+}
+
+test("Settings → t3+ has a Changelog in place of What's New: folded at first, every version newest first when opened, built once, folded by the toggle or Hide", () => {
+  const t = setup(null);
+  const { panel, calls, toggle, notes } = settingsPanel(t, "0.22.1");
+  const words = panel.element.textContent;
+  assert.doesNotMatch(words, /What's new/i, "no What's New section");
+  assert.ok(![...panel.element.querySelectorAll("button")].some((b) => b.textContent === "All versions"), "nor its button to the sheet");
+
+  // A real disclosure button, folded, its notes not built yet.
+  assert.equal(toggle.tagName, "BUTTON");
+  assert.equal(toggle.type, "button", "Enter and Space work, as on any button");
+  assert.equal(toggle.textContent, "Changelog");
+  assert.equal(toggle.getAttribute("aria-expanded"), "false");
+  assert.ok(notes, "aria-controls names the notes");
+  assert.equal(notes.getAttribute("role"), "region");
+  assert.equal(notes.getAttribute("aria-labelledby"), toggle.id);
+  assert.equal(notes.hidden, true);
+  assert.equal(notes.childElementCount, 0, "built only when opened");
+  assert.equal(panel.element.querySelector(".t3plus-notes"), null);
+
+  toggle.click();
+  assert.equal(toggle.getAttribute("aria-expanded"), "true");
+  assert.equal(notes.hidden, false);
+  const versions = [...notes.querySelectorAll(".t3plus-notes-title")].map((head) => head.firstChild.textContent);
+  assert.deepEqual(versions, WHATS_NEW.map((e) => (e.version === "Unreleased" ? "Next update" : e.version)), "every version, in WHATS_NEW's order");
+  const released = versions.filter((v) => /^\d/.test(v));
+  assert.deepEqual(released, [...released].sort((a, b) => compareVersions(b, a)), "newest first");
+  assert.equal(notes.querySelectorAll("li").length, WHATS_NEW.reduce((n, e) => n + e.notes.length, 0), "every note");
+  const [lead, text] = WHATS_NEW[0].notes[0];
+  assert.equal(notes.querySelector("li").textContent, `${lead}: ${text}`, "as renderNotes draws them");
+  const installed = [...notes.querySelectorAll(".t3plus-notes-title")].filter((head) => head.querySelector(".t3plus-notes-badge")?.textContent === "Installed");
+  assert.deepEqual(installed.map((head) => head.firstChild.textContent), ["0.22.1"], "the installed version marked");
+
+  // Folded by the toggle, and opened again on the same notes.
+  const built = notes.querySelector(".t3plus-notes");
+  toggle.click();
+  assert.equal(toggle.getAttribute("aria-expanded"), "false");
+  assert.equal(notes.hidden, true);
+  toggle.click();
+  assert.equal(toggle.getAttribute("aria-expanded"), "true");
+  assert.equal(notes.querySelector(".t3plus-notes"), built, "kept, not built again");
+  assert.equal(notes.querySelectorAll(".t3plus-notes").length, 1);
+
+  // Hide, at the end of the notes: folded, and the focus back on the toggle.
+  const hide = [...notes.querySelectorAll("button")].find((b) => b.textContent === "Hide changelog");
+  hide.focus();
+  hide.click();
+  assert.equal(toggle.getAttribute("aria-expanded"), "false");
+  assert.equal(notes.hidden, true);
+  assert.equal(t.doc.activeElement, toggle);
+  assert.deepEqual(calls, [], "no action: the notes open in place, not in the sheet");
+  t.whatsNew.stop();
+});
+
+test("the sheet after an update still opens once, over Settings with its Changelog, and the Changelog does not open it", async () => {
+  const t = setup("0.20.0");
+  const clock = virtualClock(t.win);
+  const { toggle, notes } = settingsPanel(t);
+  toggle.click();
+  toggle.click();
+  assert.equal(sheet(t), null, "the Changelog opens no sheet");
+  await t.whatsNew.start();
+  await clock.advance(1600);
+  const s = sheet(t);
+  assert.ok(s, "opened on its own after the update");
+  assert.equal(s.querySelectorAll(".t3plus-notes-version").length, WHATS_NEW.length, "every version, as before");
+  assert.equal(t.doc.activeElement, s.querySelector(".t3plus-whatsnew-close"));
+  assert.equal(notes.hidden, true, "the Changelog stays as it was");
+  t.doc.dispatchEvent(new t.win.KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }));
+  assert.equal(sheet(t), null);
+  await clock.advance(3000);
+  assert.equal(sheet(t), null, "once");
+  t.whatsNew.stop();
 });

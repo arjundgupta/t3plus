@@ -594,6 +594,20 @@ export function subagentFace(view, look = SAME_LOOK) {
 }
 
 /**
+ * One subagent's tiny face (`face`: subagentFace's) for its status: still, and dimmed once
+ * it has ended. Settings' Subagents sample draws the same.
+ */
+export function subagentMini(doc, face, status) {
+  const end = SUBAGENT_ENDS.get(status);
+  const mini = doc.createElement("i");
+  mini.className = "t3plus-bot-sub";
+  if (end) mini.setAttribute("data-done", "");
+  mini.style.setProperty("--t3plus-bot-fill", botStill(face.color, face.shape, (end ?? SUBAGENT_WORKING).mood).url);
+  mini.style.setProperty("--t3plus-bot-clip", face.clip);
+  return mini;
+}
+
+/**
  * A third line of tiny faces under a bot that is running subagents: one per
  * subagent, in its bot's shape and color (or the ones Settings sets for them),
  * still, and dimmed once ended: happy eyes when finished, x eyes when failed.
@@ -629,16 +643,7 @@ function syncSubagents(doc, row, subagents, view, look) {
   const summary = `${working} of ${subagents.length} subagents working${failed ? `, ${failed} failed` : ""}`;
   strip.title = `${summary}\n${subagents.map((s) => `${(SUBAGENT_ENDS.get(s.status) ?? SUBAGENT_WORKING).mark} ${s.title || "Subagent"}`).join("\n")}`;
   strip.setAttribute("aria-label", summary);
-  for (const s of subagents.slice(0, MAX_MINIS)) {
-    const end = SUBAGENT_ENDS.get(s.status);
-    const art = botStill(face.color, face.shape, (end ?? SUBAGENT_WORKING).mood);
-    const mini = doc.createElement("i");
-    mini.className = "t3plus-bot-sub";
-    if (end) mini.setAttribute("data-done", "");
-    mini.style.setProperty("--t3plus-bot-fill", art.url);
-    mini.style.setProperty("--t3plus-bot-clip", face.clip);
-    strip.append(mini);
-  }
+  for (const s of subagents.slice(0, MAX_MINIS)) strip.append(subagentMini(doc, face, s.status));
   if (subagents.length > MAX_MINIS) {
     const more = doc.createElement("span");
     more.className = "t3plus-bot-subs-more";
