@@ -6,7 +6,7 @@ Pixel-art bots, profiles, a dithered glow and usage widgets for the T3 Code desk
 
 <img src="media/hero.gif" alt="t3+ new-thread page: glow behind a glass composer, usage widgets, bots in the sidebar" width="100%">
 
-[Install](#install) · [Glow](#glow-and-glass) · [Bots](#bots) · [Profiles](#profiles) · [Status view](#status-view) · [Usage](#usage) · [Settings](#settings) · [Walkthrough](#walkthrough)
+[Install](#install) · [Glow](#glow-and-glass) · [Sidebar](#sidebar) · [Usage](#usage) · [Settings](#settings) · [Walkthrough](#walkthrough)
 
 </div>
 
@@ -45,19 +45,46 @@ Or use your own image:
 
 <img src="media/image-mode.png" alt="Image background behind the new-thread page" width="100%">
 
-## Bots
+## Sidebar
 
 <table>
 <tr>
-<td width="260"><img src="media/bots.gif" alt="Bots in the sidebar: animated faces, latest messages and a subagent strip" width="260"></td>
+<th width="33%">Bots</th>
+<th width="33%">Profiles</th>
+<th width="33%">Status view</th>
+</tr>
+<tr valign="top">
+<td><img src="media/bots.gif" alt="Bots in the sidebar: animated faces, latest messages and a subagent strip" width="100%"></td>
+<td><img src="media/profiles.gif" alt="Swiping between two profiles: the list slides and the sky changes color" width="100%"></td>
+<td><img src="media/status.gif" alt="The Status view: threads grouped by status, with bots in status colors, sliding between profiles" width="100%"></td>
+</tr>
+<tr valign="top">
 <td>
 
 Every thread is a pixel-art bot with a face, a name and its latest message.
 
 - **Moods:** eyes closed when idle, animated while working.
-- **Subagents:** small faces under the bot, one per subagent. Finished ones dim.
-- **Status badges:** a small tile on each face. Off by default.
-- **Looks:** pick a shape and color per bot, or use the project's color.
+- **Subagents:** small faces under the bot. Finished ones dim.
+- **Status badges:** a tile on each face. Off by default.
+- **Looks:** pick a shape and color per bot.
+
+</td>
+<td>
+
+Dots at the bottom of the sidebar. Each profile has its own projects and open thread.
+
+- **Switch:** swipe with two fingers, click a dot, or press Ctrl+Shift+1–9.
+- **Move a project:** drag it onto a dot, or right-click it.
+- **Edit:** right-click a dot to rename it or set its icon and colors.
+
+</td>
+<td>
+
+The button next to the dots groups threads into Needs you, Working, Done and Idle.
+
+- **Complete:** shows threads T3's list hides, like approvals and failed runs.
+- **Status colors:** orange needs you, red failed, yellow working, green done, blue idle. Off by default.
+- **Swipe:** switches profiles here too.
 
 </td>
 </tr>
@@ -70,40 +97,6 @@ Five styles for bots you haven't customized:
 | <img src="media/style-classic.png" width="150" alt="Classic bots"> | <img src="media/style-sports.png" width="150" alt="Sports bots"> | <img src="media/style-space.png" width="150" alt="Space bots"> | <img src="media/style-fruit.png" width="150" alt="Fruit bots"> | <img src="media/style-blobs.gif" width="150" alt="Blobs bots, gently animated"> |
 
 Blobs are always moving. They look around, blink and breathe.
-
-## Profiles
-
-<table>
-<tr>
-<td width="260"><img src="media/profiles.gif" alt="Swiping between two profiles: the list slides and the sky changes color" width="260"></td>
-<td>
-
-Dots at the bottom of the sidebar. Each profile has its own projects and remembers its open thread.
-
-- **Switch:** swipe with two fingers, click a dot, or press Ctrl+Shift+1–9.
-- **Move a project:** drag it onto a dot, or right-click it and pick Move to profile.
-- **Edit:** right-click a dot to rename it, delete it, or set its icon and colors.
-
-</td>
-</tr>
-</table>
-
-## Status view
-
-<table>
-<tr>
-<td width="260"><img src="media/status.gif" alt="The Status view: threads grouped by status, with bots in status colors, sliding between profiles" width="260"></td>
-<td>
-
-The button next to the dots groups the profile's threads by status: Needs you, Working, Done and Idle.
-
-- **Complete:** it also shows threads T3's list hides, like approvals, questions, failed runs and rate limits.
-- **Status colors:** bots take their status's color in this view. Orange needs you, red failed, yellow working, green done, blue idle. Off by default.
-- **Swipe:** switches profiles here too.
-
-</td>
-</tr>
-</table>
 
 ## Usage
 
