@@ -54,7 +54,7 @@ Or use your own image:
 <th width="33%">Status view</th>
 </tr>
 <tr valign="top">
-<td><img src="media/bots.gif" alt="Bots in the sidebar: animated faces, latest messages and a subagent strip" width="100%"></td>
+<td><img src="media/sidebar-bots.gif" alt="Bots in the sidebar: animated faces, latest messages and a subagent strip" width="100%"></td>
 <td><img src="media/profiles.gif" alt="Swiping between two profiles: the list slides and the sky changes color" width="100%"></td>
 <td><img src="media/status.gif" alt="The Status view: threads grouped by status, with bots in status colors, sliding between profiles" width="100%"></td>
 </tr>
