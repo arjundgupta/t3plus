@@ -4,7 +4,7 @@
 
 Pixel-art bots, profiles, a dithered glow and usage widgets for the T3 Code desktop app.
 
-<img src="media/hero.gif" alt="t3+ new-thread page: glow behind a glass composer, usage widgets, bots in the sidebar" width="100%">
+<img src="media/home.gif" alt="t3+ new-thread page: glow behind a glass composer, usage widgets, bots in the sidebar" width="100%">
 
 [Install](#install) · [Glow](#glow-and-glass) · [Sidebar](#sidebar) · [Usage](#usage) · [Settings](#settings) · [Walkthrough](#walkthrough)
 
@@ -33,7 +33,7 @@ Settings are in T3 Code under Settings → t3+.
 
 A dithered glow sits behind a glass composer. It uses your T3 theme color, or any color you pick.
 
-<img src="media/accent.gif" alt="The glow cycling through accent colors" width="100%">
+<img src="media/glow-colors.gif" alt="The glow cycling through accent colors" width="100%">
 
 Three pixel looks, plus a smooth one:
 
