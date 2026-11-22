@@ -66,12 +66,6 @@ export const T3_SELECTORS = Object.freeze({
   /** T3's command palette (⌘K) and its items. */
   commandPalette: '[data-command-palette="true"]',
   commandItem: '[data-slot="command-item"]',
-  /**
-   * Things T3 floats over the chat that the composer must not run under: the
-   * details card, the floating preview window (browser or device mini player),
-   * and a preview's webview.
-   */
-  rightOverlays: 'aside[data-thread-details-panel], section[data-preview-mini-player], [data-preview-viewport]',
   /** A user message's bubble (its color: --message-surface); used in content.css (chat bubbles). */
   userBubble: '[data-message-role="user"] .bg-message',
   /** T3's own trackpad back/forward swipe arrow: a round bubble in a fixed frame; used in content.css.
@@ -287,6 +281,10 @@ export const T3PLUS = Object.freeze({
   settingsAttr: "data-t3plus-settings",
   /** On <html> while the home widgets are shown. */
   homeAttr: "data-t3plus-home",
+  /** On <html> while the usage widgets are on (any page): the new-thread centering keys on it. */
+  widgetsAttr: "data-t3plus-widgets",
+  /** On T3's composer overlay t3+ lays out as the new-thread hero (its measured padding). */
+  heroAttr: "data-t3plus-hero",
   /** On elements t3+ inserted into T3's DOM (bot avatars). */
   ownedAttr: "data-t3plus-owned",
   /** On a row of the sidebar's Status view (statusView.js): the thread it opens. */
@@ -363,6 +361,8 @@ export const DEFAULT_SETTINGS = Object.freeze({
 
 /** Packaged sample image, relative to the extension root. */
 export const SAMPLE_IMAGE_PATH = "assets/sample-spectrum.svg";
+/** The same sample for light pages: its band on a pale field (under the light scrim the dark field read as a grey veil). */
+export const SAMPLE_IMAGE_LIGHT_PATH = "assets/sample-spectrum-light.svg";
 
 /**
  * Bot avatar shapes: CSS clip-path for each. The avatar is a square tile

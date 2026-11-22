@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import { parseBotFeedText, threadSpend } from "../src/botFeed.js";
 import { T3PLUS } from "../src/config.js";
@@ -275,11 +276,12 @@ test("content.css: the glow follows the composer in the same frame; the cards st
   assert.deepEqual(blocksFor("@property --t3plus-glow"), []);
   const placed = blocksFor(".t3plus-glow-pos").filter(({ sel }) => sel.split(",").some((s) => s.trim().endsWith(".t3plus-glow-pos")));
   assert.ok(placed.length > 0 && placed.every(({ body }) => !/transition/.test(body)), "moved in the same frame, never eased behind the composer");
-  assert.match(ruleBody(".t3plus-home"), /max-width:\s*calc\(100vw - 1rem\)/);
+  assert.match(ruleBody(".t3plus-home"), /left:\s*0;[\s\S]*right:\s*0;/, "hung from the composer stack: exactly its width");
+  assert.doesNotMatch(ruleBody(".t3plus-home"), /(^|[;{\s])(max-)?width:/, "no width of its own");
   assert.match(ruleBody(".t3plus-details-pool .t3plus-w-pool-head"), /flex-wrap:\s*wrap/);
 });
 
-test("the cards are as wide as T3's composer, but never wider than the room on the pane's narrower side", async () => {
+test("the cards take the composer's width from CSS (hung from its stack): no width is measured or written, so none lags a resize", async () => {
   const dom = createDom("/draft/abc", HERO);
   const doc = dom.window.document;
   const pane = doc.querySelector('[data-workspace-area="conversation"]');
@@ -287,15 +289,15 @@ test("the cards are as wide as T3's composer, but never wider than the room on t
   const box = (left, width) => () => ({ left, width, right: left + width, top: 0, height: 100, bottom: 100 });
   const { app } = createApp(dom, undefined, { homeFeed: { readCache: async () => null, load: async () => null } });
   await app.start();
-  const widthIn = (paneWidth, composerLeft) => {
+  for (const [paneWidth, composerLeft, composerWidth] of [[1600, 450, 700], [1000, 600, 700], [604, 13, 578]]) {
     pane.getBoundingClientRect = box(0, paneWidth);
-    stack.getBoundingClientRect = box(composerLeft, 700);
+    stack.getBoundingClientRect = box(composerLeft, composerWidth);
     app.watcher.flush();
-    return doc.getElementById(T3PLUS.homeId).style.width;
-  };
-  assert.equal(widthIn(1600, 450), "700px", "centered: the composer's width");
-  assert.equal(widthIn(1000, 600), "52px", "pushed right (T3's details card): twice the room on the right, less a margin");
-  assert.equal(widthIn(400, 380), "0px", "no room at all: no width, never a negative one");
+    const cards = doc.getElementById(T3PLUS.homeId);
+    assert.equal(cards.parentElement, stack, "inside the composer stack");
+    assert.equal(cards.style.width, "", `${paneWidth}: no inline width`);
+  }
+  app.stop?.();
 });
 
 test("pool card: two plain lines, what remains and when it resets (to the minute it means)", () => {
@@ -410,4 +412,68 @@ test("dollars never read $1000, $100.00 or $10.0k", () => {
   for (const [v, want] of cases) assert.equal(formatUsd(v), want, String(v));
   assert.equal(formatUsdExact(999.994), "$999.99");
   assert.equal(formatUsdExact(999.996), "$1.00k");
+});
+
+test("leaving the new-thread page: the hero layout goes in the overlay's class watch, before any check (T3 docked the composer in that commit)", async () => {
+  const dom = createDom("/draft/abc", HERO);
+  const doc = dom.window.document;
+  const overlay = doc.querySelector("[data-chat-composer-overlay]");
+  const { app } = createApp(dom, undefined, { homeFeed: { readCache: async () => null, load: async () => null } });
+  await app.start();
+  app.watcher.flush();
+  const html = doc.documentElement;
+  assert.ok(html.hasAttribute(T3PLUS.homeAttr) && html.hasAttribute(T3PLUS.widgetsAttr), "on the hero, widgets on");
+  assert.ok(overlay.hasAttribute(T3PLUS.heroAttr), "the overlay t3+ lays out is marked");
+  let checks = 0;
+  const schedule = app.watcher.schedule;
+  app.watcher.schedule = () => {
+    checks += 1;
+  };
+  overlay.classList.remove("items-center"); // T3 docks the composer: the first message sent
+  await new Promise((r) => setTimeout(r, 0)); // the observer's callback (a microtask), no check
+  assert.equal(html.hasAttribute(T3PLUS.homeAttr), false, "the page attribute is gone at once");
+  assert.equal(overlay.hasAttribute(T3PLUS.heroAttr), false);
+  assert.equal(overlay.style.getPropertyValue("padding-top"), "", "the hero's padding with it");
+  assert.equal(doc.getElementById(T3PLUS.homeId), null, "the cards with it");
+  assert.ok(html.hasAttribute(T3PLUS.widgetsAttr), "the widgets setting itself stays");
+  app.watcher.schedule = schedule;
+  app.stop?.();
+  assert.equal(html.hasAttribute(T3PLUS.widgetsAttr), false, "and goes when t3+ stops");
+});
+
+test("content.css: the new-thread centering keys on T3's own hero class on the canvas holding it, never on a page attribute alone", () => {
+  const css = readFileSync(new URL("../src/styles/content.css", import.meta.url), "utf8");
+  const hero = '[data-chat-canvas]:has(> [data-chat-composer-overlay="true"][class~="items-center"])';
+  assert.ok(css.includes(`html[data-t3plus-widgets] ${hero} {`), "the room zeroed only on a canvas holding a hero");
+  assert.ok(css.includes(`html[data-t3plus-widgets] ${hero} > aside[data-thread-details-panel="inline"]`), "and only that canvas's inline card hidden");
+  assert.doesNotMatch(css, /html\[data-t3plus-home\] \[data-chat-canvas\]/, "no page-wide zero (it reached side chats and lingered on the thread the first message opened)");
+  assert.doesNotMatch(css, /html\[data-t3plus-home\] aside\[data-thread-details-panel="inline"\]/);
+});
+
+test("the glow follows T3's own slide of the composer (a Web Animation on its lane) every frame until it ends, then once more where it stopped", async () => {
+  const dom = createDom("/env1/a1", `<div data-workspace-area="conversation"></div><div data-chat-canvas><div class="chat-composer-lane"><div data-chat-composer-surface="true"></div></div></div>`);
+  const doc = dom.window.document;
+  const lane = doc.querySelector(".chat-composer-lane");
+  let finish;
+  const animation = { playState: "running", pending: false, finished: new Promise((r) => (finish = r)) };
+  lane.getAnimations = () => (animation.playState === "running" ? [animation] : []);
+  const frames = [];
+  dom.window.requestAnimationFrame = (f) => frames.push(f);
+  dom.window.cancelAnimationFrame = () => {};
+  const updates = [];
+  const { app } = createApp(dom, undefined, { backdropRenderer: { update: (o) => updates.push(o), clear() {} } });
+  await app.start();
+  app.watcher.flush();
+  assert.ok(frames.length > 0, "a frame asked for while the slide runs");
+  const before = updates.length;
+  for (let i = 0; i < 3 && frames.length; i += 1) frames.shift()();
+  assert.ok(updates.length >= before + 3, "placed again every frame");
+  animation.playState = "finished";
+  finish();
+  await new Promise((r) => setTimeout(r, 0));
+  const settled = updates.length;
+  assert.ok(settled > before + 3, "one last placement when it ends");
+  while (frames.length) frames.shift()();
+  assert.ok(updates.length <= settled + 1, "and the frames stop");
+  app.stop?.();
 });

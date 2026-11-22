@@ -110,3 +110,13 @@ test("desktop storage stub: loaded again into the same page (t3+ re-injected), i
   assert.equal(events.length, 1, "another window's save is relayed once, by the new copy only");
   assert.equal(JSON.stringify(events[0].view.newValue), '{"view":"status"}');
 });
+
+test("desktop stub: the sample image and its light version come from the loader's boot data; nothing else resolves", () => {
+  const dom = new JSDOM("<!doctype html><body></body>", { url: "https://app.t3.codes/", runScripts: "outside-only" });
+  dom.window.__t3plusBoot = { sampleUrl: "data:image/svg+xml;base64,DARK", sampleLightUrl: "data:image/svg+xml;base64,LIGHT" };
+  dom.window.eval(readFileSync(new URL("../../inject/page-stub.js", import.meta.url), "utf8"));
+  const { getURL } = dom.window.chrome.runtime;
+  assert.equal(getURL("assets/sample-spectrum.svg"), "data:image/svg+xml;base64,DARK");
+  assert.equal(getURL("assets/sample-spectrum-light.svg"), "data:image/svg+xml;base64,LIGHT");
+  assert.equal(getURL("assets/other.png"), "");
+});

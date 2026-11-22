@@ -74,6 +74,7 @@
     const oldKey = state.cssKeys.get(wc.id) ?? globalThis.__t3plusCssKeys?.get(wc.id);
     if (oldKey) { try { await wc.removeInsertedCSS(oldKey); } catch {} }
     const svg = read("dist/sample-spectrum.svg") || "";
+    const svgLight = read("dist/sample-spectrum-light.svg") || "";
     // This machine as T3 names it, for t3+'s per-machine settings: waited for briefly,
     // else handed over when T3's server answers (t3+ is not held back for it).
     const asking = hostEnvironment();
@@ -86,7 +87,8 @@
     // page is being injected is then seen as newer and pushed (recorded after the
     // awaits, its time was marked as delivered with the older text).
     const feedTimes = Object.fromEntries(Object.entries(FEEDS).map(([kind, feed]) => [kind, mtime(feed.file)]));
-    const boot = { version: VERSION, sampleUrl: `data:image/svg+xml;base64,${Buffer.from(svg).toString("base64")}`, feeds: feeds(), environment };
+    const dataUrl = (text) => (text ? `data:image/svg+xml;base64,${Buffer.from(text).toString("base64")}` : "");
+    const boot = { version: VERSION, sampleUrl: dataUrl(svg), sampleLightUrl: dataUrl(svgLight), feeds: feeds(), environment };
     const key = await wc.insertCSS(files.css);
     if (gone()) {
       uncss(wc, key);

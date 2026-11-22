@@ -865,9 +865,48 @@ test("glow tones: a white, grey or black accent stays grey (not red); a light pa
   const lum = ([r, g, b]) => 0.2126 * r + 0.7152 * g + 0.0722 * b;
   const blue = [59, 130, 246];
   const dark = glowTones(blue, "bayer").slice(1).map(([c]) => lum(c));
-  const light = glowTones(blue, "bayer", true).slice(1).map(([c]) => lum(c));
   assert.ok(dark[0] < dark[3], "dark page: deep edge, bright core");
-  assert.ok(light[0] > light[2] && light[0] > 200, "light page: the edge is a pale tint, near the page");
+  // A light page: one ink (the accent at a mid lightness), laid on at rising alpha, so each
+  // level lands a little deeper and even the core stays light: colored light, not a blot.
+  for (const style of ["bayer", "grain", "spectrum"]) {
+    const tones = glowTones(blue, style, true).slice(1);
+    for (let i = 1; i < tones.length; i += 1) assert.ok(tones[i][1] > tones[i - 1][1], `${style}: alpha rises toward the core`);
+    const scale = 0.6 + 0.4 * 0.45; // the default intensity
+    const landed = tones.map(([c, a]) => lum(c.map((v) => v * a * scale + 255 * (1 - a * scale))));
+    assert.ok(landed[0] > 225, `${style}: the edge is a pale tint, near the page (${landed[0]})`);
+    for (let i = 1; i < landed.length; i += 1) assert.ok(landed[i] < landed[i - 1], `${style}: each level a step deeper`);
+    assert.ok(landed.at(-1) > 120, `${style}: the core stays light (${landed.at(-1)})`);
+  }
+  const [ink] = glowTones(blue, "bayer", true)[1];
+  for (const [c] of glowTones(blue, "bayer", true).slice(2)) assert.deepEqual(c, ink, "one ink on a light page");
+});
+
+test("glow tones on a light page: the ink is the accent at OKLab lightness 0.60-0.68, in its hue, with a clear chroma (a grey stays grey)", async () => {
+  const { rgbToOklch } = await import("../src/ditherMath.js");
+  for (const accent of [[27, 78, 216], [219, 39, 119], [27, 125, 80], [38, 114, 175], [174, 85, 42], [114, 83, 185], [250, 240, 120], [20, 20, 30], [128, 128, 128]]) {
+    const [, C, H] = rgbToOklch(accent);
+    const [ink] = glowTones(accent, "bayer", true)[1];
+    const [l, c, h] = rgbToOklch(ink);
+    const warm = C >= 0.03 && H > 60 && H < 115; // a yellow or amber keeps more lightness (else mustard)
+    assert.ok(l >= 0.595 && l <= (warm ? 0.805 : 0.685), `${accent}: L ${l.toFixed(3)}`);
+    if (C < 0.03) assert.ok(c <= C + 0.005, `${accent}: a grey stays grey`);
+    else {
+      assert.ok(c <= Math.max(C, 0.15) + 0.005, `${accent}: chroma at most the floor or its own`);
+      assert.ok(c >= Math.min(C, 0.1) - 0.005, `${accent}: never paler than its own (or a clear 0.1, where sRGB allows): ${c.toFixed(3)}`);
+      if (c > 0.04) assert.ok(Math.abs(((h - H + 540) % 360) - 180) < 4, `${accent}: hue kept (${H.toFixed(1)} -> ${h.toFixed(1)})`);
+    }
+  }
+  // A muted accent (Grove's green, Ocean's blue) is lifted to a clear chroma: no grey dust at the halo's edge.
+  const [, groveC] = rgbToOklch([27, 125, 80]);
+  const [, inkC] = rgbToOklch(glowTones([27, 125, 80], "bayer", true)[1][0]);
+  assert.ok(inkC > groveC + 0.02, `lifted: ${groveC.toFixed(3)} -> ${inkC.toFixed(3)}`);
+  // Spectrum never turns a green or yellow accent's edge into the olive band.
+  for (const accent of [[27, 125, 80], [250, 240, 120], [174, 85, 42], [249, 115, 22]]) { // Grove, yellow, Ember, orange
+    for (const [c] of glowTones(accent, "spectrum", true).slice(1)) {
+      const [, cc, hh] = rgbToOklch(c);
+      if (cc > 0.04) assert.ok(!(hh > 57 && hh < 113) || Math.abs(hh - rgbToOklch(accent)[2]) < 4, `${accent}: no khaki edge (${hh.toFixed(1)})`);
+    }
+  }
 });
 
 test("blobs: a flat fill in the bot's color and black capsule eyes, a frame per mood, nothing behind them", async () => {

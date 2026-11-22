@@ -112,7 +112,7 @@ export function dropLook(doc) {
 
 // Where content.css reads each theme value (gradient.js computeComposerTheme).
 const THEME_LOOKS = [
-  [LOOK.glow, ["--t3plus-accent", "--t3plus-core", "--t3plus-halo", "--t3plus-fade", "--t3plus-scrim-top", "--t3plus-scrim-bottom", "--t3plus-image"]],
+  [LOOK.glow, ["--t3plus-accent", "--t3plus-core", "--t3plus-halo", "--t3plus-fade", "--t3plus-scrim-top", "--t3plus-scrim-bottom", "--t3plus-image", "--t3plus-image-light"]],
   [LOOK.profilePreview, ["--t3plus-core", "--t3plus-halo", "--t3plus-fade"]],
   [LOOK.glass, ["--t3plus-glass-opacity", "--t3plus-glass-blur"]],
   [LOOK.cells, ["--t3plus-dither-cell"]],

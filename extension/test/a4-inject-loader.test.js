@@ -52,6 +52,7 @@ class FakeContents extends EventEmitter {
     if (body.startsWith("window.__t3plusBoot=")) {
       this.injected = true;
       this.boots += 1;
+      this.boot = body;
       return 0;
     }
     if (body.includes("feedsUpdated")) this.pushes.push([...body.matchAll(/"(home|bots|threads)":"/g)].map((m) => m[1]));
@@ -100,7 +101,7 @@ function fakeElectron() {
 function makeHome(t) {
   const home = mkdtempSync(join(os.tmpdir(), "t3plus-loader-"));
   const root = join(home, ".t3plus");
-  const files = { "inject/page-stub.js": "/* stub */", "dist/content.js": "/* t3+ */", "dist/content.css": "/* css */", "dist/sample-spectrum.svg": "<svg/>", "extension/package.json": '{"version":"9.9.9"}' };
+  const files = { "inject/page-stub.js": "/* stub */", "dist/content.js": "/* t3+ */", "dist/content.css": "/* css */", "dist/sample-spectrum.svg": "<svg/>", "dist/sample-spectrum-light.svg": "<svg id=\"light\"/>", "extension/package.json": '{"version":"9.9.9"}' };
   for (const [file, text] of Object.entries(files)) {
     mkdirSync(dirname(join(root, file)), { recursive: true });
     writeFileSync(join(root, file), text);
@@ -146,6 +147,9 @@ test("loader: injects the app window (only the app's), and re-running it replace
   const popup = T3.window(2, "https://accounts.example.com/sign-in");
   assert.equal(await runLoader(env, T3), "1:injected, 2:skip");
   assert.equal(win.boots, 1);
+  const b64 = (text) => Buffer.from(text).toString("base64");
+  assert.ok(win.boot.includes(`"sampleUrl":"data:image/svg+xml;base64,${b64("<svg/>")}"`), "the sample handed over");
+  assert.ok(win.boot.includes(`"sampleLightUrl":"data:image/svg+xml;base64,${b64('<svg id="light"/>')}"`), "and its light version");
   assert.equal(popup.ran.length, 0, "a sign-in popup gets nothing");
   const first = [...win.css.keys()];
   assert.equal(await runLoader(env, T3), "1:re-injected, 2:skip");

@@ -228,7 +228,7 @@ test("an orphaned copy (extension reloaded) shuts itself down on the next check"
   assert.equal(panelIn(dom.window.document), null);
 });
 
-test("composer lane: follows T3's details card when the right panel moves it (style-only changes)", async () => {
+test("composer lane: t3+ never moves it off the messages; T3 changing its room on the canvas moves the glow in that same callback (before paint), and the card moving alone checks nothing", async () => {
   // ChatView.tsx: the canvas carries T3's room for the details card; the card is
   // an absolutely placed aside whose top T3 animates (transition-[top]).
   const dom = createDom(
@@ -246,47 +246,44 @@ test("composer lane: follows T3's details card when the right panel moves it (st
   const aside = doc.querySelector("aside");
   aside.getBoundingClientRect = box(64, 277);
   const lane = doc.querySelector(".chat-composer-lane");
-  const { app } = createApp(dom);
+  const updates = [];
+  const { app } = createApp(dom, undefined, { backdropRenderer: { update: (o) => updates.push(o), clear() {} } });
   await app.start();
   app.watcher.flush();
-  assert.equal(lane.style.getPropertyValue("--chat-lane-inset-end"), "0px", "card above the composer: full width back");
+  assert.equal(lane.style.getPropertyValue("--chat-lane-inset-end"), "", "T3's room stays, so the composer lines up with the messages");
 
   let scheduled = 0;
   const schedule = app.watcher.schedule;
   app.watcher.schedule = () => {
     scheduled += 1;
   };
-  // T3 moves the card down beside the composer: only its inline style changes,
-  // and mid-transition its rectangle still shows the old spot.
-  aside.style.top = "640px";
-  await settle();
-  assert.ok(scheduled > 0, "an inline style change on the card triggers a check");
-  app.watcher.schedule = schedule;
-  app.watcher.flush();
-  assert.equal(lane.style.getPropertyValue("--chat-lane-inset-end"), "", "card beside the composer: T3's room is kept");
-
-  scheduled = 0;
-  app.watcher.schedule = () => {
-    scheduled += 1;
-  };
+  // T3 gives the composer its room back (the card closed): only the canvas's inline style changes.
+  const before = updates.length;
   doc.getElementById("canvas").style.setProperty("--chat-lane-inset-end", "0px");
   await settle();
   assert.ok(scheduled > 0, "T3 changing the room on the canvas triggers a check");
+  assert.ok(updates.length > before, "and the glow is placed in the observer's callback, before any check runs");
+  assert.equal(lane.style.getPropertyValue("--chat-lane-inset-end"), "");
 
-  // A collapsible inside the card opens: only an attribute deep inside changes.
+  // The card moving (its top animated) or a section opening inside it moves no composer: nothing to do.
   scheduled = 0;
+  aside.style.top = "640px";
+  await settle();
+  assert.equal(scheduled, 0, "the card moving is not watched");
   const section = doc.createElement("section");
   aside.append(section);
   await settle();
   scheduled = 0;
   section.setAttribute("data-state", "open");
   await settle();
-  assert.ok(scheduled > 0, "a section opening inside the card triggers a check");
-  scheduled = 0;
-  section.setAttribute("data-on", "");
-  await settle();
-  assert.equal(scheduled, 0, "other attributes inside the card (t3+'s chart hover) do not");
+  assert.equal(scheduled, 0, "the card's own changes are not watched any more");
+  // A window resize (or zoom) places the glow in the resize event itself, before any check.
+  const atResize = updates.length;
+  dom.window.dispatchEvent(new dom.window.Event("resize"));
+  assert.ok(updates.length > atResize, "placed in the resize event");
   app.watcher.schedule = schedule;
+  app.watcher.flush();
+  assert.equal(lane.style.getPropertyValue("--chat-lane-inset-end"), "", "T3's room, as always");
   app.stop?.();
 });
 
@@ -369,7 +366,7 @@ test("more bots on screen than the remembered-bots cap: storage settles instead 
   app.stop();
 });
 
-test("composer lane: the floating preview window keeps T3's room; a webview docked outside the chat or parked behind it does not", async () => {
+test("composer lane: stays where T3 puts it whatever is on the right (a floating preview, a docked or parked webview)", async () => {
   const dom = createDom(
     "/env/thread",
     `<div data-workspace-area="conversation"></div>
@@ -392,10 +389,11 @@ test("composer lane: the floating preview window keeps T3's room; a webview dock
   const { app } = createApp(dom);
   await app.start();
   app.watcher.flush();
-  assert.equal(lane.style.getPropertyValue("--chat-lane-inset-end"), "", "the mini player is beside the composer: T3's room stays");
+  assert.equal(lane.style.getPropertyValue("--chat-lane-inset-end"), "", "the mini player beside the composer: T3's room");
   mini.remove();
   app.watcher.flush();
-  assert.equal(lane.style.getPropertyValue("--chat-lane-inset-end"), "0px", "docked or parked webviews do not block centering");
+  assert.equal(lane.style.getPropertyValue("--chat-lane-inset-end"), "", "nothing beside it: still T3's room, never t3+'s");
+  assert.equal(lane.hasAttribute("data-t3plus-lane-slide"), false);
   app.stop();
 });
 

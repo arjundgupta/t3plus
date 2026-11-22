@@ -1279,6 +1279,13 @@ export function createAppearancePanel(doc, actions, { desktop = false, version =
 
     const usingUpload = g.imageSource === "upload" && image;
     thumb.style.backgroundImage = imageUrl ? `url("${imageUrl.replace(/"/g, '\\"')}")` : "";
+    // The sample's light version, shown by content.css on a light page (an upload has none).
+    const lightUrl = !usingUpload && state.imageLightUrl ? `url("${state.imageLightUrl.replace(/"/g, '\\"')}")` : "";
+    if (thumb.style.getPropertyValue("--t3plus-thumb-light") !== lightUrl) {
+      if (lightUrl) thumb.style.setProperty("--t3plus-thumb-light", lightUrl);
+      else thumb.style.removeProperty("--t3plus-thumb-light");
+    }
+    thumb.toggleAttribute("data-sample-light", Boolean(lightUrl));
     setAttr(sampleButton, "aria-pressed", String(!usingUpload));
     if (removeButton.disabled !== !image) removeButton.disabled = !image;
     // Screenshot mode: a file name can be personal ("passport-scan.png").

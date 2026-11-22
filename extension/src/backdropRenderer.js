@@ -241,14 +241,17 @@ export function createBackdropRenderer({ win, doc, delayMs = 120, marksPage = tr
     return imageCache.get(src);
   }
 
-  /** Draws `img` like object-fit: cover (centered on the composer), then the page-color scrim. */
-  function drawCoverWithScrim(ctx, img, w, h, job) {
+  /** Draws `img` like object-fit: cover (centered on the composer). */
+  function drawCover(ctx, img, w, h, job) {
     const scale = Math.max(w / img.naturalWidth, h / img.naturalHeight);
     const iw = img.naturalWidth * scale;
     const ih = img.naturalHeight * scale;
     const x = Math.min(0, Math.max(w - iw, job.cx * w - iw / 2));
     ctx.imageSmoothingQuality = "high";
     ctx.drawImage(img, x, (h - ih) / 2, iw, ih);
+  }
+  /** The page-color scrim over the image: stronger at the top, where messages are read. */
+  function drawScrim(ctx, w, h, job) {
     const [r, g, b] = job.background;
     const scrim = ctx.createLinearGradient(0, 0, 0, h);
     scrim.addColorStop(0, `rgba(${r},${g},${b},${job.scrimTop})`);
@@ -325,10 +328,16 @@ export function createBackdropRenderer({ win, doc, delayMs = 120, marksPage = tr
     if (!ctx) throw new Error("no 2d canvas");
     const img = await loadImage(job.imageSrc);
     if (!live()) return null;
-    drawCoverWithScrim(ctx, img, job.cols, job.rows, job);
+    // Dark: the scrim, then the dither (the pixel steps show through the dark veil).
+    // Light: the dither, then the scrim, so the steps shrink with it and the page's own
+    // tint stays. Dithered after a near-white scrim, the image snapped to five levels of
+    // grey: a heavy 50% checkerboard over the top of the page.
+    drawCover(ctx, img, job.cols, job.rows, job);
+    if (!job.light) drawScrim(ctx, job.cols, job.rows, job);
     const data = ctx.getImageData(0, 0, job.cols, job.rows);
     if (!(await inSlices(job.rows, live, (fromRow, toRow) => ditherRgbInPlace(data.data, job.cols, job.rows, 5, job.style, fromRow, toRow)))) return null;
     ctx.putImageData(data, 0, 0);
+    if (job.light) drawScrim(ctx, job.cols, job.rows, job);
     const blob = await new Promise((resolve) => canvas.toBlob(resolve, "image/png"));
     if (!blob) throw new Error("the image could not be encoded");
     return { near: blob };
@@ -452,7 +461,7 @@ export function createBackdropRenderer({ win, doc, delayMs = 120, marksPage = tr
    * in a thread. update() and warm() both plan here, so a glow drawn ahead is kept under
    * the key a real update asks for.
    */
-  function plan({ mode, settings, imageSrc = null, host, rect, cx, composerWidth }) {
+  function plan({ mode, settings, imageSrc = null, imageSrcLight = null, host, rect, cx, composerWidth }) {
     const dpr = win.devicePixelRatio || 1;
     const g = settings.composerGradient;
     const cellCss = DITHER_CELL_CSS[g.ditherSize] ?? DITHER_CELL_CSS.medium;
@@ -499,15 +508,25 @@ export function createBackdropRenderer({ win, doc, delayMs = 120, marksPage = tr
     const stamp = theme();
     const page = toRgb(themeColor("--background", "#0a0a0a", host, stamp), "#0a0a0a");
     const light = Boolean(page) && 0.2126 * page[0] + 0.7152 * page[1] + 0.0722 * page[2] > 140;
+    job.light = light;
     if (mode === "half-circle") {
-      job.accent = toRgb(g.accent === "theme" ? themeColor("--primary", "#6d7cff", host, stamp) : g.accent, "#6d7cff");
+      // "Theme": T3's palette accent on a light page (its green, blue, orange or violet;
+      // --primary there is the message-action color, an ochre or teal on some palettes),
+      // else --primary. T3's default palette sets no accent: --primary, as before. Dark
+      // keeps --primary.
+      const themed = (light && themeColor("--app-theme-accent", "", host, stamp)) || themeColor("--primary", "#6d7cff", host, stamp);
+      job.accent = toRgb(g.accent === "theme" ? themed : g.accent, "#6d7cff");
       job.intensity = i;
-      job.light = light;
     } else {
       if (!imageSrc) return { job, key: null, drop };
+      // The sample's light version on a light page: under the page-color scrim its dark
+      // field read as a flat grey veil. Already pale, it takes the lighter scrim (the
+      // heavy one washed it out to a blank page); an upload on light keeps the heavy one.
+      const paleSample = Boolean(light && imageSrcLight);
+      imageSrc = paleSample ? imageSrcLight : imageSrc;
       job.imageSrc = imageSrc;
       job.background = page;
-      Object.assign(job, light ? { scrimTop: 1 - i * 0.3, scrimBottom: 1 - i * 0.5 } : { scrimTop: 1 - i * 0.55, scrimBottom: 1 - i * 0.9 });
+      Object.assign(job, light && !paleSample ? { scrimTop: 1 - i * 0.3, scrimBottom: 1 - i * 0.5 } : { scrimTop: 1 - i * 0.55, scrimBottom: 1 - i * 0.9 });
     }
     if (!job.accent && !job.background) return { job, key: null, drop };
     // An image keys by a digest of its source (a data URL can be megabytes); the glow by
@@ -545,7 +564,7 @@ export function createBackdropRenderer({ win, doc, delayMs = 120, marksPage = tr
    *   set, centers the glow vertically there (new-thread page); composerWidth is the
    *   message box's width in CSS px.
    */
-  function update({ mode, settings, imageSrc, host, hostRect = null, cx, cy = null, wide = false, composerWidth = 0 }) {
+  function update({ mode, settings, imageSrc, imageSrcLight = null, host, hostRect = null, cx, cy = null, wide = false, composerWidth = 0 }) {
     if (!mode) {
       if (lastKey || scheduledKey || layer) clear();
       return;
@@ -557,7 +576,7 @@ export function createBackdropRenderer({ win, doc, delayMs = 120, marksPage = tr
     const rect = hostRect ?? host.getBoundingClientRect();
     if (rect.width < 2 || rect.height < 2) return; // not laid out: keep what is shown
     ensureLayer(host);
-    const { job, key, drop } = plan({ mode, settings, imageSrc, host, rect, cx, composerWidth });
+    const { job, key, drop } = plan({ mode, settings, imageSrc, imageSrcLight, host, rect, cx, composerWidth });
     if (mode === "half-circle") placeSprites(job, rect, cx, cy == null ? rect.height + drop : cy * rect.height, wide);
     else imageBox = { w: job.cols * job.cell, h: job.rows * job.cell };
     if (!key) return;

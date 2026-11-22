@@ -43,6 +43,14 @@ test("image mode exposes the image URL and a top-heavy scrim", () => {
   assert.equal(theme.vars["--t3plus-scrim-bottom"], "46%");
 });
 
+test("image mode: the sample's light version goes with it (CSS picks it on a light page); an upload has none", () => {
+  const sample = computeComposerTheme(settings({ mode: "image" }), "data:image/svg+xml;base64,AA", "data:image/svg+xml;base64,BB");
+  assert.equal(sample.vars["--t3plus-image-light"], 'url("data:image/svg+xml;base64,BB")');
+  const upload = computeComposerTheme(settings({ mode: "image" }), "blob:https://app.t3.codes/1", null);
+  assert.equal(upload.vars["--t3plus-image-light"], null);
+  assert.equal(computeComposerTheme(settings({ mode: "image" }), null, "data:x").vars["--t3plus-image-light"], null, "no image, no light version");
+});
+
 test("glass is on by default and strength maps to opacity and blur", () => {
   const theme = computeComposerTheme(normalizeSettings({}), null);
   assert.equal(theme.glass, true);

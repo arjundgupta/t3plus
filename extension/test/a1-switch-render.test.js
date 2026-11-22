@@ -208,7 +208,8 @@ function referenceGlow({ width, height, cx, rgb, intensity, style, sprite, light
         ? strength(0.5 + ((x + 0.5) / width - 0.5) * sprite.spanX, 0.5 + ((y + 0.5) / height - 0.5) * sprite.spanY, 0.5, 0.5)
         : strength((x + 0.5) / width, (y + 0.5) / height, cx, 1 + GLOW_SHAPE.drop);
       if (m <= 0) continue;
-      const level = ditherLevel(Math.min(m, 0.9), tones.length, threshold(x, y));
+      // A light page caps the strength a little lower (no solid band of the top level).
+      const level = ditherLevel(Math.min(m, light ? 0.85 : 0.9), tones.length, threshold(x, y));
       if (!level) continue;
       const [color, a] = tones[level];
       out.set([...color, Math.round(255 * a * (0.6 + 0.4 * intensity))], (y * width + x) * 4);

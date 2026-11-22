@@ -9,6 +9,13 @@ import { STORAGE_KEYS, T3PLUS } from "./config.js";
 
 export const WHATS_NEW = Object.freeze([
   {
+    version: "0.23.2",
+    notes: [
+      ["Light themes", "t3+ looks right on every light theme: a soft glow in the theme's color, with tinted glass, widgets and settings."],
+      ["Centered prompt bar", "the prompt bar always lines up with the messages."],
+    ],
+  },
+  {
     version: "0.23.1",
     notes: [
       ["Simpler settings", "every row in Settings → t3+ is one short line, with small previews where a picture helps."],

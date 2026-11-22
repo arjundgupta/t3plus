@@ -53,7 +53,7 @@ test("Look: each choice shows its own swatch, at the pixel size set and in the g
   const size = DEFAULT_SETTINGS.composerGradient.ditherSize;
   for (const look of LOOKS) assert.equal(p.mask(p.swatch("Look", look)), ditherSwatchMask(look, size), look);
   assert.equal(p.mask(p.swatch("Look", "smooth")), "", "Smooth has no pixels: a gradient");
-  assert.equal(p.swatch("Look", "bayer").style.getPropertyValue("--t3plus-swatch-glow"), "var(--primary, #6d7cff)", "Theme: T3's own color");
+  assert.equal(p.swatch("Look", "bayer").style.getPropertyValue("--t3plus-swatch-glow"), "var(--t3plus-hue, #6d7cff)", "Theme: T3's own color (t3+'s theme hue)");
 
   p.show({ gradient: { ditherSize: "large", accent: "#22d3ee" } });
   for (const look of LOOKS) assert.equal(p.mask(p.swatch("Look", look)), ditherSwatchMask(look, "large"), `${look}, large`);

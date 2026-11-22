@@ -13,8 +13,8 @@ import { BOT_STATUS, BOT_STATUS_COLORS, STATUS_GROUPS } from "./statusView.js";
 /** The bot the samples show: a plain face in a color of its own. */
 const SAMPLE_BOT = Object.freeze({ shape: "circle", color: "purple" });
 
-/** The glow color as CSS: "theme" is T3's own (its primary). */
-export const glowColorCss = (accent) => (accent === "theme" ? "var(--primary, #6d7cff)" : accent);
+/** The glow color as CSS: "theme" is T3's own (t3+'s theme hue: --primary, or the palette accent on light). */
+export const glowColorCss = (accent) => (accent === "theme" ? "var(--t3plus-hue, #6d7cff)" : accent);
 
 /** A face that stands still, as one of t3+'s avatars draws it (applyAvatarVars): one frame, so never stepped. */
 function stillView(color, shape, mood, badge = null) {

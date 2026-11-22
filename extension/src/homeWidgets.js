@@ -41,8 +41,12 @@ const PROVIDER_COLORS = {
   pi: "#4d9f8a",
 };
 const PROVIDER_LABELS = { __proto__: null, codex: "Codex", claude: "Claude", grok: "Grok", cursor: "Cursor", opencode: "OpenCode", antigravity: "Antigravity", pi: "Pi" };
-/** Pool line colors: blue for Codex, T3's Claude orange for Claude. */
-const POOL_COLORS = { codex: "#6f9cf5", claude: "#d97757" };
+/**
+ * Pool line colors: blue for Codex, T3's Claude orange for Claude. Codex's is a CSS
+ * variable, a step deeper on light pages (content.css), where #6f9cf5 read washed out
+ * beside the orange; the charts resolve it through the computed style.
+ */
+const POOL_COLORS = { codex: "var(--t3plus-pool-codex, #6f9cf5)", claude: "#d97757" };
 
 /** Heatmap length: 20 weeks (the feed carries 140 days). */
 export const HEAT_WEEKS = 20;
@@ -277,7 +281,9 @@ export function createHomeView(doc, { variant = "home" } = {}) {
     const recorded = pool.recorded.length > 1 ? pool.recorded : [{ t: pool.now - span * 0.02, left: pool.left }, { t: pool.now, left: pool.left }];
     const svg = svgEl("svg", { viewBox: `0 0 ${W} ${H}`, preserveAspectRatio: "none", class: "t3plus-w-plot-svg", "data-t3plus-dither-chart": "area", "aria-hidden": "true" });
     svg.style.setProperty("--pool-color", color);
-    svg.append(svgEl("path", { d: `M0 ${y(pool.cap / 2)}H${W}M0 ${H - 0.5}H${W}`, class: "t3plus-w-grid" }));
+    svg.append(svgEl("path", { d: `M0 ${y(pool.cap / 2)}H${W}`, class: "t3plus-w-grid" }));
+    // The baseline on its own: opaque on light pages, where the gridlines are see-through (content.css).
+    svg.append(svgEl("path", { d: `M0 ${H - 0.5}H${W}`, class: "t3plus-w-grid t3plus-w-base" }));
     const line = (points) => points.map((p, i) => `${i ? "L" : "M"}${x(p.t).toFixed(1)} ${y(p.left).toFixed(1)}`).join("");
     const area = (points) => `${line(points)}L${x(points.at(-1).t).toFixed(1)} ${H}L${x(points[0].t).toFixed(1)} ${H}Z`;
     svg.append(svgEl("path", { d: area(recorded), class: "t3plus-w-area" }));
@@ -411,7 +417,8 @@ export function createHomeView(doc, { variant = "home" } = {}) {
     const step = W / (days.length - 1);
     const y = (v) => H - (v / max) * (H - 6);
     const svg = svgEl("svg", { viewBox: `0 0 ${W} ${H}`, preserveAspectRatio: "none", class: "t3plus-w-plot-svg", "data-t3plus-dither-chart": "line", "aria-hidden": "true" });
-    svg.append(svgEl("path", { d: `M0 ${y(max)}H${W}M0 ${y(max / 2)}H${W}M0 ${H - 0.5}H${W}`, class: "t3plus-w-grid" }));
+    svg.append(svgEl("path", { d: `M0 ${y(max)}H${W}M0 ${y(max / 2)}H${W}`, class: "t3plus-w-grid" }));
+    svg.append(svgEl("path", { d: `M0 ${H - 0.5}H${W}`, class: "t3plus-w-grid t3plus-w-base" }));
     for (const s of series) {
       const line = s.values.map((v, i) => `${i ? "L" : "M"}${(i * step).toFixed(1)} ${y(v).toFixed(1)}`).join("");
       const area = svgEl("path", { d: `${line}L${W} ${H}L0 ${H}Z`, fill: PROVIDER_COLORS[s.provider] ?? "var(--muted-foreground)", "fill-opacity": "0.12" });

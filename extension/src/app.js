@@ -18,7 +18,7 @@ import {
 } from "./bots.js";
 import { LOOK, applyComposerTheme, dropLook, measureBackdropAnchor, setLook, syncBackdropHosts, syncComposerSurfaces } from "./composer.js";
 import { botMetaText, botPreviewText, botSubagents, threadIdFromKey, threadSpend } from "./botFeed.js";
-import { BOT_FEED_POLL_MS, BOT_LIMITS, DEFAULT_BOT_MARKER, DOM_CHECK_THROTTLE_MS, HOME_FEED_POLL_MS, SAMPLE_IMAGE_PATH, STORAGE_KEYS, T3_ATTRS, T3_CLASSES, T3_SELECTORS, T3PLUS, USAGE_ROUTE, selectorParts } from "./config.js";
+import { BOT_FEED_POLL_MS, BOT_LIMITS, DEFAULT_BOT_MARKER, DOM_CHECK_THROTTLE_MS, HOME_FEED_POLL_MS, SAMPLE_IMAGE_LIGHT_PATH, SAMPLE_IMAGE_PATH, STORAGE_KEYS, T3_ATTRS, T3_CLASSES, T3_SELECTORS, T3PLUS, USAGE_ROUTE } from "./config.js";
 import { createHomeView } from "./homeWidgets.js";
 import { createUsageDither } from "./usageDither.js";
 import { createDemoMode } from "./demoMode.js";
@@ -123,6 +123,11 @@ export function createT3Plus(deps) {
   // re-injected t3+ ran twice (two glows, two panels).
   let stopped = false;
 
+  /** The sample's light version, while the sample (not an upload) is the image shown. */
+  function sampleLightUrl(settings = state.settings) {
+    const usesUpload = settings.composerGradient.imageSource === "upload" && state.image;
+    return usesUpload ? null : assetUrl(SAMPLE_IMAGE_LIGHT_PATH) || null;
+  }
   function resolveImageUrl() {
     const { imageSource } = state.settings.composerGradient;
     if (imageSource === "upload" && state.image) {
@@ -305,6 +310,8 @@ export function createT3Plus(deps) {
       settings: resolveSettings(state.base, state.scopes, edit),
       bots: botsForPanel(),
       botMarker: DEFAULT_BOT_MARKER,
+      // The sample's light version (the Image row's thumbnail on a light page); none for an upload.
+      imageLightUrl: sampleLightUrl(),
       // Profiles (their icons and colors), when they are on, and each one's glow color
       // (its preview in the Profiles card).
       profiles: profiles && profilesOn() ? { list: profiles.list, active: profiles.active, sky: Boolean(deps.profiles.hasSky?.()) } : null,
@@ -328,7 +335,7 @@ export function createT3Plus(deps) {
     const s = state.settings;
     setBotStyle(s.sidebar.botStyle);
     state.imageUrl = resolveImageUrl();
-    applyComposerTheme(doc, computeComposerTheme(s, state.imageUrl));
+    applyComposerTheme(doc, computeComposerTheme(s, state.imageUrl, sampleLightUrl()));
     // What "Default" means in a profile's glow and bubble swatches (the dot's editor):
     // the value for all profiles, as it is on this machine.
     const wide = resolveSettings(state.base, state.scopes, { profile: ALL, device: device ?? ALL });
@@ -789,102 +796,56 @@ export function createT3Plus(deps) {
     }
   }
 
-  // ---------- Composer centering ----------
-  // T3 shifts the composer left by the room it keeps for the details card or a
-  // preview window on the right (--chat-lane-inset-end), even when that card
-  // sits above the composer and could never touch it. Then the composer and
-  // its glow sit left of the pane's middle. When nothing on the right overlaps
-  // the composer's height, t3+ gives the composer's lane its full width back
-  // (the timeline above keeps T3's room); when something does, T3's room stays.
-  // CSS animates the change, and the glow follows it frame by frame.
-  let centeredLane = null;
-  let laneDecided = null; // the lane the last measured decision was made for
-  const lanesSeen = new WeakSet(); // lanes already decided on, laid out (on screen)
-  const overlayHooks = selectorParts(T3_SELECTORS.rightOverlays);
-  const rightOverlays = () => overlayHooks.flatMap((hook) => [...doc.querySelectorAll(hook)]);
-  function releaseLane() {
-    // T3's room comes back at once (no slide): something beside the composer needs it now.
-    centeredLane?.removeAttribute("data-t3plus-lane-slide");
-    centeredLane?.style.removeProperty("--chat-lane-inset-end");
-    centeredLane = null;
-  }
-  // Where a right overlay is heading, not where it is mid-slide: T3 animates
-  // the details card's top (150 ms), so a check made as it starts moving saw
-  // the old spot and kept the composer under the card (or out from under it).
-  function overlayBox(el) {
-    const r = el.getBoundingClientRect();
-    const top = Number.parseFloat(el.style?.top);
-    const parent = el.offsetParent ?? el.parentElement;
-    if (!Number.isFinite(top) || !parent) return r;
-    const t = parent.getBoundingClientRect().top + (parent.clientTop || 0) + top;
-    return { left: r.left, right: r.right, width: r.width, height: r.height, top: t, bottom: t + r.height };
-  }
-  /**
-   * Whether `el` is on screen over the chat beside the composer card `c`. A
-   * webview docked in the right panel is beside the chat, not over it, and T3
-   * parks the webviews of background tabs at the top left behind everything
-   * (negative z-index, or hidden): neither keeps the composer from centering.
-   */
-  function besideComposer(el, c, canvasRect) {
-    const r = overlayBox(el);
-    if (!(r.width > 0 && r.height > 0)) return false;
-    if (r.right <= canvasRect.left || r.left >= canvasRect.right) return false;
-    if (!(r.top < c.bottom + 16 && r.bottom > c.top - 16)) return false;
-    const cs = win.getComputedStyle(el);
-    if (cs.visibility === "hidden" || cs.display === "none" || Number.parseFloat(cs.zIndex) < 0) return false;
-    return true;
-  }
-  /** `measure`: something may have moved the lane, the composer or what is beside it (else the last decision stands). */
-  function syncComposerLane(measure) {
-    const lane = state.settings.composerGradient.enabled && !findHero() ? doc.querySelector(T3_SELECTORS.composerLane) : null;
-    if (lane !== centeredLane) releaseLane();
-    if (!lane) laneDecided = null; // (the glow off, the new-thread page): decided anew when back
-    if (!lane || (!measure && lane === laneDecided)) return;
-    laneDecided = lane;
-    const canvas = lane.closest(T3_SELECTORS.chatCanvas) ?? lane.parentElement;
-    const inset = Number.parseFloat(win.getComputedStyle(canvas).getPropertyValue("--chat-lane-inset-end")) || 0;
-    const card = lane.querySelector(T3_SELECTORS.composerSurface) ?? lane;
-    const c = card.getBoundingClientRect();
-    const canvasRect = canvas.getBoundingClientRect();
-    const blocked = inset <= 0 || c.height <= 0 || rightOverlays().some((el) => besideComposer(el, c, canvasRect));
-    const seen = lanesSeen.has(lane);
-    if (c.height > 0) lanesSeen.add(lane);
-    if (blocked) {
-      releaseLane();
-      return;
-    }
-    centeredLane = lane;
-    if (lane.style.getPropertyValue("--chat-lane-inset-end") !== "0px") {
-      // Only t3+'s own centering slides (content.css), and only a lane already on screen:
-      // one T3 has just mounted (a thread opening) is centered from its first frame, not
-      // slid in sideways. Room T3 makes for a card that overlaps the composer is made at
-      // once, as T3 does, or the composer ran under the card while it slid.
-      lane.toggleAttribute("data-t3plus-lane-slide", seen);
-      lane.style.setProperty("--chat-lane-inset-end", "0px");
+  // ---------- Composer lane ----------
+  // T3 keeps the room for the details card or a preview window on the right
+  // (--chat-lane-inset-end on the chat canvas) on the timeline and on the composer's
+  // lane alike, so the composer always lines up with the messages above it. t3+
+  // leaves that room alone: the composer is centered on the chat column, never on the
+  // pane while the messages keep T3's room (it sat off to one side of them). The glow
+  // follows the composer wherever T3 puts it.
+  /** An earlier t3+ build gave the composer's lane its own room: taken off, so T3's layout holds. */
+  function clearLaneOverrides() {
+    for (const lane of doc.querySelectorAll(T3_SELECTORS.composerLane)) {
+      lane.removeAttribute("data-t3plus-lane-slide");
+      // Only the zero it wrote: T3 keeps its own room on the chat canvas, not on the lane.
+      if (lane.style.getPropertyValue("--chat-lane-inset-end").trim() === "0px") lane.style.removeProperty("--chat-lane-inset-end");
     }
   }
-  // While the lane's padding animates, nothing else changes in the DOM or in
-  // size: the glow is moved every frame until the transition ends.
+  // While T3 slides the composer's lane (its draft-to-thread move when the first message is
+  // sent, a Web Animation on the lane), nothing else changes in the DOM or in size: the
+  // glow is moved every frame until the slide ends. The rect t3+ measures includes the
+  // animation's transform, so measured once at its start the glow stayed where the
+  // composer started.
   let laneFrame = null;
-  let laneUntil = 0;
-  function followLane(event) {
-    if (!event.target?.classList?.contains(T3_CLASSES.composerLane) || !String(event.propertyName).startsWith("padding")) return;
-    if (event.type !== "transitionrun") {
-      // Settled: one last placement where the composer stopped (the frame still asked for has nothing left to do).
-      laneUntil = 0;
-      if (laneFrame !== null) win.cancelAnimationFrame?.(laneFrame);
-      laneFrame = null;
-      timed("dither", () => syncDither(true));
-      return;
+  const lanesAnimating = new Set(); // the slides followed, until each settles
+  const lanesSeen = new WeakSet(); // every slide ever followed (one is never followed twice)
+  function followLaneAnimations() {
+    const running = doc.querySelector(T3_SELECTORS.composerLane)?.getAnimations?.().filter((a) => !lanesSeen.has(a) && (a.pending || a.playState === "running")) ?? [];
+    for (const a of running) {
+      lanesSeen.add(a);
+      lanesAnimating.add(a);
+      a.finished.catch(() => {}).finally(() => {
+        lanesAnimating.delete(a);
+        if (lanesAnimating.size || stopped) return;
+        // The last one ended: one more placement where the composer stopped.
+        stopFollowing();
+        measureDue = true;
+        timed("dither", () => syncDither(true));
+      });
     }
-    laneUntil = nowMs() + 600;
-    if (laneFrame !== null) return;
-    const step = () => {
-      laneFrame = null;
-      timed("dither", () => syncDither(true));
-      if (nowMs() < laneUntil) laneFrame = win.requestAnimationFrame(step);
-    };
-    laneFrame = win.requestAnimationFrame?.(step) ?? null;
+    if (lanesAnimating.size && laneFrame === null) {
+      const step = () => {
+        laneFrame = null;
+        if (stopped || !lanesAnimating.size) return;
+        timed("dither", () => syncDither(true));
+        if (laneFrame === null) laneFrame = win.requestAnimationFrame(step);
+      };
+      laneFrame = win.requestAnimationFrame?.(step) ?? null;
+    }
+  }
+  function stopFollowing() {
+    if (laneFrame !== null) win.cancelAnimationFrame?.(laneFrame);
+    laneFrame = null;
   }
 
   let lastAnchor = null;
@@ -913,7 +874,7 @@ export function createT3Plus(deps) {
     if (!renderer) return;
     const look = state.settings;
     const g = look.composerGradient;
-    const theme = computeComposerTheme(look, state.imageUrl);
+    const theme = computeComposerTheme(look, state.imageUrl, sampleLightUrl(look));
     const preview = panel.element.isConnected ? panel.element.querySelector(".t3plus-preview-pane") : null;
     // With t3+'s settings open, the live preview is what is on screen: T3 keeps the
     // last thread rendered behind its Settings, and drawn into that pane instead, the
@@ -922,7 +883,10 @@ export function createT3Plus(deps) {
     // On the new-thread page every check places the composer (syncHome): measured each time.
     const hero = pane ? findHero() : null;
     if (!pane) glowAt = null;
-    else if (measure || hero || glowAt?.pane !== pane) glowAt = measureGlow(pane, hero);
+    else if (measure || hero || glowAt?.pane !== pane || Boolean(glowAt?.hero) !== Boolean(hero)) {
+      glowAt = measureGlow(pane, hero);
+      followLaneAnimations();
+    }
     // The composer's center across the pane, for the CSS gradient (no dither): on the pane
     // itself (on <html> every change restyled the whole page), and only while the CSS glow
     // is shown (an inherited property written every frame of a slide restyles the whole
@@ -940,6 +904,8 @@ export function createT3Plus(deps) {
       mode: g.dither ? theme.mode : null,
       settings: look,
       imageSrc: g.imageSource === "upload" && state.image ? state.image.dataUrl : assetUrl(SAMPLE_IMAGE_PATH),
+      // The sample has a version for light pages (the renderer picks it there); an upload is shown as it is.
+      imageSrcLight: g.imageSource === "upload" && state.image ? null : assetUrl(SAMPLE_IMAGE_LIGHT_PATH) || null,
       host: pane ?? preview,
       ...size,
       cy: glowAt?.cy ?? null,
@@ -1119,7 +1085,18 @@ export function createT3Plus(deps) {
   let heroOverlay = null;
   function clearHeroVars() {
     heroOverlay?.style.removeProperty("padding-top");
+    heroOverlay?.removeAttribute(T3PLUS.heroAttr);
     heroOverlay = null;
+  }
+  /** Off the new-thread page: t3+'s hero layout goes at once (also from the overlay's
+   *  class watch, the moment T3 docks the composer), the attribute first. */
+  function leaveHero() {
+    doc.documentElement.removeAttribute(T3PLUS.homeAttr);
+    clearHeroVars();
+    // T3 often drops the cards itself (navigation re-renders the overlay), so the
+    // tooltip is hidden whether or not they were still in the page.
+    if (home.element.isConnected) home.element.remove();
+    home.hide();
   }
   const setInline = (el, name, value) => {
     if (el.style.getPropertyValue(name) !== value) el.style.setProperty(name, value);
@@ -1128,36 +1105,33 @@ export function createT3Plus(deps) {
   function syncHome() {
     // Without a feed (a build with no feed folder) the cards could only ever wait, and
     // T3's own usage rows, which they replace, stay as T3 draws them.
-    const hero = state.settings.home.widgets && deps.homeFeed ? findHero() : null;
+    const widgets = Boolean(state.settings.home.widgets && deps.homeFeed);
+    // Whether the widgets are on at all, whatever the page: content.css centers any
+    // new-thread composer by it together with T3's own hero class, so the centering comes
+    // and goes in the same style pass as T3's layout (no frame with T3's room on a hero,
+    // or t3+'s zero on a thread).
+    if (doc.documentElement.hasAttribute(T3PLUS.widgetsAttr) !== widgets) doc.documentElement.toggleAttribute(T3PLUS.widgetsAttr, widgets);
+    const hero = widgets ? findHero() : null;
     if (!hero) {
-      // T3 often drops the cards itself (navigation re-renders the overlay), so the
-      // tooltip is hidden whether or not they were still in the page.
-      if (home.element.isConnected) home.element.remove();
-      home.hide();
-      doc.documentElement.removeAttribute(T3PLUS.homeAttr);
-      clearHeroVars();
+      leaveHero();
       return;
     }
     if (heroOverlay !== hero.overlay) {
       clearHeroVars();
       heroOverlay = hero.overlay;
+      heroOverlay.setAttribute(T3PLUS.heroAttr, "");
     }
     if (home.element.parentElement !== hero.stack) hero.stack.append(home.element);
     if (!doc.documentElement.hasAttribute(T3PLUS.homeAttr)) doc.documentElement.setAttribute(T3PLUS.homeAttr, "");
     // Filled before measuring: placed while still empty, the block moved again
     // once the cards arrived.
     home.update({ feed: state.homeFeed, cell: ditherCell() });
+    // The cards are exactly as wide as the composer: content.css hangs them from its stack
+    // (left and right 0), so no width is measured or written (a width written in the check
+    // lagged a frame behind a resize, and came out narrower on a narrow window).
     const pane = doc.querySelector(T3_SELECTORS.conversationArea) ?? hero.overlay;
     const p = pane.getBoundingClientRect();
     const s = hero.stack.getBoundingClientRect();
-    if (p.width > 0) {
-      // Centered on the composer (T3 shifts it when the details card is open), but
-      // never wider than the room on its narrower side, so it stays inside the pane.
-      const center = s.left + s.width / 2;
-      const room = 2 * Math.min(center - p.left, p.left + p.width - center) - 48;
-      // As wide as T3's composer (the stack), within the room on its narrower side.
-      setInline(home.element, "width", `${Math.round(Math.max(0, Math.min(s.width, room)))}px`);
-    }
     // Place the whole hero block (headline, composer, widgets) a little above
     // the pane's middle: 35% of the spare height above it, 65% below. That is
     // close to T3's own spot on a laptop screen and scales with taller ones;
@@ -1212,41 +1186,38 @@ export function createT3Plus(deps) {
     measureDue = true;
     watcher.schedule();
   };
-  // T3 keeps the composer's room (--chat-lane-inset-end on the chat canvas) and
-  // places the details card in inline styles. Opening the right panel or the
-  // details card changes those without adding or resizing anything t3+ watches,
-  // so the composer kept a decision made a frame too early and did not move.
-  // Style changes on the canvas and the right overlays now trigger a check.
+  // T3 keeps the composer's room (--chat-lane-inset-end on the chat canvas) inline on the
+  // canvas, and says whether the composer is the new-thread hero by its overlay's class.
+  // Both change without adding or resizing anything else t3+ watches, so they are watched
+  // here, and acted on in the observer's own callback: right after T3's commit and before
+  // the frame is painted (T3 may commit inside its own ResizeObserver, after t3+'s frame
+  // check), so the glow never shows a frame beside the composer, and the hero's layout is
+  // gone the moment T3 docks the composer.
   let styleObserver = null;
-  let toggleObserver = null;
   const styleWatched = new Set();
+  function onLaneStyle(records) {
+    let canvasMoved = false;
+    for (const { target } of records) {
+      if (target === heroOverlay && !target.classList.contains(T3_CLASSES.centered)) leaveHero();
+      else if (target.matches?.(T3_SELECTORS.chatCanvas)) canvasMoved = true;
+    }
+    if (canvasMoved && !stopped) timed("dither", () => syncDither(true));
+    moved();
+  }
   function watchLaneStyles() {
     const MO = win.MutationObserver;
     if (!MO) return;
-    const placed = [...doc.querySelectorAll(T3_SELECTORS.chatCanvas), ...rightOverlays()];
+    const canvases = [...doc.querySelectorAll(T3_SELECTORS.chatCanvas)];
     // The composer overlay's class says whether this is the new-thread hero
     // (items-center). Only its class: t3+ writes the overlay's own padding.
     const overlays = [...doc.querySelectorAll(T3_SELECTORS.composerOverlay)];
-    const wanted = new Set([...placed, ...overlays]);
+    const wanted = new Set([...canvases, ...overlays]);
     if (wanted.size === styleWatched.size && [...wanted].every((el) => styleWatched.has(el))) return;
     styleObserver?.disconnect();
-    toggleObserver?.disconnect();
     measureDue = true; // something new to measure
-    styleObserver = new MO(moved);
-    // A section inside the card opening or closing (T3's collapsibles flip hidden,
-    // open, data-state or aria-expanded) changes the card's height with no element
-    // added: watched too, by those attributes only (t3+'s own chart in the card
-    // changes others as the pointer moves).
-    toggleObserver = new MO(moved);
-    // Not a ResizeObserver on the details card: T3 resizes the card inside its own
-    // ResizeObserver callbacks, and any observer on it made the browser report a
-    // loop each time the right panel opened. What T3 adds inside the card (a
-    // changes list loading) reaches the DOM watcher anyway.
-    for (const el of placed) {
-      styleObserver.observe(el, { attributes: true, attributeFilter: ["style", "class"] });
-      if (el.matches(T3_SELECTORS.rightOverlays)) toggleObserver.observe(el, { attributes: true, subtree: true, attributeFilter: ["hidden", "open", "data-state", "aria-expanded"] });
-    }
-    for (const el of overlays) if (!placed.includes(el)) styleObserver.observe(el, { attributes: true, attributeFilter: ["class"] });
+    styleObserver = new MO(onLaneStyle);
+    for (const el of canvases) styleObserver.observe(el, { attributes: true, attributeFilter: ["style", "class"] });
+    for (const el of overlays) if (!canvases.includes(el)) styleObserver.observe(el, { attributes: true, attributeFilter: ["class"] });
     styleWatched.clear();
     for (const el of wanted) styleWatched.add(el);
   }
@@ -1267,7 +1238,10 @@ export function createT3Plus(deps) {
     layoutObserver ??= new RO((entries) => {
       measureDue = true;
       const glowMoves = entries.filter(movesGlow).length > 0; // (every entry's size noted)
-      if (glowMoves && !watcher.storming()) timed("dither", () => syncDither(true));
+      // Placing the glow is a few rect reads and one transform (renders stay debounced in
+      // the renderer): done for every move, also in a storm of changes (a window or panel
+      // dragged), where the throttled check alone left it 200 ms behind the composer.
+      if (glowMoves) timed("dither", () => syncDither(true));
       watcher.schedule();
     });
     for (const el of layoutWatched) if (!wanted.has(el)) layoutObserver.unobserve(el);
@@ -1530,7 +1504,6 @@ export function createT3Plus(deps) {
     // the glow is centered on where the composer ends up. Measured the other way
     // round, the glow kept the composer's old spot and sat too low behind the cards.
     timed("home", syncHome);
-    timed("lane", () => syncComposerLane(measure));
     timed("dither", () => syncDither(measure));
     timed("details", syncThreadDetails);
     // T3's chart is on its Usage page only: looked for there (and dropped once it is gone).
@@ -2101,10 +2074,6 @@ export function createT3Plus(deps) {
       for (const old of doc.querySelectorAll("[data-t3plus-settings-nav]")) old.closest("li")?.remove();
       doc.addEventListener("click", onSettingsClick, true);
       unsubscribers.push(() => doc.removeEventListener("click", onSettingsClick, true));
-      for (const type of ["transitionrun", "transitionend", "transitioncancel"]) {
-        doc.addEventListener(type, followLane, true);
-        unsubscribers.push(() => doc.removeEventListener(type, followLane, true));
-      }
       // Every open T3 window follows the others' changes, from before they are read here:
       // one another window writes meanwhile (T3 opens its windows at once) is newer than
       // what was read.
@@ -2159,10 +2128,17 @@ export function createT3Plus(deps) {
       reading = false;
       Object.assign(state, { base, scopes, view, image, botPrefs, knownBots, manualBots, botFeed, homeFeed }, early);
       for (const sync of [settingsSync, scopesSync, viewSync]) sync?.begin();
+      clearLaneOverrides();
       resolve();
       doc.addEventListener("visibilitychange", onVisibility);
       unsubscribers.push(() => doc.removeEventListener("visibilitychange", onVisibility));
-      const onResize = moved;
+      // The window (or its zoom) changed size: the glow is placed right here, in the frame's
+      // resize steps, before it is laid out and painted (a check alone can come a frame
+      // later, or 200 ms later while a drag keeps the page busy).
+      const onResize = () => {
+        if (!stopped) timed("dither", () => syncDither(true));
+        moved();
+      };
       win.addEventListener?.("resize", onResize, { passive: true });
       unsubscribers.push(() => win.removeEventListener?.("resize", onResize));
       if (deps.botFeed) {
@@ -2236,6 +2212,7 @@ export function createT3Plus(deps) {
       doc.documentElement.removeAttribute(T3PLUS.settingsAttr);
       markSettingsPage(null);
       doc.documentElement.removeAttribute(T3PLUS.homeAttr);
+      doc.documentElement.removeAttribute(T3PLUS.widgetsAttr);
       clearBotDecoration(doc.documentElement);
       // T3's breadcrumb heading and any open hover card wear a bot face too.
       decorateBotBreadcrumb(doc, null);
@@ -2250,13 +2227,13 @@ export function createT3Plus(deps) {
       deps.backdropRenderer?.clear();
       deps.previewRenderer?.clear();
       const cleared = Object.keys(computeComposerTheme(state.settings, null).vars).map((name) => [name, null]);
-      releaseLane();
-      if (laneFrame !== null) win.cancelAnimationFrame?.(laneFrame);
+      clearLaneOverrides();
+      stopFollowing();
+      lanesAnimating.clear();
       clearHeroVars();
       layoutObserver?.disconnect();
       layoutWatched.clear();
       styleObserver?.disconnect();
-      toggleObserver?.disconnect();
       styleWatched.clear();
       applyComposerTheme(doc, { mode: null, glass: false, vars: Object.fromEntries(cleared) });
       clearBubble(doc);

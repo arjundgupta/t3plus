@@ -140,43 +140,15 @@ test("the layout observer moves the glow at once for a size that moves it, not f
   assert.equal(layout.watched.size, 0, "disconnected when t3+ stops");
 });
 
-test("the glow follows the composer's lane frame by frame while it slides, and stops when the slide ends or t3+ stops", async () => {
-  const updates = [];
-  const dom = createDom("/env1/a1", `<div data-workspace-area="conversation"></div><div data-chat-canvas><div class="chat-composer-lane"><div data-chat-composer-surface="true"></div></div></div>`);
-  const { app } = createApp(dom, undefined, { backdropRenderer: { update: (o) => updates.push(o), clear() {} } });
-  await app.start();
-  app.watcher.flush();
-  const lane = dom.window.document.querySelector(".chat-composer-lane");
-  const frame = () => new Promise((resolve) => dom.window.requestAnimationFrame(() => resolve()));
-  const fire = (type) => lane.dispatchEvent(Object.assign(new dom.window.Event(type, { bubbles: true }), { propertyName: "padding-right" }));
-  const before = updates.length;
-  fire("transitionrun");
-  await frame();
-  await frame();
-  assert.ok(updates.length >= before + 2, "one placement a frame");
-  const sliding = updates.length;
-  fire("transitionend");
-  const settled = updates.length;
-  assert.equal(settled, sliding + 1, "one last placement where it stopped");
-  await frame();
-  await frame();
-  assert.equal(updates.length, settled, "then no more");
-  fire("transitionrun");
-  app.stop();
-  const stopped = updates.length;
-  await frame();
-  await frame();
-  assert.equal(updates.length, stopped, "nothing after stop");
-});
-
-test("a composer lane T3 has just mounted is centered from its first frame; one already on screen slides when it is freed", async () => {
-  const html = (inset) => `
+test("t3+ leaves the composer lane to T3 in every arrangement (so it lines up with the messages), and takes off the zero an earlier build wrote", async () => {
+  const html = (inset, laneStyle = "") => `
     <div data-workspace-area="conversation"></div>
     <div data-chat-canvas="true" id="canvas" style="--chat-lane-inset-end: ${inset}">
       <aside data-thread-details-panel="inline" style="right: 12px; top: 12px; width: 280px"></aside>
-      <div class="chat-composer-lane"><div data-chat-composer-surface="true" id="card"></div></div>
+      <div class="chat-composer-lane" style="${laneStyle}" data-t3plus-lane-slide><div data-chat-composer-surface="true" id="card"></div></div>
     </div>`;
-  const dom = createDom("/env1/a1", html("212px"));
+  // An earlier t3+ build left its zero (and slide flag) on the lane: taken off at start.
+  const dom = createDom("/env1/a1", html("212px", "--chat-lane-inset-end: 0px"));
   const doc = dom.window.document;
   const box = (top, height) => () => ({ left: 0, right: 100, width: 100, top, height, bottom: top + height });
   const place = () => {
@@ -189,29 +161,25 @@ test("a composer lane T3 has just mounted is centered from its first frame; one 
   await app.start();
   app.watcher.flush();
   let lane = doc.querySelector(".chat-composer-lane");
-  assert.equal(lane.style.getPropertyValue("--chat-lane-inset-end"), "0px");
-  assert.equal(lane.hasAttribute("data-t3plus-lane-slide"), false, "new on the page: no slide in from the side");
-  // T3 opens another thread: a new lane.
-  doc.querySelector("[data-chat-canvas]").outerHTML = html("212px").replace('<div data-workspace-area="conversation"></div>', "");
+  assert.equal(lane.style.getPropertyValue("--chat-lane-inset-end"), "", "the earlier build's zero is gone: T3's room");
+  assert.equal(lane.hasAttribute("data-t3plus-lane-slide"), false);
+  // T3 opens another thread: a new lane, left alone.
+  doc.querySelector("[data-chat-canvas]").outerHTML = html("212px").replace('<div data-workspace-area="conversation"></div>', "").replace(" data-t3plus-lane-slide", "");
   place();
   await settle();
   app.watcher.flush();
   lane = doc.querySelector(".chat-composer-lane");
-  assert.equal(lane.style.getPropertyValue("--chat-lane-inset-end"), "0px");
-  assert.equal(lane.hasAttribute("data-t3plus-lane-slide"), false);
-  // The card moves down beside it (T3's room kept), then away again: that slides.
-  const aside = doc.querySelector("aside");
-  aside.getBoundingClientRect = box(700, 200);
-  aside.style.top = "700px";
-  await settle();
-  app.watcher.flush();
   assert.equal(lane.style.getPropertyValue("--chat-lane-inset-end"), "");
-  aside.getBoundingClientRect = box(64, 277);
-  aside.style.top = "64px";
-  await settle();
-  app.watcher.flush();
-  assert.equal(lane.style.getPropertyValue("--chat-lane-inset-end"), "0px");
-  assert.equal(lane.hasAttribute("data-t3plus-lane-slide"), true, "on screen already: it slides over");
+  // The card moves down beside the composer, then away again: the lane never changes.
+  const aside = doc.querySelector("aside");
+  for (const top of [700, 64]) {
+    aside.getBoundingClientRect = box(top, top === 700 ? 200 : 277);
+    aside.style.top = `${top}px`;
+    await settle();
+    app.watcher.flush();
+    assert.equal(lane.style.getPropertyValue("--chat-lane-inset-end"), "");
+    assert.equal(lane.hasAttribute("data-t3plus-lane-slide"), false);
+  }
   app.stop();
 });
 

@@ -120,6 +120,47 @@ function shade(rgb, deg, l) {
   return hslToRgb([(h + deg + 360) % 360, s < 0.08 ? s : Math.max(s, 0.35), l]);
 }
 
+// OKLab / OKLCH (Björn Ottosson's matrices): lightness that matches how light a color
+// looks, which an HSL ramp does not (an HSL blue and yellow at one "lightness" are far
+// apart to the eye). sRGB bytes in, sRGB bytes out.
+const toLinear = (v) => ((v /= 255) <= 0.04045 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4);
+const toByte = (v) => Math.round(255 * Math.max(0, Math.min(1, v <= 0.0031308 ? 12.92 * v : 1.055 * v ** (1 / 2.4) - 0.055)));
+/** [L 0..1, C, h degrees] for sRGB bytes. */
+export function rgbToOklch([r, g, b]) {
+  const [R, G, B] = [toLinear(r), toLinear(g), toLinear(b)];
+  const l = Math.cbrt(0.4122214708 * R + 0.5363325363 * G + 0.0514459929 * B);
+  const m = Math.cbrt(0.2119034982 * R + 0.6806995451 * G + 0.1073969566 * B);
+  const s = Math.cbrt(0.0883024619 * R + 0.2817188376 * G + 0.6299787005 * B);
+  const L = 0.2104542553 * l + 0.793617785 * m - 0.0040720468 * s;
+  const a = 1.9779984951 * l - 2.428592205 * m + 0.4505937099 * s;
+  const bb = 0.0259040371 * l + 0.7827717662 * m - 0.808675766 * s;
+  return [L, Math.hypot(a, bb), ((Math.atan2(bb, a) * 180) / Math.PI + 360) % 360];
+}
+function oklchLinear(L, C, h) {
+  const a = C * Math.cos((h * Math.PI) / 180);
+  const b = C * Math.sin((h * Math.PI) / 180);
+  const l = (L + 0.3963377774 * a + 0.2158037573 * b) ** 3;
+  const m = (L - 0.1055613458 * a - 0.0638541728 * b) ** 3;
+  const s = (L - 0.0894841775 * a - 1.291485548 * b) ** 3;
+  return [4.0767416621 * l - 3.3077115913 * m + 0.2309699292 * s, -1.2684380046 * l + 2.6097574011 * m - 0.3413193965 * s, -0.0041960863 * l - 0.7034186147 * m + 1.707614701 * s];
+}
+const outOfGamut = (lin) => lin.some((v) => v < -1e-4 || v > 1 + 1e-4);
+/** sRGB bytes for an OKLCH color; out of the sRGB gamut, the chroma is lowered (hue and lightness kept). */
+export function oklchToRgb(L, C, h) {
+  let lin = oklchLinear(L, C, h);
+  if (outOfGamut(lin)) {
+    let lo = 0;
+    let hi = C;
+    for (let i = 0; i < 14; i += 1) {
+      const mid = (lo + hi) / 2;
+      if (outOfGamut(oklchLinear(L, mid, h))) hi = mid;
+      else lo = mid;
+    }
+    lin = oklchLinear(L, lo, h);
+  }
+  return lin.map(toByte);
+}
+
 /**
  * The glow's tones, darkest first. Each tone is a [rgb, alpha] pair; index 0
  * is empty (the page shows through). Tones are far apart in lightness, which
@@ -133,11 +174,30 @@ export function glowTones(rgb, style, light = false) {
   const [, , l] = rgbToHsl(rgb);
   const base = Math.min(0.62, Math.max(0.45, l));
   if (light) {
-    // A light page: the ramp runs the other way, pale tints at the edge (close to the
-    // page, as the deep tones are to a dark one), the accent and a deeper core. The dark
-    // ramp's deep edge tones read as grey dirt on white.
-    if (style === "spectrum") return [null, [shade(rgb, -48, 0.9), 0.75], [shade(rgb, -22, 0.8), 0.9], [rgb, 1], [shade(rgb, 32, Math.max(0.3, base - 0.14)), 1]];
-    return [null, [shade(rgb, 0, 0.9), 0.7], [shade(rgb, 0, 0.8), 0.88], [rgb, 1], [shade(rgb, 0, Math.max(0.3, base - 0.12)), 1]];
+    // A light page: colored light on paper, not ink. One ink, the accent at a mid
+    // lightness (OKLab L 0.60-0.68, its hue and chroma kept), laid over the page at rising
+    // alpha, so the levels land at even, pale steps (about L 0.93 / 0.87 / 0.80 / 0.73 at
+    // the default intensity) and the core never darkens into a muddy oval. Spectrum
+    // turns the same ink's hue across the ramp. (The dark ramp's deep tones read as grey
+    // dirt on white, and a darker core as a heavy blot under the composer.)
+    const [L, C, H] = rgbToOklch(rgb);
+    // A colored accent keeps at least a clear chroma (the gamut lowers it where it must):
+    // laid on at low alpha, a muted one (Grove's, Ocean's, Ember's) left grey dust at the
+    // halo's edge. A grey accent stays grey.
+    const chroma = C < 0.03 ? C : Math.max(C, 0.15);
+    // Spectrum turns the hue less than on dark, and never into the brown-olive band (hues
+    // about 55-115 at this lightness), where an orange or green accent's tones went ochre or
+    // khaki: there it turns the other way.
+    const hueAt = (turn) => {
+      const h = (((H + turn) % 360) + 360) % 360;
+      return turn !== 0 && h > 55 && h < 115 ? H - turn : H + turn;
+    };
+    // A yellow or amber accent keeps more of its lightness: held at 0.68 it read as mustard.
+    const warm = H > 60 && H < 115;
+    const ink = (turn = 0) => oklchToRgb(Math.min(warm ? 0.8 : 0.68, Math.max(0.6, L)), chroma, hueAt(turn));
+    if (style === "spectrum") return [null, [ink(-30), 0.22], [ink(-14), 0.4], [ink(), 0.62], [ink(28), 0.85]];
+    const one = ink();
+    return [null, [one, 0.2], [one, 0.38], [one, 0.6], [one, 0.84]];
   }
   if (style === "spectrum") {
     return [null, [shade(rgb, -48, base * 0.34), 0.75], [shade(rgb, -22, base * 0.7), 0.9], [rgb, 1], [shade(rgb, 32, Math.min(0.86, base + 0.24)), 1]];
@@ -164,6 +224,9 @@ export function glowRenderer({ width, height, cx, rgb, intensity, style = "bayer
   const scale = 0.6 + 0.4 * intensity;
   const alphas = tones.map((tone) => (tone ? Math.round(255 * tone[1] * scale) : 0));
   const gain = 0.6 + 0.8 * intensity;
+  // Below 1, so even the core mixes its top two levels; on a light page a little lower,
+  // or the band under the composer read as one solid strip of the top level.
+  const cap = light ? 0.85 : 0.9;
   const centerX = sprite ? 0.5 : cx;
   const centerY = sprite ? 0.5 : (cy ?? 1 + GLOW_SHAPE.drop);
   const { coreRx, coreRy, haloRx, haloRy } = GLOW_SHAPE;
@@ -182,7 +245,7 @@ export function glowRenderer({ width, height, cx, rgb, intensity, style = "bayer
         const a2 = du / haloRx;
         const m = strength(a1 * a1 + coreY, a2 * a2 + haloY, gain);
         if (m <= 0) continue;
-        const level = ditherLevel(Math.min(m, 0.9), tones.length, threshold(x, y));
+        const level = ditherLevel(Math.min(m, cap), tones.length, threshold(x, y));
         if (!level) continue;
         const color = tones[level][0];
         const i = (y * width + x) * 4;

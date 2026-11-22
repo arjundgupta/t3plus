@@ -36,6 +36,21 @@
  * faces' frames), and every transition stops under prefers-reduced-motion.
  */
 
+/* ---------- Theme hue ---------- */
+
+/* The one hue t3+ paints its theme-colored things in (the glow, its Smooth look and
+   swatch, the heatmap, the pressed Status button, the drop target). Dark: T3's
+   --primary, as before. Light: T3's palette accent (Grove's green, Ocean's blue, Ember's
+   orange, Iris's violet; --primary there is the message-action color, an ochre or teal
+   on some palettes), or --primary on T3's default palette, which sets no accent. The
+   glow renderer reads the same two values (backdropRenderer.js plan). */
+html {
+  --t3plus-hue: var(--primary, #6d7cff);
+}
+html:not(.dark) {
+  --t3plus-hue: var(--app-theme-accent, var(--primary, #6d7cff));
+}
+
 /* ---------- Backdrop layer ---------- */
 
 /* isolation keeps the z-index:-1 layer above the pane's own opaque background
@@ -75,13 +90,13 @@ html[data-t3plus-backdrop="half-circle"] [data-t3plus-backdrop-host]::before,
     var(--t3plus-dither),
     radial-gradient(
       ellipse 30% 26% at var(--t3plus-composer-x, 50%) 100%,
-      color-mix(in oklab, var(--t3plus-accent, var(--primary, #6d7cff)) var(--t3plus-core, 38%), transparent) 0%,
+      color-mix(in oklab, var(--t3plus-accent, var(--t3plus-hue, #6d7cff)) var(--t3plus-core, 38%), transparent) 0%,
       transparent 100%
     ),
     radial-gradient(
       ellipse 62% 52% at var(--t3plus-composer-x, 50%) 100%,
-      color-mix(in oklab, var(--t3plus-accent, var(--primary, #6d7cff)) var(--t3plus-halo, 25%), transparent) 0%,
-      color-mix(in oklab, var(--t3plus-accent, var(--primary, #6d7cff)) var(--t3plus-fade, 10%), transparent) 55%,
+      color-mix(in oklab, var(--t3plus-accent, var(--t3plus-hue, #6d7cff)) var(--t3plus-halo, 25%), transparent) 0%,
+      color-mix(in oklab, var(--t3plus-accent, var(--t3plus-hue, #6d7cff)) var(--t3plus-fade, 10%), transparent) 55%,
       transparent 100%
     );
   background-size: 8px 8px, 100% 100%, 100% 100%;
@@ -211,18 +226,6 @@ html[data-t3plus-dithered] .t3plus-preview-pane:has(> .t3plus-glow:not([hidden])
 
 @media (prefers-reduced-motion: reduce) {
   .t3plus-glow[data-ready] .t3plus-glow-pos > div {
-    transition: none;
-  }
-}
-
-/* The composer's lane slides when t3+ gives it T3's room back (syncComposerLane in
-   app.js). Room T3 makes for a card beside the composer is made at once, as T3 does:
-   sliding, the composer ran under the card that had just opened. */
-html[data-t3plus-backdrop] .chat-composer-lane[data-t3plus-lane-slide] {
-  transition: padding-right 260ms cubic-bezier(0.22, 1, 0.36, 1);
-}
-@media (prefers-reduced-motion: reduce) {
-  html[data-t3plus-backdrop] .chat-composer-lane[data-t3plus-lane-slide] {
     transition: none;
   }
 }
@@ -817,7 +820,7 @@ html[data-t3plus-glass] [data-t3plus-surface]:not([data-slot="composer-shell"] *
   width: 1.5rem;
   height: 0.75rem;
   border-radius: 0.125rem;
-  background: var(--t3plus-swatch-glow, var(--primary, #6d7cff));
+  background: var(--t3plus-swatch-glow, var(--t3plus-hue, #6d7cff));
   -webkit-mask: var(--t3plus-swatch-mask, none) 0 0 / 100% 100% no-repeat;
   mask: var(--t3plus-swatch-mask, none) 0 0 / 100% 100% no-repeat;
 }
@@ -1453,9 +1456,9 @@ html[data-t3plus-backdrop] [data-workspace-area="conversation"] > .bg-background
    headline, composer and widgets and sets the overlay's padding-top so the whole block
    sits centered (slightly low) in the pane. T3's headline still hangs above
    the composer stack. [class~=] rather than .items-center: a class in the last compound
-   decides which elements a data-t3plus-home toggle restyles, and Tailwind's items-center
+   decides which elements a data-t3plus-widgets toggle restyles, and Tailwind's items-center
    is on hundreds of them. */
-html[data-t3plus-home] [data-chat-composer-overlay="true"][class~="items-center"] {
+html[data-t3plus-widgets] [data-chat-composer-overlay="true"][data-t3plus-hero][class~="items-center"] {
   align-items: flex-start !important;
   /* app.js sets the measured value inline. */
   padding-top: clamp(7rem, 18vh, 11rem);
@@ -1470,12 +1473,11 @@ html[data-t3plus-home] [data-chat-composer-overlay="true"][class~="items-center"
   position: absolute;
   /* --t3plus-banner-h: T3's banners under the composer, measured by app.js. */
   top: calc(100% + 1rem + var(--t3plus-banner-h, 0px));
-  left: 50%;
-  width: 46rem; /* measured: set inline by app.js */
-  max-width: calc(100vw - 1rem);
+  /* Exactly the composer stack's width, whatever happens to it (no width measured). */
+  left: 0;
+  right: 0;
   box-sizing: border-box;
   max-height: 24rem; /* measured: set inline by app.js */
-  transform: translateX(-50%);
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   align-content: start;
@@ -1820,16 +1822,16 @@ html[data-t3plus-glass] [data-thread-details-card] {
 }
 
 .t3plus-w-cell[data-level="1"] {
-  background-color: color-mix(in oklab, var(--primary, #3b82f6) 30%, transparent);
+  background-color: color-mix(in oklab, var(--t3plus-hue, #3b82f6) 30%, transparent);
 }
 .t3plus-w-cell[data-level="2"] {
-  background-color: color-mix(in oklab, var(--primary, #3b82f6) 52%, transparent);
+  background-color: color-mix(in oklab, var(--t3plus-hue, #3b82f6) 52%, transparent);
 }
 .t3plus-w-cell[data-level="3"] {
-  background-color: color-mix(in oklab, var(--primary, #3b82f6) 76%, transparent);
+  background-color: color-mix(in oklab, var(--t3plus-hue, #3b82f6) 76%, transparent);
 }
 .t3plus-w-cell[data-level="4"] {
-  background-color: var(--primary, #3b82f6);
+  background-color: var(--t3plus-hue, #3b82f6);
 }
 .t3plus-w-cell[data-future] {
   background-color: transparent;
@@ -2116,14 +2118,20 @@ html[data-t3plus-glass] [data-thread-details-card] {
 /* New-thread page with the usage widgets: T3's thread details card has nothing
    to say about a thread that does not exist yet, and the widgets carry the
    usage. The inline card is hidden there and the room T3 reserved for it
-   (--chat-lane-inset-end on the canvas) goes back to the composer, which is
+   (--chat-lane-inset-start/end on the canvas) goes back to the composer, which is
    then centered in the pane, glow and widgets with it. T3's own toggle and
-   every real thread are unaffected. */
-html[data-t3plus-home] aside[data-thread-details-panel="inline"] {
-  display: none !important;
-}
-html[data-t3plus-home] [data-chat-canvas] {
+   every real thread are unaffected.
+   Keyed on T3's own hero class, on the canvas that holds it: the centering comes and
+   goes in the same style pass as T3's layout. Keyed on a page attribute t3+ sets in its
+   check, it lingered a frame (or a throttled 200 ms) on the thread the first message
+   opened, which T3 had measured with the room zeroed: the composer and the messages
+   jumped sideways together. And it reached every other chat canvas (a side chat). */
+html[data-t3plus-widgets] [data-chat-canvas]:has(> [data-chat-composer-overlay="true"][class~="items-center"]) {
+  --chat-lane-inset-start: 0px !important;
   --chat-lane-inset-end: 0px !important;
+}
+html[data-t3plus-widgets] [data-chat-canvas]:has(> [data-chat-composer-overlay="true"][class~="items-center"]) > aside[data-thread-details-panel="inline"] {
+  display: none !important;
 }
 
 /* On the new-thread page the widgets under the composer already show both
@@ -2210,13 +2218,14 @@ html[data-t3plus-demo] img[data-t3plus-demo-badge] {
   width: 0.375rem;
   height: 0.375rem;
   border-radius: 999px;
-  background: color-mix(in srgb, var(--t3plus-profile-color, var(--foreground)) 32%, transparent);
+  /* The share of the profile's color: a stronger one on light pages (the light block). */
+  background: color-mix(in srgb, var(--t3plus-profile-color, var(--foreground)) var(--t3plus-dot-mix, 32%), transparent);
   transition:
     width 240ms cubic-bezier(0.22, 1, 0.36, 1),
     background-color 200ms ease;
 }
 .t3plus-profile-dot:hover::before {
-  background: color-mix(in srgb, var(--t3plus-profile-color, var(--foreground)) 60%, transparent);
+  background: color-mix(in srgb, var(--t3plus-profile-color, var(--foreground)) var(--t3plus-dot-hover-mix, 60%), transparent);
 }
 /* The open profile's dot stretches into a short pill: the indicator glides between dots. */
 .t3plus-profile-dot[aria-pressed="true"]::before {
@@ -2482,14 +2491,15 @@ html[data-t3plus-profile-drag] .t3plus-profile-dot[data-over] {
   background: linear-gradient(135deg, var(--stage-night-mid, #1e1b4b), var(--stage-night-top, #4c2a85));
 }
 /* Glow swatches: the color under t3+'s dither pattern. In a profile's editor "Default"
-   is the glow set for all profiles; in Settings the first one is the T3 theme's color. */
+   is the glow set for all profiles; in Settings the first one is the T3 theme's color
+   (t3+'s theme hue, as the glow itself draws it). */
 .t3plus-profile-colors[data-field="glow"] .t3plus-profile-swatch::before,
 .t3plus-pp-swatches[data-field="glow"] .t3plus-pp-swatch::before {
-  background: var(--t3plus-dither, none) 0 0 / 4px 4px, var(--t3plus-profile-color, var(--t3plus-look-accent, var(--primary, #6d7cff)));
+  background: var(--t3plus-dither, none) 0 0 / 4px 4px, var(--t3plus-profile-color, var(--t3plus-look-accent, var(--t3plus-hue, #6d7cff)));
   background-blend-mode: soft-light, normal;
 }
 .t3plus-pp-swatches[data-field="glow"] .t3plus-pp-swatch:first-of-type::before {
-  background: var(--t3plus-dither, none) 0 0 / 4px 4px, var(--primary, #6d7cff);
+  background: var(--t3plus-dither, none) 0 0 / 4px 4px, var(--t3plus-hue, #6d7cff);
 }
 
 /* The editor's icons (a grid under the name) and which color the row below picks. */
@@ -3122,8 +3132,20 @@ html[data-t3plus-bubble] .t3plus-preview-user {
 .t3plus-scope-pick:disabled .t3plus-scope-chevron {
   display: none;
 }
-.t3plus-scope-pick:focus-visible,
+.t3plus-scope-pick:focus-visible {
+  outline: 2px solid var(--ring, var(--primary));
+  outline-offset: 1px;
+}
+/* The open menu has the keyboard focus: shown on the option it is on, not as a heavy
+   frame around the whole popup (both modes, deliberately: the option is what the keys move). */
 .t3plus-scope-menu:focus-visible {
+  outline: none;
+}
+.t3plus-scope-menu:focus-visible > .t3plus-scope-option[data-active] {
+  box-shadow: inset 0 0 0 2px var(--ring, var(--primary));
+}
+/* No option active (the menu redrawn while open): the popup keeps the ring. */
+.t3plus-scope-menu:focus-visible:not(:has(> [data-active])) {
   outline: 2px solid var(--ring, var(--primary));
   outline-offset: 1px;
 }
@@ -3296,9 +3318,13 @@ html[data-t3plus-bubble] .t3plus-preview-user {
   flex-direction: column;
   min-width: 0;
 }
+/* A step darker on a light sidebar, 4.5:1 or better there and on the open row's tint. */
 html:not(.dark) .t3plus-status-group {
-  --t3plus-status-needs: #c2410c;
-  --t3plus-status-running: #a16207;
+  --t3plus-status-needs: #9a3412;
+  --t3plus-status-running: #854d0e;
+}
+html:not(.dark) .t3plus-status-row[aria-current="page"] {
+  --t3plus-status-running: #713f12;
 }
 /* A group's heading, like T3's shelves ("Settled"): its name, a count, a chevron. */
 .t3plus-status-head {
@@ -3571,4 +3597,178 @@ html[data-t3plus-profile-swipe] .pointer-events-none.fixed.overflow-hidden[aria-
 .t3plus-subagent-sample-subs {
   display: inline-flex;
   gap: 0.25rem;
+}
+
+
+/* ---------- Light pages ---------- */
+
+/* t3+ was drawn for dark pages. On T3's light themes its colors read as ink on paper:
+   too heavy, too faint or off-hue. Everything here is for html:not(.dark) only, so dark
+   pages look exactly as before. (The glow's own tones: ditherMath.js glowTones; its hue:
+   --t3plus-hue at the top.) */
+
+html:not(.dark) {
+  /* A step deeper than dark's #6f9cf5, which was about 2.6:1 on white. */
+  --t3plus-pool-codex: #5585ee;
+}
+
+/* Glass composer: frosted white with a hint of the glow, not a thin film the glow's
+   core stains through (its muted labels fell to about 2:1). The strength slider still
+   works; a reduced-transparency (or no-blur) value above that stays as it is. */
+html[data-t3plus-glass]:not(.dark) [data-slot="composer-shell"] {
+  --glass-opacity: max(var(--t3plus-glass-opacity, 52%), calc(var(--t3plus-glass-opacity, 52%) * 0.5 + 48%));
+}
+/* The strip under the new-thread composer (its machine, its access) is square-cornered
+   glass of its own: at the frosted value it read as a white slab under the rounded card. */
+html[data-t3plus-glass]:not(.dark) [data-slot="composer-context-strip"] {
+  --glass-opacity: var(--t3plus-glass-opacity, 52%);
+}
+html[data-t3plus-glass]:not(.dark) [data-chat-composer-surface="true"]:not([data-slot="composer-shell"] *),
+html[data-t3plus-glass]:not(.dark) [data-t3plus-surface]:not([data-slot="composer-shell"] *),
+html:not(.dark) .t3plus-preview[data-glass="true"] .t3plus-preview-card {
+  background-color: color-mix(in srgb, var(--card, #fff) max(var(--t3plus-glass-opacity, 52%), calc(var(--t3plus-glass-opacity, 52%) * 0.5 + 48%)), transparent);
+}
+
+/* Image mode without the dither (Smooth): the sample's light version (its dark field
+   read as a grey veil under the light scrim). An upload sets no light version. */
+@media (prefers-contrast: more) {
+  html[data-t3plus-backdrop="image"]:not(.dark) [data-workspace-area="conversation"]::before,
+  html[data-t3plus-backdrop="image"]:not(.dark) [data-t3plus-backdrop-host]::before,
+  html:not(.dark) .t3plus-preview[data-backdrop="image"] .t3plus-preview-pane::before {
+    background-image:
+      var(--t3plus-dither),
+      linear-gradient(
+        color-mix(in srgb, var(--background, #fff) 88%, transparent),
+        color-mix(in srgb, var(--background, #fff) 88%, transparent)
+      ),
+      var(--t3plus-image-light, var(--t3plus-image, none));
+  }
+}
+@media not (prefers-contrast: more) {
+  html[data-t3plus-backdrop="image"]:not(.dark) [data-workspace-area="conversation"]::before,
+  html[data-t3plus-backdrop="image"]:not(.dark) [data-t3plus-backdrop-host]::before,
+  html:not(.dark) .t3plus-preview[data-backdrop="image"] .t3plus-preview-pane::before {
+    background-image:
+      var(--t3plus-dither),
+      linear-gradient(
+        to bottom,
+        color-mix(in srgb, var(--background, #fff) var(--t3plus-scrim-top, 70%), transparent),
+        color-mix(in srgb, var(--background, #fff) var(--t3plus-scrim-bottom, 50%), transparent)
+      ),
+      var(--t3plus-image-light, var(--t3plus-image, none));
+  }
+}
+
+/* Widgets: chart gridlines as see-through as dark's (an opaque light --border cut pale
+   scratches through the dithered fills), card borders as T3's own glass ones, a readable
+   stale label and T3's own tooltip shadow (shadow-lg). */
+html:not(.dark) .t3plus-w-grid {
+  stroke: color-mix(in srgb, var(--contrast-foreground, var(--foreground)) 9%, transparent);
+}
+/* The baseline stays opaque: a series at zero (Codex in the foreground ink) runs along it,
+   and through a see-through line it read as a 2 px near-black bar. */
+html:not(.dark) .t3plus-w-grid.t3plus-w-base {
+  stroke: var(--border, #e4e4e7);
+}
+html:not(.dark) .t3plus-w {
+  border-color: color-mix(in srgb, var(--contrast-foreground, var(--foreground)) 10%, transparent);
+}
+html[data-t3plus-glass]:not(.dark) [data-thread-details-card] {
+  border-color: color-mix(in srgb, var(--contrast-foreground, var(--foreground)) 10%, transparent) !important;
+}
+html:not(.dark) .t3plus-w-stale {
+  color: var(--warning-foreground, #b45309);
+}
+html:not(.dark) .t3plus-tip {
+  box-shadow: 0 10px 15px -3px rgb(0 0 0 / 0.1), 0 4px 6px -4px rgb(0 0 0 / 0.1);
+}
+
+/* Sidebar. */
+/* The latest message: a step below the name, in the sidebar's ink (T3 Chat's secondary
+   label is hot pink, in every row). Where T3 dims the row (Settled, the slim rows), it
+   dims with the name, as on dark. */
+html:not(.dark) [data-t3plus-bot-title]::after {
+  color: color-mix(in srgb, var(--sidebar-foreground, var(--foreground)) 62%, transparent);
+}
+html:not(.dark) [data-t3plus-bot]:where(:has([data-t3plus-bot-title].text-secondary-label, [data-t3plus-bot-title].text-muted-foreground)) [data-t3plus-bot-title]::after,
+html:not(.dark) [data-t3plus-bot][class*=":text-secondary-label"]:not(:hover):not(:focus-within) [data-t3plus-bot-title]::after {
+  color: var(--secondary-label, var(--muted-foreground));
+}
+/* The idle badge is the quietest one on dark (a light chip); on light its dark-grey tile
+   was the heaviest mark in the row. */
+html:not(.dark) [data-t3plus-mood="idle"] > .t3plus-bot-badge {
+  /* Lighter, still opaque (made see-through, the face showed through its corner). */
+  filter: brightness(1.55) contrast(0.55);
+}
+/* A finished subagent greys out instead of fading into the white row. */
+html:not(.dark) .t3plus-bot-sub[data-done] {
+  opacity: 0.7;
+  filter: saturate(0.35);
+}
+/* The profile's name stays readable in every profile color (4.5:1 or better). */
+html:not(.dark) .t3plus-profiles-name,
+html:not(.dark) .t3plus-pp-name {
+  background: color-mix(in srgb, var(--t3plus-profile-color, var(--foreground)) 12%, transparent);
+  /* Toward a neutral dark, not the foreground: T3 Chat's magenta ink turned teal grey. */
+  color: color-mix(in oklab, var(--t3plus-profile-color, var(--foreground)) 44%, oklch(0.25 0 0));
+}
+/* The other profiles' dots: visible, in their own color (only the share changes, so the
+   open profile's pill and the "+" keep their own looks). */
+html:not(.dark) {
+  --t3plus-dot-mix: 46%;
+  --t3plus-dot-hover-mix: 72%;
+}
+/* Pressed Status button and the dot a folder is dragged over: the theme's hue, lightly. */
+html:not(.dark) .t3plus-status-toggle[aria-pressed="true"] {
+  background: color-mix(in srgb, var(--t3plus-hue) 16%, transparent);
+}
+html:not(.dark)[data-t3plus-profile-drag] .t3plus-profile-dot[data-over] {
+  border-color: var(--t3plus-hue);
+  background: color-mix(in srgb, var(--t3plus-hue) 16%, transparent);
+}
+/* Status view: the open thread's row gets T3's own light ring (its fill alone is white
+   on a near-white shelf). Its status words: with the group's shades (Status view). */
+html:not(.dark) .t3plus-status-row[aria-current="page"] {
+  box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--contrast-sidebar-border, var(--sidebar-border, var(--border))) 70%, transparent);
+}
+/* Popups at T3's light shadow strength (theirs were dark-page shadows). */
+html:not(.dark) .t3plus-profile-editor {
+  box-shadow: 0 10px 15px -3px rgb(0 0 0 / 0.08), 0 4px 6px -4px rgb(0 0 0 / 0.08);
+}
+html:not(.dark) .t3plus-profile-ghost {
+  box-shadow: 0 0 0 1px var(--border), 0 6px 16px rgb(0 0 0 / 0.12);
+}
+html:not(.dark) .t3plus-scope-menu {
+  box-shadow: 0 10px 15px -3px rgb(0 0 0 / 0.06), 0 4px 6px -4px rgb(0 0 0 / 0.06);
+}
+
+/* Settings. Segmented tracks and value boxes on a neutral surface (T3 Chat's --muted is
+   a saturated pink); the preview's bubble as T3 draws one (its own tint, not a white
+   outlined pill); a custom bubble color still wins. */
+html:not(.dark) .t3plus-segmented,
+html:not(.dark) .t3plus-output,
+html:not(.dark) .t3plus-badge {
+  /* T3's pale hover surface (--accent), half way to the page: the palette's own tint. */
+  background: color-mix(in oklab, var(--accent, var(--muted)) 55%, var(--background));
+}
+html:not(.dark) .t3plus-preview-user {
+  border-color: transparent;
+  background: var(--message-surface, var(--card));
+  color: var(--contrast-message-foreground, var(--foreground));
+}
+/* The Image row's thumbnail: the sample's light version on a light page. */
+html:not(.dark) .t3plus-thumb[data-sample-light] {
+  background-image: var(--t3plus-thumb-light) !important;
+}
+html[data-t3plus-bubble]:not(.dark) .t3plus-preview-user {
+  background: var(--t3plus-bubble);
+  color: var(--t3plus-bubble-ink);
+}
+
+/* Links in a custom-colored bubble take its ink (T3's light link blue was unreadable on
+   a mid or dark bubble). */
+html[data-t3plus-bubble]:not(.dark) [data-message-role="user"] .bg-message a:not(.chat-markdown-file-link, :has([data-slot="context-chip-label"])) {
+  color: inherit;
+  text-decoration: underline;
+  text-decoration-color: color-mix(in srgb, currentColor 55%, transparent);
 }

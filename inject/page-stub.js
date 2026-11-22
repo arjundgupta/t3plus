@@ -116,7 +116,7 @@
   const runtime = {
     id: "t3plus-desktop",
     lastError: undefined,
-    getURL: (path) => (String(path).endsWith("sample-spectrum.svg") ? boot.sampleUrl || "" : ""),
+    getURL: (path) => (String(path).endsWith("sample-spectrum.svg") ? boot.sampleUrl || "" : String(path).endsWith("sample-spectrum-light.svg") ? boot.sampleLightUrl || "" : ""),
     getManifest: () => ({ version: boot.version || "0.0.0" }),
     sendMessage,
   };

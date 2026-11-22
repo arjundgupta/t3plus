@@ -11,13 +11,14 @@ import { DITHER_CELL_CSS } from "./backdropRenderer.js";
 /**
  * @param {ReturnType<import("./settings.js").normalizeSettings>} settings
  * @param {string | null} imageUrl URL for image mode (blob:, chrome-extension:)
+ * @param {string | null} [lightImageUrl] the sample's version for light pages (none for an upload)
  * @returns {{ mode: "half-circle" | "image" | null, glass: boolean, vars: Record<string, string | null> }}
  *   `mode` goes on <html data-t3plus-backdrop>; null removes it.
  *   `glass` toggles <html data-t3plus-glass>.
  *   `vars` are custom properties, null removing one: composer.js writes each where
  *   content.css reads it (the dither tile on <html>, the rest in its look sheet).
  */
-export function computeComposerTheme(settings, imageUrl) {
+export function computeComposerTheme(settings, imageUrl, lightImageUrl = null) {
   const g = settings.composerGradient;
   const i = g.intensity;
   const s = settings.glass.strength;
@@ -41,6 +42,7 @@ export function computeComposerTheme(settings, imageUrl) {
     "--t3plus-scrim-top": `${100 - Math.round(i * 0.55)}%`,
     "--t3plus-scrim-bottom": `${100 - Math.round(i * 0.9)}%`,
     "--t3plus-image": imageUrl ? `url("${cssEscapeUrl(imageUrl)}")` : null,
+    "--t3plus-image-light": imageUrl && lightImageUrl ? `url("${cssEscapeUrl(lightImageUrl)}")` : null,
     // Glass: share of the card color kept in the composer surface, and blur radius.
     "--t3plus-glass-opacity": `${Math.round(88 - s * 0.6)}%`,
     "--t3plus-glass-blur": `${Math.round(8 + s * 0.16)}px`,

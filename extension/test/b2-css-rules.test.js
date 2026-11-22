@@ -187,7 +187,7 @@ test("no ring around any face: no ring rule or variable, a face is one picture i
 test("the Status view's traffic light is set on each group, so a heading and its rows share it (light-theme shades included)", () => {
   const tokens = (body) => ["needs", "running"].map((name) => body.match(new RegExp(`--t3plus-status-${name}:\\s*([^;]+);`))?.[1]);
   assert.deepEqual(tokens(topRule(".t3plus-status-group")), ["#fb923c", "#facc15"]);
-  assert.deepEqual(tokens(topRule("html:not(.dark) .t3plus-status-group")), ["#c2410c", "#a16207"], "readable on a light sidebar");
+  assert.deepEqual(tokens(topRule("html:not(.dark) .t3plus-status-group")), ["#9a3412", "#854d0e"], "readable on a light sidebar (4.5:1 or better)");
   assert.match(topRule('.t3plus-status-group[data-group="needs"] .t3plus-status-label'), /color:\s*var\(--t3plus-status-needs\)/, "the heading in its rows' orange, not T3's amber");
   const rowRule = (status) => TOP.find((r) => r.sel.startsWith(".t3plus-status-row") && r.sel.includes(`[data-status="${status}"]`)).body;
   assert.match(rowRule("approval"), /--t3plus-status-color:\s*var\(--t3plus-status-needs\)/);
