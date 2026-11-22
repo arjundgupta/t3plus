@@ -122,6 +122,20 @@ test("Reset names what it resets (background and glass): not the Look row alone,
   assert.equal(panelShowing(() => {}, { scope }).desc("Reset"), "Clear Work's own background and glass.");
 });
 
+test("Screenshot mode sits under Developer, closed by default, not in Features", () => {
+  const p = setup();
+  p.show([]);
+  const dev = p.doc.querySelector("details.t3plus-developer");
+  assert.ok(dev, "a Developer section");
+  assert.equal(dev.open, false);
+  assert.equal(dev.querySelector("summary").textContent, "Developer");
+  const titles = (root) => [...root.querySelectorAll(".t3plus-row-title")].map((el) => el.textContent);
+  assert.ok(titles(dev).includes("Screenshot mode"));
+  assert.equal(titles(p.doc).filter((t) => t === "Screenshot mode").length, 1, "only there");
+  const order = [...p.panel.element.children].map((el) => el.className);
+  assert.ok(order.indexOf("t3plus-advanced t3plus-developer") === order.indexOf("t3plus-advanced") + 1, "right after Advanced");
+});
+
 test("Screenshot mode says which views it leaves real: terminals, diffs and files", () => {
   assert.match(panelShowing().desc("Screenshot mode"), /Terminals, diffs and files stay real/);
 });

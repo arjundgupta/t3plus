@@ -25,6 +25,10 @@ export const STORAGE_KEYS = Object.freeze({
   whatsNew: "t3plus.whatsNew.v1",
   /** Which window opens it, when several start at once (whatsNew.js). */
   whatsNewClaim: "t3plus.whatsNew.claim.v1",
+  /** The release whose update card was hidden (updateNotice.js). */
+  updateDismissed: "t3plus.updateDismissed.v1",
+  /** The release whose popup on the main screen was closed or followed (updateNotice.js). */
+  updateToastSeen: "t3plus.updateToastSeen.v1",
 });
 
 /**

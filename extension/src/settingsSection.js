@@ -83,6 +83,12 @@ export function createSettingsNavItem(doc, onOpen) {
       anchorItem.after(li);
       return true;
     },
+    /** A dot on the entry while a newer t3+ release is out (updateNotice.js). */
+    setUpdate(on) {
+      button.toggleAttribute("data-t3plus-update", Boolean(on));
+      if (on) button.setAttribute("title", "t3+ update available");
+      else button.removeAttribute("title");
+    },
     setActive(on) {
       const value = on ? "true" : "false";
       if (button.getAttribute("data-active") !== value) {

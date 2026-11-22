@@ -33,6 +33,7 @@ import { threadProjectColor } from "./projectColor.js";
 import { stopSprites } from "./spriteClock.js";
 import { assignBotShapes, setBotStyle } from "./botArt.js";
 import { createHealth } from "./health.js";
+import { createUpdateToast } from "./updateNotice.js";
 import { applyBubble, clearBubble } from "./bubbles.js";
 import { profileHex, profileOf } from "./profiles.js";
 import {
@@ -310,6 +311,8 @@ export function createT3Plus(deps) {
       settings: resolveSettings(state.base, state.scopes, edit),
       bots: botsForPanel(),
       botMarker: DEFAULT_BOT_MARKER,
+      // A newer t3+ release, while its card is not hidden.
+      update: deps.updates?.pending ?? null,
       // The sample's light version (the Image row's thumbnail on a light page); none for an upload.
       imageLightUrl: sampleLightUrl(),
       // Profiles (their icons and colors), when they are on, and each one's glow color
@@ -1375,6 +1378,13 @@ export function createT3Plus(deps) {
   // t3+: that closes t3+ too, or the section it points to stayed hidden.
   let settingsOpenHash = "";
   let openedFromHash = false;
+  // Asked to open (the update popup's Update): t3+'s page, once T3's Settings is drawn.
+  let openWhenReady = false;
+  function openT3plusSettings() {
+    openWhenReady = true;
+    if (!SETTINGS_ROUTE.test(routePath())) win.location.hash = "#/settings/general";
+    checkDom();
+  }
   function onSettingsClick(event) {
     const link = event.target?.closest?.("[data-settings-section]");
     if (!link || link.hasAttribute(T3PLUS.ownedAttr) || settingsOpenAt === null) return;
@@ -1392,6 +1402,12 @@ export function createT3Plus(deps) {
       openedFromHash = true;
       settingsOpenAt = path;
       settingsOpenHash = hash;
+    }
+    if (anchor && openWhenReady) {
+      openWhenReady = false;
+      settingsOpenAt = path;
+      settingsOpenHash = hash;
+      win.requestAnimationFrame(() => doc.querySelector(T3_SELECTORS.settingsPageScroll)?.scrollTo?.(0, 0));
     }
     let container = null;
     if (anchor) {
@@ -1707,6 +1723,8 @@ export function createT3Plus(deps) {
   }
 
   const actions = {
+    // The update card: hidden until the next release.
+    dismissUpdate: (latest) => deps.updates?.dismiss(latest),
     setEnabled: (enabled) => persist(gradient({ enabled })),
     setMode: (mode) => persist(gradient({ mode })),
     previewAccent: (accent) => preview(gradient({ accent })),
@@ -1869,6 +1887,14 @@ export function createT3Plus(deps) {
     },
   };
 
+  // A newer t3+ release: a popup in the corner of the main screen, once per release.
+  const updateToast = createUpdateToast(doc, {
+    onOpen: (latest) => {
+      deps.updates?.toastDone(latest);
+      openT3plusSettings();
+    },
+    onClose: (latest) => deps.updates?.toastDone(latest),
+  });
   const panel = createAppearancePanel(doc, actions, { desktop: Boolean(deps.desktop), version: deps.version ?? null });
   const home = createHomeView(doc);
   const detailsPool = createHomeView(doc, { variant: "pool" });
@@ -2047,6 +2073,17 @@ export function createT3Plus(deps) {
       if (stopped || !state.settings.sidebar.profiles) return false;
       return deps.profiles?.projectMenuPick?.(itemId) ?? false;
     },
+    /** The desktop loader's latest t3+ release (after its daily check). */
+    updateInfo(info) {
+      if (!stopped) deps.updates?.set(info);
+    },
+    /** A newer release came in, or its card was hidden: the popup, the card and the Settings entry's dot follow. */
+    updateChanged() {
+      if (stopped) return;
+      settingsNav.setUpdate(Boolean(deps.updates?.pending));
+      updateToast.show(deps.updates?.toastDue ?? null);
+      panelChanged();
+    },
     /**
      * The desktop loader handed over new copies of these feeds (`kinds`; every feed when it
      * does not say): those are read now, not at the next poll. Each read also asks the
@@ -2165,6 +2202,14 @@ export function createT3Plus(deps) {
       });
       deps.whatsNew?.start().catch(() => {});
       unsubscribers.push(() => deps.whatsNew?.stop());
+      if (deps.updates) {
+        settingsNav.setUpdate(Boolean(deps.updates.pending));
+        deps.updates.start().catch(() => {});
+        unsubscribers.push(() => {
+          deps.updates.stop();
+          updateToast.show(null);
+        });
+      }
       watchPopups();
       // A T3 theme switch (light/dark, another palette) changes only <html>'s class and
       // theme attributes: the glow (and the Settings preview) take the new colors right

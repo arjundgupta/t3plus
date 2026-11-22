@@ -25,7 +25,7 @@ Install t3+ for T3 Code on this Mac:
 
 Settings are in T3 Code under Settings → t3+.
 
-- **Update:** `git -C ~/.t3plus pull && sh ~/.t3plus/build.sh && node ~/.t3plus/t3plus.mjs on`
+- **Update:** t3+ tells you when a new version is out. Run `git -C ~/.t3plus pull && sh ~/.t3plus/build.sh && node ~/.t3plus/t3plus.mjs on`.
 - **Turn off:** `node ~/.t3plus/t3plus.mjs off` (it loads again when T3 Code restarts)
 - **Uninstall:** `launchctl bootout gui/$(id -u)/com.t3plus.autostart; rm ~/Library/LaunchAgents/com.t3plus.autostart.plist; node ~/.t3plus/t3plus.mjs off; rm -rf ~/.t3plus`
 
@@ -111,7 +111,7 @@ Under the new-thread composer: your Codex and Claude pools, a tokens-per-day hea
 
 Thread details show the provider's pool and what the thread has cost.
 
-All data is read on your Mac, from T3's database, T3's local API and your Claude and Codex logs. t3+ makes no network requests.
+All data is read on your Mac, from T3's database, T3's local API and your Claude and Codex logs. The only network request t3+ makes is a daily check of this repo for a new release.
 
 </td>
 </tr>

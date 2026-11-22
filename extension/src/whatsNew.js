@@ -9,6 +9,13 @@ import { STORAGE_KEYS, T3PLUS } from "./config.js";
 
 export const WHATS_NEW = Object.freeze([
   {
+    version: "0.23.3",
+    notes: [
+      ["Update notices", "t3+ tells you when a new version is out, with the command to update."],
+      ["Developer", "Screenshot mode moved to a Developer section at the bottom of Settings → t3+."],
+    ],
+  },
+  {
     version: "0.23.2",
     notes: [
       ["Light themes", "t3+ looks right on every light theme: a soft glow in the theme's color, with tinted glass, widgets and settings."],

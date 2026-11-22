@@ -88,7 +88,7 @@
     // awaits, its time was marked as delivered with the older text).
     const feedTimes = Object.fromEntries(Object.entries(FEEDS).map(([kind, feed]) => [kind, mtime(feed.file)]));
     const dataUrl = (text) => (text ? `data:image/svg+xml;base64,${Buffer.from(text).toString("base64")}` : "");
-    const boot = { version: VERSION, sampleUrl: dataUrl(svg), sampleLightUrl: dataUrl(svgLight), feeds: feeds(), environment };
+    const boot = { version: VERSION, sampleUrl: dataUrl(svg), sampleLightUrl: dataUrl(svgLight), feeds: feeds(), environment, update: releaseForPage() };
     const key = await wc.insertCSS(files.css);
     if (gone()) {
       uncss(wc, key);
@@ -357,6 +357,54 @@
   } else log("project menu: T3's handler not found, Move to profile off");
 
   state.publish = publish;
+  // Updates: once a day, the latest release of t3+'s public repository on GitHub. This is
+  // the one request t3+ makes off this Mac; it sends nothing but the request, and keeps
+  // only the release's version and page (in state/, so a restart does not ask again).
+  // When it is newer, the page says so (src/updateNotice.js).
+  const RELEASES = "https://api.github.com/repos/arjundgupta/t3plus/releases/latest";
+  const UPDATE_FILE = "state/t3plus-update.json";
+  const UPDATE_EVERY = 24 * 60 * 60 * 1000;
+  let release = null;
+  try {
+    const saved = JSON.parse(read(UPDATE_FILE) || "null");
+    if (saved && typeof saved.latest === "string") release = saved;
+  } catch {}
+  function releaseForPage() {
+    return release ? { latest: release.latest, url: release.url ?? null } : null;
+  }
+  let checking = false;
+  async function checkForUpdate() {
+    if (state.disposed || checking || (release && Date.now() - (release.checkedAt || 0) < UPDATE_EVERY)) return;
+    checking = true;
+    try {
+      const response = await fetch(RELEASES, { headers: { accept: "application/vnd.github+json", "user-agent": "t3plus" }, signal: AbortSignal.timeout(10000) });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const body = await response.json();
+      const latest = String(body?.tag_name ?? "").replace(/^v/, "");
+      if (!/^\d+\.\d+\.\d+$/.test(latest)) throw new Error("no version in the latest release");
+      const url = typeof body.html_url === "string" && body.html_url.startsWith("https://github.com/") ? body.html_url : null;
+      release = { latest, url, checkedAt: Date.now() };
+      fs.mkdirSync(path.join(HOME, "state"), { recursive: true });
+      fs.writeFileSync(path.join(HOME, UPDATE_FILE), JSON.stringify(release));
+      if (state.disposed) return;
+      const info = JSON.stringify(releaseForPage());
+      for (const wc of electron.webContents.getAllWebContents()) {
+        if (!isTarget(wc) || !state.injected.has(wc.id)) continue;
+        wc.executeJavaScript(inPage(`window.__t3plusBoot && (window.__t3plusBoot.update = ${info}); try { window.__t3plusApp?.updateInfo?.(${info}); } catch {} 0`)).catch(() => {});
+      }
+    } catch (e) {
+      log("update check failed:", String(e && e.message).slice(0, 120)); // tried again at the next tick
+    } finally {
+      checking = false;
+    }
+  }
+  // A little after start (t3+ is drawn first), then every few hours: a day after the last check.
+  const firstCheck = setTimeout(checkForUpdate, 20 * 1000);
+  const updateTicks = setInterval(checkForUpdate, 3 * 60 * 60 * 1000);
+  firstCheck.unref?.();
+  updateTicks.unref?.();
+  state.undo.push(() => { clearTimeout(firstCheck); clearInterval(updateTicks); });
+
   state.data = data;
   state.debug = () => ({ lastRun: Object.fromEntries(lastRun), running: [...running], botKeys, health: health && JSON.parse(health) });
 

@@ -22,6 +22,7 @@ import { createProfiles, normalizeProfiles, profileHex } from "../profiles.js";
 import { createScopesStore, liftProfileColors, migrateProfileColors, normalizeScopes } from "../settingsScopes.js";
 import { createThreadsFeed, createViewStore } from "../statusView.js";
 import { createWhatsNew } from "../whatsNew.js";
+import { createUpdateNotice } from "../updateNotice.js";
 import { normalizeBotPrefsMap, normalizeKnownBots, normalizeManualBots } from "../bots.js";
 import { DESKTOP_IMAGE_LIMITS, IMAGE_LIMITS, STORAGE_KEYS } from "../config.js";
 import { FEEDS_CONFIGURED } from "../hosts.js";
@@ -132,6 +133,18 @@ const app = createT3Plus({
   version: chrome.runtime.getManifest?.().version,
   // After an update, what changed (once); every version's notes are in Settings → t3+ → Changelog too.
   whatsNew: createWhatsNew({ win: window, doc: document, area, version: chrome.runtime.getManifest?.().version }),
+  // A newer t3+ release (the desktop loader checks GitHub once a day): a popup once, and a card in Settings → t3+.
+  ...(desktop
+    ? {
+        updates: createUpdateNotice({
+          area,
+          changedEvent: changed,
+          version: chrome.runtime.getManifest?.().version,
+          release: window.__t3plusBoot?.update ?? null,
+          onChange: () => appRef?.updateChanged?.(),
+        }),
+      }
+    : {}),
   settingsStore: createSettingsStore(area, changed),
   scopesStore: createScopesStore(area, changed),
   viewStore: createViewStore(area, changed),

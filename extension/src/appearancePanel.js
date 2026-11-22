@@ -1,5 +1,6 @@
 import { botArt, botClipPath, botEdgeColor, botFillUrl, botShapeHasOwnColors, botStill } from "./botArt.js";
 import { renderNotes } from "./whatsNew.js";
+import { UPDATE_COMMAND } from "./updateNotice.js";
 import { PROFILE_COLORS, profileHex } from "./profiles.js";
 import { PROFILE_ICONS, profileIconSvg } from "./profileIcons.js";
 import { applyAvatarVars, botPaintColor, PROJECT_COLOR, resolveBotPresentation, shownBotPrefs, subagentFace } from "./bots.js";
@@ -19,6 +20,7 @@ const ICONS = {
   chevron: `<svg ${SVG}><path d="m6 9 6 6 6-6"/></svg>`,
   check: `<svg ${SVG}><path d="M20 6 9 17l-5-5"/></svg>`,
   same: `<svg ${SVG}><path d="M5 9h14"/><path d="M5 15h14"/></svg>`,
+  close: `<svg ${SVG}><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>`,
   reset: `<svg ${SVG}><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/></svg>`,
 };
 const machineIcon = (kind) => ICONS[kind === "desktop" ? "desktop" : kind === "server" ? "server" : "laptop"];
@@ -668,7 +670,6 @@ export function createAppearancePanel(doc, actions, { desktop = false, version =
       control: [subagentSample.element, h("div", { class: "t3plus-subagent-picks" }, [subagentShapePick.el, subagentColorPick.el])],
       paths: ["sidebar.subagentShape", "sidebar.subagentColor"],
     }),
-    row({ title: "Screenshot mode", description: "Swaps names and messages for stand-ins. Terminals, diffs and files stay real.", control: demoToggle, shared: true }),
     row({ title: "Usage widgets", description: "Usage and limits under the new-thread composer.", control: homeToggle, paths: ["home.widgets"] }),
   ]);
 
@@ -700,6 +701,14 @@ export function createAppearancePanel(doc, actions, { desktop = false, version =
       row({ title: "Glass", description: "A see-through composer card.", control: glassToggle, paths: ["glass.enabled"] }),
       row({ title: "Backup", description: "Save all of t3+ to a file, or load one.", control: [exportButton, importButton, importFile] }),
       resetRow,
+    ]),
+  ]);
+
+  // For making screenshots and recordings of t3+; closed by default, like Advanced.
+  const developer = h("details", { class: "t3plus-advanced t3plus-developer" }, [
+    h("summary", { class: "t3plus-advanced-summary", text: "Developer" }),
+    h("div", { class: "t3plus-card" }, [
+      row({ title: "Screenshot mode", description: "Swaps names and messages for stand-ins. Terminals, diffs and files stay real.", control: demoToggle, shared: true }),
     ]),
   ]);
 
@@ -1247,11 +1256,53 @@ export function createAppearancePanel(doc, actions, { desktop = false, version =
     paintProfiles();
   }
 
+  // ---------- Update ----------
+  // A newer t3+ release (updateNotice.js): what is out, the command that updates it (with
+  // a Copy button), its notes on GitHub, and a way to hide the card until the next one.
+  const updateTitle = h("h3", { class: "t3plus-row-title", id: id("update-title") });
+  const updateDesc = h("p", { class: "t3plus-row-desc" });
+  const updateNotes = h("a", { class: "t3plus-button t3plus-button-ghost", target: "_blank", rel: "noopener noreferrer", text: "Release notes" });
+  let updateShown = null; // the release the card is for
+  const updateHide = h("button", { type: "button", class: "t3plus-row-reset t3plus-update-hide", "aria-label": "Hide until the next release", title: "Hide until the next release" });
+  updateHide.innerHTML = ICONS.close;
+  updateHide.addEventListener("click", () => updateShown && actions.dismissUpdate?.(updateShown));
+  const updateCopy = h("button", { type: "button", class: "t3plus-button t3plus-update-copy", text: "Copy" });
+  let copiedTimer = null;
+  updateCopy.addEventListener("click", () => {
+    const win = doc.defaultView;
+    Promise.resolve(win?.navigator?.clipboard?.writeText(UPDATE_COMMAND))
+      .then(() => {
+        setText(updateCopy, "Copied");
+        win?.clearTimeout(copiedTimer);
+        copiedTimer = win?.setTimeout(() => setText(updateCopy, "Copy"), 1500);
+      })
+      .catch(() => {});
+  });
+  const updateCard = h("div", { class: "t3plus-card t3plus-update", role: "region", "aria-labelledby": updateTitle.id, hidden: "" }, [
+    h("div", { class: "t3plus-row" }, [
+      h("div", { class: "t3plus-row-main" }, [
+        h("div", { class: "t3plus-row-text" }, [h("div", { class: "t3plus-row-head" }, [updateTitle]), updateDesc]),
+        h("div", { class: "t3plus-row-control" }, [updateNotes, updateHide]),
+      ]),
+      h("div", { class: "t3plus-update-command" }, [h("code", { text: UPDATE_COMMAND }), updateCopy]),
+    ]),
+  ]);
+  function updateUpdateCard(update) {
+    updateShown = update?.latest ?? null;
+    setHidden(updateCard, !update);
+    if (!update) return;
+    setText(updateTitle, `t3+ ${update.latest} is out`);
+    setText(updateDesc, update.current ? `You have ${update.current}. Run this in Terminal to update.` : "Run this in Terminal to update.");
+    if (update.url) setAttr(updateNotes, "href", update.url);
+    setHidden(updateNotes, !update.url);
+  }
+
   const titleId = id("title");
   const section = h("section", { id: T3PLUS.panelId, class: "t3plus-section", "aria-labelledby": titleId }, [
     h("div", { class: "t3plus-section-header" }, [
       h("h2", { class: "t3plus-section-title", id: titleId }, ["t3+", h("span", { class: "t3plus-badge", text: desktop ? "Desktop" : "Extension" })]),
     ]),
+    updateCard,
     scopeBar,
     lookCard,
     h("h3", { class: "t3plus-subsection-title", text: "Features" }),
@@ -1259,11 +1310,13 @@ export function createAppearancePanel(doc, actions, { desktop = false, version =
     botsCard,
     profilesCard,
     advanced,
+    developer,
     changelog,
   ]);
 
   function update(state) {
     const { settings, image, imageUrl, message } = state;
+    updateUpdateCard(state.update ?? null);
     const g = settings.composerGradient;
     setAttr(backgroundToggle, "aria-checked", String(g.enabled));
     for (const [value, input] of Object.entries(modeInputs)) input.checked = g.mode === value;
