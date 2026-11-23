@@ -7,8 +7,11 @@ import { STORAGE_KEYS } from "./config.js";
 // it, and the t3+ entry in Settings' sidebar a dot. Hiding the card hides them all until
 // the next release. The page itself makes no request.
 
-/** The command that updates t3+ (the README's). */
+/** The commands that update t3+ (the README's): on macOS, and in Windows' PowerShell. */
 export const UPDATE_COMMAND = "git -C ~/.t3plus pull && sh ~/.t3plus/build.sh && node ~/.t3plus/t3plus.mjs on";
+export const WINDOWS_UPDATE_COMMAND = 'git -C "$HOME\\.t3plus" pull; node "$HOME\\.t3plus\\windows\\build.mjs"; node "$HOME\\.t3plus\\t3plus.mjs" on; node "$HOME\\.t3plus\\windows\\startup.mjs" on';
+/** The one for the computer `win` is on. */
+export const updateCommand = (win) => (/\bWindows NT\b/.test(win?.navigator?.userAgent ?? "") ? WINDOWS_UPDATE_COMMAND : UPDATE_COMMAND);
 
 const VERSION = /^v?(\d+)\.(\d+)\.(\d+)$/;
 

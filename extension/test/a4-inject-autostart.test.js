@@ -22,7 +22,7 @@ test("why t3+ did not load: the CLI's own line, not Node's version banner after 
   writeFileSync(join(ps, "ps"), "#!/bin/sh\n");
   chmodSync(join(ps, "ps"), 0o755);
   const cli = fileURLToPath(new URL("../../t3plus.mjs", import.meta.url));
-  const run = spawnSync(process.execPath, [cli, "bogus"], { encoding: "utf8", env: { PATH: ps, HOME: scratch(t), T3PLUS_INSPECTOR_PORT: "1" } });
+  const run = spawnSync(process.execPath, [cli, "bogus"], { encoding: "utf8", env: { PATH: ps, HOME: ps, USERPROFILE: ps, T3PLUS_INSPECTOR_PORT: "1" } });
   assert.equal(run.status, 1);
   assert.match(explain(run.stderr), /^t3\+: unknown command bogus/);
   const uncaught = "file:///x/t3plus.mjs:142\n    if (!win) throw new Error(`no app window found`);\n              ^\n\nError: no app window found: []\n    at file:///x/t3plus.mjs:142:21\n\nNode.js v22.23.2\n";

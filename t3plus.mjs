@@ -4,14 +4,14 @@
 //   node ~/.t3plus/t3plus.mjs off      remove it and reload the app window
 //   node ~/.t3plus/t3plus.mjs status   show windows and the loader's log
 // It briefly opens Node's inspector on 127.0.0.1:9229 in the app's main process and closes it again.
-import { execFileSync } from "node:child_process";
 import { readFileSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
+import { mainPids, openInspector } from "./platform.mjs";
 
 const HOME = join(homedir(), ".t3plus");
-// Where SIGUSR1 opens T3's inspector: Node's default port (another one only for the tests' stand-in app).
+// Where T3's inspector opens when asked to: Node's default port (another one only for the tests' stand-in app).
 const PORT = Number(process.env.T3PLUS_INSPECTOR_PORT) || 9229;
 // How long T3 has to open its inspector once signalled (its main thread may be busy at launch:
 // a dialog, a menu; a wait past the first seconds is said), until when one that opens later is
@@ -36,13 +36,9 @@ export const deadMansSwitch = (ms) =>
   `(() => { const i = require('inspector'); clearTimeout(globalThis.__t3plusInspectorTimer); globalThis.__t3plusInspectorTimer = setTimeout(() => { try { i.close(); } catch {} }, ${Math.max(0, Math.floor(ms))}); return 0; })()`;
 
 function mainPid() {
-  // This user's processes only: with fast user switching another user's T3 is not ours.
-  const rows = execFileSync("ps", ["-U", String(process.getuid()), "-o", "pid=,ppid=,comm="], { encoding: "utf8" }).split("\n");
-  // Not this script or the autostart that ran it: both may run on the app's own binary (ELECTRON_RUN_AS_NODE).
-  const self = new Set([process.pid, process.ppid]);
-  const hits = rows.map((l) => l.trim().match(/^(\d+)\s+(\d+)\s+(.*)$/)).filter((m) => m && !self.has(Number(m[1])) && /\/T3 Code[^/]*\.app\/Contents\/MacOS\/T3 Code[^/]*$/.test(m[3]) && m[2] === "1");
+  const hits = mainPids();
   if (hits.length !== 1) throw new Error(`expected one running T3 Code app, found ${hits.length}`);
-  return Number(hits[0][1]);
+  return hits[0];
 }
 /**
  * The inspector's targets on the port: null when nothing is there, [] when what is there gives
@@ -89,7 +85,7 @@ function openSocket(url, ms) {
     };
   });
 }
-// Set once SIGUSR1 went to T3, so every way out closes the inspector it opened, and
+// Set once T3 was asked to open it, so every way out closes the inspector it opened, and
 // only that one: never another process's, never one this script did not open.
 let signalled = null; // { pid, at }: T3's pid and when it was signalled
 let opened = null; // the target list of the inspector that opened
@@ -115,7 +111,7 @@ async function connect() {
   let list = await targets();
   if (list && !isT3(list, pid)) throw new Error(`port ${PORT} belongs to another process (${owner(list)}), not T3 Code (pid ${pid})`);
   if (!list) {
-    process.kill(pid, "SIGUSR1");
+    openInspector(pid);
     signalled = { pid, at: Date.now() };
     list = await targetsBy(signalled.at + OPEN_QUIET_MS);
     if (!list) {

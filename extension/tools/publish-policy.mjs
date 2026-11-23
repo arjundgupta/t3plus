@@ -4,8 +4,8 @@ import { inflateSync } from "node:zlib";
 // The public mirror has the desktop layout: README, the loader and its scripts at
 // the root, and the extension it builds in extension/. Only these paths may leave
 // the private repository; anything new stays private until deliberately added here.
-const rootFiles = new Set([".gitignore", "LICENSE", "README.md", "autostart.mjs", "autostart.sh", "build-desktop.mjs", "build.sh", "t3plus.mjs"]);
-const rootDirectories = new Set(["inject", "launchd", "media"]);
+const rootFiles = new Set([".gitattributes", ".gitignore", "LICENSE", "README.md", "autostart.mjs", "autostart.sh", "build-desktop.mjs", "build.sh", "platform.mjs", "t3plus.mjs"]);
+const rootDirectories = new Set(["inject", "launchd", "media", "windows"]);
 const extensionFiles = new Set([".gitignore", "LICENSE", "README.md", "package.json", "package-lock.json"]);
 const extensionDirectories = new Set(["assets", "src", "test", "tools"]);
 

@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
+import { fileURLToPath } from "node:url";
 import * as esbuild from "esbuild";
 import { JSDOM, VirtualConsole } from "jsdom";
 import { PAGE_BACKUP_KEY } from "../src/backup.js";
@@ -15,7 +16,7 @@ import { virtualClock } from "./helpers.js";
 async function startDesktop(t, seed = {}) {
   // build-desktop.mjs's options (unminified here, for readable failures).
   const { outputFiles } = await esbuild.build({
-    entryPoints: { content: new URL("../src/content/index.js", import.meta.url).pathname },
+    entryPoints: { content: fileURLToPath(new URL("../src/content/index.js", import.meta.url)) },
     outdir: "out",
     bundle: true,
     format: "iife",
