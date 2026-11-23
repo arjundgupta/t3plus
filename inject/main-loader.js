@@ -88,7 +88,7 @@
     // awaits, its time was marked as delivered with the older text).
     const feedTimes = Object.fromEntries(Object.entries(FEEDS).map(([kind, feed]) => [kind, mtime(feed.file)]));
     const dataUrl = (text) => (text ? `data:image/svg+xml;base64,${Buffer.from(text).toString("base64")}` : "");
-    const boot = { version: VERSION, sampleUrl: dataUrl(svg), sampleLightUrl: dataUrl(svgLight), feeds: feeds(), environment, update: releaseForPage() };
+    const boot = { version: VERSION, sampleUrl: dataUrl(svg), sampleLightUrl: dataUrl(svgLight), feeds: feeds(), environment, update: releaseForPage(), keybindings: threadKeybindings() };
     const key = await wc.insertCSS(files.css);
     if (gone()) {
       uncss(wc, key);
@@ -116,6 +116,45 @@
     injecting.set(id, settled);
     settled.then(() => { if (injecting.get(id) === settled) injecting.delete(id); });
     return run;
+  }
+  // The user's keybindings.json (T3's rules for every command: a rule for another command
+  // on the same key wins over a thread shortcut, as in T3): t3+ runs T3's thread shortcuts
+  // over the open profile's threads. Read as T3 reads it (comments and trailing commas
+  // allowed); only each rule's key, command and `when` go to the page. null without the
+  // file (T3's defaults apply). Followed as T3 follows it: a change is pushed to the page.
+  const keybindingsFile = () => path.join(data.config.t3Home, "userdata", "keybindings.json");
+  function threadKeybindings() {
+    try {
+      let text = fs.readFileSync(keybindingsFile(), "utf8");
+      text = text.replace(/("(?:[^"\\]|\\.)*")|\/\/[^\r\n]*|\/\*[\s\S]*?\*\//g, (m, str) => (str ? m : " "));
+      text = text.replace(/("(?:[^"\\]|\\.)*")|,(\s*[}\]])/g, (m, str, bracket) => (str ? m : (bracket ?? "")));
+      const all = JSON.parse(text);
+      if (!Array.isArray(all)) return null;
+      return all
+        .filter((b) => b && typeof b.key === "string" && typeof b.command === "string" && b.key.length <= 128 && b.command.length <= 128 && (b.when === undefined || (typeof b.when === "string" && b.when.length <= 1024)))
+        .map((b) => (b.when === undefined ? { key: b.key, command: b.command } : { key: b.key, command: b.command, when: b.when }))
+        .slice(-1024); // the page keeps T3's last 256 valid ones
+    } catch {
+      return null;
+    }
+  }
+  let keybindingsWatched = null;
+  function watchKeybindings() {
+    try {
+      const file = keybindingsFile();
+      const onChange = (now, before) => {
+        if (state.disposed || (now.mtimeMs === before.mtimeMs && now.size === before.size)) return;
+        const rules = JSON.stringify(threadKeybindings());
+        for (const wc of electron.webContents.getAllWebContents()) {
+          if (!isTarget(wc) || !state.injected.has(wc.id)) continue;
+          wc.executeJavaScript(inPage(`window.__t3plusBoot && (window.__t3plusBoot.keybindings = ${rules});0`)).catch(() => {});
+        }
+      };
+      fs.watchFile(file, { interval: 500, persistent: false }, onChange);
+      keybindingsWatched = () => fs.unwatchFile(file, onChange);
+    } catch {
+      keybindingsWatched = null;
+    }
   }
   // T3's description of this machine (/.well-known/t3/environment on its local server):
   // its id, its name and what kind of machine it is. Nothing else is kept from it.
@@ -405,6 +444,8 @@
   updateTicks.unref?.();
   state.undo.push(() => { clearTimeout(firstCheck); clearInterval(updateTicks); });
 
+  watchKeybindings();
+  state.undo.push(() => keybindingsWatched?.());
   state.data = data;
   state.debug = () => ({ lastRun: Object.fromEntries(lastRun), running: [...running], botKeys, health: health && JSON.parse(health) });
 

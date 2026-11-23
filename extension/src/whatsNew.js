@@ -9,6 +9,12 @@ import { STORAGE_KEYS, T3PLUS } from "./config.js";
 
 export const WHATS_NEW = Object.freeze([
   {
+    version: "0.23.4",
+    notes: [
+      ["Thread keys per profile", "Cmd+1-9 and Cmd+Shift+[ / ] only reach the open profile's threads."],
+    ],
+  },
+  {
     version: "0.23.3",
     notes: [
       ["Update notices", "t3+ tells you when a new version is out, with the command to update."],

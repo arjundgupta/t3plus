@@ -3,6 +3,7 @@ import { themeStamp } from "./color.js";
 import { LOOK, setLook } from "./composer.js";
 import { findSidebarInner, readRowTitle, threadKeyFromPath } from "./sidebar.js";
 import { rowStatusWord } from "./statusView.js";
+import { commandFor, isMac, isThreadCommand, labelFor, resolveRules, threadTarget } from "./threadShortcuts.js";
 import { PROFILE_ICONS, profileIconSvg } from "./profileIcons.js";
 
 // Profiles, like Dia's (or Arc's spaces): each one shows a set of the sidebar's
@@ -158,7 +159,7 @@ function ageMinutes(text) {
  *   trackpad?     { onBegin(fn), onEnd?(fn) -> unsubscribe }: T3's reports of each touch on the
  *                 trackpad, and of its end (the fingers lifted and the momentum over).
  */
-export function createProfiles({ win, doc, area, changedEvent, isEnabled = () => true, isDemo = () => false, onShown = null, onChange = null, onDelete = null, scoped = null, trackpad = null }) {
+export function createProfiles({ win, doc, area, changedEvent, isEnabled = () => true, isDemo = () => false, onShown = null, onChange = null, onDelete = null, scoped = null, trackpad = null, threadKeybindings = () => null }) {
   // Screenshot mode: profile names are the user's own words ("Acme work"), so the
   // dots, chips and name pill say "Profile 1", "Profile 2". The rename field,
   // opened on purpose, keeps the real name.
@@ -1773,8 +1774,178 @@ export function createProfiles({ win, doc, area, changedEvent, isEnabled = () =>
   const onPointerUp = (event) => endDrag(event, true);
   // A cancelled pointer (the system took it over) is not a drop.
   const onPointerCancel = (event) => endDrag(event, false);
+  // ---------- T3's thread shortcuts, in the open profile (threadShortcuts.js) ----------
+  const mac = isMac(win.navigator?.platform);
+  let rulesFor = { from: undefined, rules: [] };
+  const threadRules = () => {
+    const from = threadKeybindings?.() ?? null;
+    if (rulesFor.from !== from) rulesFor = { from, rules: resolveRules(from) };
+    return rulesFor.rules;
+  };
+  /** Whether profiles keep any project out of the open profile: then t3+ runs the keys. */
+  const splitsProjects = () => isEnabled() && state.list.length > 1 && Object.values(state.projects).some((id) => id !== state.active);
+  /** Whether a thread (its key) is the open profile's: by its project, not by what is
+   *  marked hidden (a row T3 has just drawn is not marked yet). Pinned and settled threads,
+   *  out of any folder, are in every profile. */
+  const inOpenProfile = (project) => project === null || profileOf(state, project) === state.active;
+  // The open profile's threads as last seen in T3's list: used while the list is not
+  // drawn (T3's search shows its results instead, and still jumps over the list).
+  let lastListed = [];
+  /** The open profile's threads in T3's list order: { key, row }. Not drafts (T3 jumps over
+   *  threads only), not other profiles' threads, not the copies a switch slides. null where
+   *  T3 has no thread list to jump over (Settings). */
+  function profileThreads() {
+    const inner = sidebarInner();
+    const items = inner ? [...inner.querySelectorAll(T3_SELECTORS.threadItem)] : [];
+    if (!items.length) {
+      // T3's search shows its results in place of the list, and its keys still jump over
+      // the list: the open profile's threads as last listed. Anywhere else with no list
+      // (Settings) T3's keys do nothing, and t3+'s neither: null.
+      if (!doc.querySelector(T3_SELECTORS.threadSearchResults)) return null;
+      return lastListed.filter((key) => inOpenProfile(threadProjects.get(key) ?? null)).map((key) => ({ key, row: null }));
+    }
+    const rows = [];
+    const seen = new Set();
+    // Each row's project, for the rows nested under it (a fork, a subagent): their parent
+    // may be a thread drawn since the last sync, not yet in threadProjects.
+    const projectOf = new Map();
+    for (const item of items) {
+      if (item.closest("[data-t3plus-owned]")) continue;
+      const key = item.getAttribute(T3_ATTRS.threadItem);
+      if (!key || seen.has(key)) continue;
+      seen.add(key);
+      const parent = rowParentOf(item.querySelector(T3_SELECTORS.rowParent));
+      const project = projectOf.has(parent) ? projectOf.get(parent) : parentProject(parent);
+      projectOf.set(key, project);
+      if (!inOpenProfile(project)) continue;
+      rows.push({ key, row: item.querySelector(T3_SELECTORS.sidebarRow) });
+    }
+    lastListed = rows.map((r) => r.key);
+    return rows;
+  }
+  /** The open thread's key: T3's marked row in the list, else the address; null on a page
+   *  that is no thread (settings, a draft, a project page). */
+  function currentThreadKey() {
+    const open = sidebarInner()?.querySelector(`${T3_SELECTORS.threadItem} ${T3_SELECTORS.sidebarRow}[aria-current="page"]`);
+    const item = open?.closest(T3_SELECTORS.threadItem);
+    if (item) return item.getAttribute(T3_ATTRS.threadItem);
+    const hash = win.location.hash ?? "";
+    return threadKeyFromPath(hash.startsWith("#/") ? hash.slice(1).split(/[?#]/)[0] : win.location.pathname);
+  }
+  /** What T3's `when` clauses see for this key (Sidebar.logic.ts threadShortcutContext). */
+  function shortcutContext(target) {
+    const el = target?.nodeType === 1 ? target : doc.activeElement;
+    return {
+      terminalFocus: Boolean(el?.closest?.(T3_SELECTORS.terminal)),
+      terminalOpen: Boolean(doc.querySelector(T3_SELECTORS.terminalDrawer)),
+      previewFocus: false,
+      previewOpen: false,
+      modelPickerOpen: Boolean(doc.querySelector(T3_SELECTORS.modelPickerOpen)),
+      editableFocus: Boolean(el?.closest?.(T3_SELECTORS.editable)),
+      isWeb: false,
+      isDesktop: true,
+    };
+  }
+  /** T3's thread keys over the open profile's threads. True when the key was one of them
+   *  (T3's own run of it is then skipped). */
+  function onThreadKey(event) {
+    if (event.defaultPrevented || !splitsProjects()) return false;
+    if (editor?.contains(event.target)) return false; // typing a profile's name
+    const command = commandFor(event, threadRules(), mac, shortcutContext(event.target));
+    if (!isThreadCommand(command)) return false;
+    // T3 does nothing with these while its command palette or model picker is open (the
+    // picker's own Cmd+digit picks a model): neither does t3+.
+    if (doc.querySelector(`${T3_SELECTORS.commandPaletteOpen}, ${T3_SELECTORS.modelPickerOpen}`)) return false;
+    if (!profileThreads()) return false; // no thread list here (Settings): T3 has none either
+    event.preventDefault(); // T3 skips a key that is handled
+    if (event.repeat) return true; // T3 does not repeat them either
+    // A switch still sliding: landed first, so the keys are the new profile's.
+    if (slide) landNow({ navigate: false });
+    const threads = profileThreads() ?? [];
+    const target = threadTarget(command, threads.map((t) => t.key), currentThreadKey());
+    // Past the profile's last thread: nowhere, never into another profile. Else opened as
+    // a profile switch opens one: its row clicked, or by its address when the row is out
+    // of reach (a collapsed sidebar is inert, and T3's keys still work there).
+    if (target) navigate(target);
+    return true;
+  }
+  // T3's ⌘ hints (shown while the keys are held) number the rows of every profile. While
+  // they show, each of the open profile's first nine threads carries its own number (in
+  // T3's slot, styled as T3's, labelled as T3 labels that key), and T3's are hidden.
+  let hintsShown = false;
+  const HINT = "t3plus-jump-hint";
+  const HINT_SLOT = "data-t3plus-jump-slot";
+  function clearHints() {
+    for (const el of doc.querySelectorAll(`.${HINT}`)) el.remove();
+    for (const el of doc.querySelectorAll(`[${HINT_SLOT}]`)) el.removeAttribute(HINT_SLOT);
+    doc.documentElement.removeAttribute("data-t3plus-jump-hints");
+    hintsShown = false;
+  }
+  /** Brings t3+'s hints in line with T3's; false when T3 shows none. */
+  function syncHints() {
+    const theirs = splitsProjects() ? doc.querySelector(`${T3_SELECTORS.jumpHint}:not(.${HINT})`) : null;
+    if (!theirs) {
+      if (hintsShown) clearHints();
+      return false;
+    }
+    const context = shortcutContext(doc.activeElement);
+    const want = new Map();
+    for (const [i, t] of (profileThreads() ?? []).slice(0, 9).entries()) {
+      const label = t.row && labelFor(`thread.jump.${i + 1}`, threadRules(), mac, context);
+      if (label) want.set(t.row, label);
+    }
+    for (const el of doc.querySelectorAll(`.${HINT}`)) {
+      const row = el.closest(T3_SELECTORS.sidebarRow);
+      if (want.get(row) !== el.textContent) {
+        el.parentElement?.removeAttribute(HINT_SLOT);
+        el.remove();
+      }
+    }
+    for (const [row, label] of want) {
+      const slot = row.querySelector(`${T3_SELECTORS.jumpHint}:not(.${HINT})`)?.parentElement ?? row.querySelector("[data-t3plus-bot-status]") ?? row.querySelector(T3_SELECTORS.rowStatusSlot);
+      if (!slot || slot.querySelector(`:scope > .${HINT}`)) continue;
+      const hint = doc.createElement("kbd");
+      hint.className = `${theirs.className} ${HINT}`.trim();
+      hint.setAttribute("aria-hidden", "true");
+      hint.setAttribute(T3_SELECTORS.jumpHint.slice(1, -1), ""); // shown by T3's slot rule, which hides the rest
+      hint.textContent = label;
+      slot.setAttribute(HINT_SLOT, "");
+      slot.append(hint);
+    }
+    doc.documentElement.setAttribute("data-t3plus-jump-hints", "");
+    hintsShown = true;
+    return true;
+  }
+  // T3 shows its hints a moment after the keys' modifiers are pressed, and redraws them as
+  // rows change: looked at often while a modifier is held, and once after it is let go.
+  // Without T3's hints for 2 s (a release this window never heard of), the look stops.
+  let hintTimer = 0;
+  let quietSince = 0;
+  function watchHints(on) {
+    if (on) {
+      quietSince = Date.now();
+      if (!hintTimer) {
+        hintTimer = win.setInterval(() => {
+          if (syncHints()) quietSince = Date.now();
+          else if (Date.now() - quietSince > 2000) watchHints(false);
+        }, 50);
+      }
+      return;
+    }
+    if (hintTimer) win.clearInterval(hintTimer);
+    hintTimer = 0;
+    win.setTimeout(syncHints, 60); // T3 takes its hints away on the keys' release
+  }
+  const MODIFIER_KEYS = new Set(["Meta", "Control", "Alt", "Shift"]);
+  const onKeyUp = (event) => {
+    if (MODIFIER_KEYS.has(event.key) && !event.metaKey && !event.ctrlKey && !event.altKey && !event.shiftKey) watchHints(false);
+  };
+  const onBlur = () => watchHints(false);
+
   const onKeyDown = (event) => {
     if (event.key === "Escape" && dragging) endDrag(event, false);
+    if (MODIFIER_KEYS.has(event.key) && splitsProjects()) watchHints(true);
+    if (onThreadKey(event)) return;
     // Ctrl+Shift+1..9: open that profile. Cmd+digit stays T3's. Not while the
     // rename field is in use (the editor belongs to the profile being renamed).
     if (!isEnabled() || !event.ctrlKey || !event.shiftKey || event.metaKey || event.altKey) return;
@@ -1942,6 +2113,7 @@ export function createProfiles({ win, doc, area, changedEvent, isEnabled = () =>
       }
       hide(item, project !== null && profileOf(state, project) !== state.active);
     }
+    profileThreads(); // the open profile's threads as listed, for T3's search (its keys still jump over the list)
     followRoute();
   }
 
@@ -1958,6 +2130,8 @@ export function createProfiles({ win, doc, area, changedEvent, isEnabled = () =>
       doc.addEventListener("pointerup", onPointerUp, true);
       doc.addEventListener("pointercancel", onPointerCancel, true);
       doc.addEventListener("keydown", onKeyDown, true);
+      doc.addEventListener("keyup", onKeyUp, true);
+      win.addEventListener("blur", onBlur);
       doc.addEventListener("click", onClick, true);
       doc.addEventListener("contextmenu", onContextMenu, true);
       doc.addEventListener("selectstart", onSelectStart, true);
@@ -1979,6 +2153,11 @@ export function createProfiles({ win, doc, area, changedEvent, isEnabled = () =>
       doc.removeEventListener("pointerup", onPointerUp, true);
       doc.removeEventListener("pointercancel", onPointerCancel, true);
       doc.removeEventListener("keydown", onKeyDown, true);
+      doc.removeEventListener("keyup", onKeyUp, true);
+      win.removeEventListener("blur", onBlur);
+      if (hintTimer) win.clearInterval(hintTimer);
+      hintTimer = 0;
+      clearHints();
       doc.removeEventListener("click", onClick, true);
       doc.removeEventListener("contextmenu", onContextMenu, true);
       doc.removeEventListener("selectstart", onSelectStart, true);

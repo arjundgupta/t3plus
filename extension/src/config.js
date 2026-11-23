@@ -98,6 +98,19 @@ export const T3_SELECTORS = Object.freeze({
   sidebarRow: "[data-sidebar-row]",
   /** <li> around a thread row. Value: thread key "<environmentId>:<threadId>". */
   threadItem: "[data-thread-item]",
+  /** T3's ⌘ jump hint badge on a sidebar row (shown while the jump keys are held). */
+  jumpHint: "[data-jump-hint]",
+  /** T3's command palette and model picker, open: T3's thread keys do nothing then. */
+  commandPaletteOpen: "[data-command-palette]",
+  modelPickerOpen: "[data-model-picker-content]",
+  /** T3's search results, shown in place of the thread list while searching. */
+  threadSearchResults: "#sidebar-thread-search-results",
+  /** T3's terminal drawer, open (its keybinding context "terminalOpen"). */
+  terminalDrawer: "[data-thread-terminal-drawer]",
+  /** What T3 counts as typing (lib/editableFocus.ts, its "editableFocus" context). */
+  editable: 'input, textarea, select, [contenteditable=""], [contenteditable="true"], [contenteditable="plaintext-only"], [role="textbox"]',
+  /** The right-hand slot of a sidebar row (time, status) where T3 puts its ⌘ jump hint. */
+  rowStatusSlot: ".ml-auto.min-w-8.shrink-0",
   /** <li> around a project folder header (Boring/project-grouped sidebar). */
   projectFolderItem: '[data-testid="sidebar-project-folder"]',
   /** A card row's first line (project badge, project name, status), relative to the row. */
@@ -254,7 +267,7 @@ export const SIDEBAR_ROW_PREFIX = Object.freeze({
 export const APPEARANCE_ROUTE = /\/settings\/appearance\/?$/;
 
 /** First path segments that are T3 app routes, not "/<environmentId>/<threadId>". */
-export const NON_THREAD_ROUTE_SEGMENTS = Object.freeze(["settings", "draft", "new", "pull-requests", "api", "oauth"]);
+export const NON_THREAD_ROUTE_SEGMENTS = Object.freeze(["settings", "draft", "new", "pull-requests", "api", "oauth", "projects", "usage", "welcome", "pair"]);
 
 /** Attributes and ids t3+ owns. */
 export const T3PLUS = Object.freeze({

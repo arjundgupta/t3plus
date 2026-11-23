@@ -3942,3 +3942,15 @@ html[data-t3plus-bubble]:not(.dark) [data-message-role="user"] .bg-message a:not
   text-decoration: underline;
   text-decoration-color: color-mix(in srgb, currentColor 55%, transparent);
 }
+
+/* ---------- Thread shortcut hints, in the open profile ----------
+   T3's ⌘1-9 hints number the rows of every profile. While they show, t3+'s own (in T3's
+   slot, styled as T3's) number the open profile's rows, and T3's are hidden. A slot
+   t3+ numbers that T3 did not hides the rest of what it holds, as T3's rule does. */
+html[data-t3plus-jump-hints] [data-jump-hint]:not(.t3plus-jump-hint) {
+  display: none !important;
+}
+[data-t3plus-jump-slot] > :not([data-jump-hint]) {
+  visibility: hidden !important;
+  position: absolute !important;
+}

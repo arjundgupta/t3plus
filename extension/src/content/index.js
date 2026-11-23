@@ -129,6 +129,8 @@ const app = createT3Plus({
             onEnd: typeof window.desktopBridge.onTrackpadScrollEnd === "function" ? (fn) => window.desktopBridge.onTrackpadScrollEnd(fn) : undefined,
           }
         : null,
+    // T3's keys for its thread shortcuts (the loader reads keybindings.json), kept to the open profile.
+    threadKeybindings: () => window.__t3plusBoot?.keybindings ?? null,
   }),
   version: chrome.runtime.getManifest?.().version,
   // After an update, what changed (once); every version's notes are in Settings → t3+ → Changelog too.
