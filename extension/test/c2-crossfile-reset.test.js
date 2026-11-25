@@ -29,7 +29,7 @@ const custom = {
   glass: { enabled: false, strength: 10 },
   sidebar: { ...d.sidebar, bots: false, botStyle: "space", profiles: true, statusColors: true, statusBadges: true, subagentShape: "star", subagentColor: "red" },
   chat: { ...d.chat, bubble: "#334455" },
-  home: { widgets: false },
+  home: { ...defaultSettings().home, widgets: false, usage: false }, // a hidden card is a feature too: kept
   demo: { enabled: true },
 };
 

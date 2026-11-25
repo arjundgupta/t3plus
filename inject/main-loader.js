@@ -281,7 +281,24 @@
     if (!win) return true;
     return win.isVisible() && !win.isMinimized();
   }
+  // In the background too: once the usage widgets have asked for the home feed in this
+  // run of T3, it is published every few minutes whatever is on screen (another page,
+  // the window hidden or minimized). The limit history records every sample (the 5-hour
+  // and weekly lines, the forecast's pace) and the cards are current on coming back,
+  // instead of gaps while T3 was not looked at. Only while T3 runs: its limits are T3's.
+  const BACKGROUND_HOME_MS = 5 * 60 * 1000;
+  // A feed written in the last day: the widgets are in use, so a restart of T3 (or of
+  // t3+) keeps recording without waiting for the home page to be opened first.
+  let homeWanted = Date.now() - mtime(FEEDS.home.file) < 24 * 60 * 60 * 1000;
+  const backgroundHome = setInterval(() => {
+    if (!homeWanted) return;
+    const last = lastRun.get("home") ?? mtime(FEEDS.home.file);
+    if (Date.now() - last >= BACKGROUND_HOME_MS - 5000) publish("home");
+  }, 60 * 1000);
+  backgroundHome.unref?.();
+  state.undo.push(() => clearInterval(backgroundHome));
   function onAsk(wc, kind) {
+    if (kind === "home") homeWanted = true;
     if (!Object.hasOwn(FEEDS, kind) || !inUse(wc)) return;
     // Stale once its last publish began (else its file was written) longer ago than its
     // maxAge. Not from when the file was written: a publish that took a while then made

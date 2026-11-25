@@ -530,13 +530,17 @@ const localDay = (iso) => {
 function homeDatabase(activityDays) {
   const conn = db();
   try {
-    // Only each project's place in the list: the page counts activity per project,
-    // never by its name or folder.
+    // Each project's place in the list and its name (the Projects card), never its
+    // folder (a path with the user's name in it).
     const projects = [];
     const index = new Map();
-    for (const r of conn.prepare("SELECT project_id FROM projection_projects WHERE deleted_at IS NULL").all()) {
+    // A database without project titles (an older T3) still gives the projects' places.
+    let rowsOf;
+    try { rowsOf = conn.prepare("SELECT project_id, title FROM projection_projects WHERE deleted_at IS NULL").all(); }
+    catch { rowsOf = conn.prepare("SELECT project_id FROM projection_projects WHERE deleted_at IS NULL").all(); }
+    for (const r of rowsOf) {
       index.set(r.project_id, projects.length);
-      projects.push({});
+      projects.push({ title: String(r.title || "").replace(/\s+/g, " ").trim().slice(0, 60) });
     }
     const since = new Date(Date.now() - (activityDays + 1) * 86400000).toISOString().slice(0, 19);
     const cells = new Map(); // "day|project" -> [threads, runs]
@@ -856,6 +860,17 @@ function updateHistory(pool, claude, at) {
   for (const c of claude) {
     const weekly = c.windows.find(isWeekly);
     if (weekly) (entry.claudeWeekUsed ||= {})[c.key] = weekly.usedPercent;
+    // The five-hour window too, for the Claude 5-hour card's line (homeData.js sessionModel).
+    const five = c.windows.find(isFiveHour);
+    if (five) {
+      // Each reading with the reset of the window it is from: T3 may still report the window
+      // that just ended (its reset passed) for a few minutes into the next one, and a reading
+      // placed by its time alone drew the old window's 100% into the new one.
+      const reset = Date.parse(five.resetsAt || "");
+      const over = Number.isFinite(reset) && reset <= Date.parse(at);
+      (entry.claudeFiveUsed ||= {})[c.key] = over ? 0 : five.usedPercent;
+      if (Number.isFinite(reset)) (entry.claudeFiveReset ||= {})[c.key] = Math.round(reset / 1000);
+    }
   }
   // At most one sample per HISTORY_STEP_MS is stored, and the file is written only when
   // that changes: it kept every run's sample (every 2 minutes) and was rewritten whole on
@@ -881,6 +896,23 @@ function claudeSeries(history) {
     let cap = 0, left = 0;
     for (const v of Object.values(h.claudeWeekUsed)) { cap += 100; left += 100 * (1 - v / 100); }
     points.push([Math.floor(Date.parse(h.t) / 1000), Math.round(left), cap]);
+  }
+  return points;
+}
+/**
+ * Claude's five-hour window as [unix seconds, left, cap, reset (unix seconds)]: each account
+ * 100%, like the week; the reset says which window the reading is from (the earliest of the
+ * accounts'). Readings recorded before resets were kept (none) are left out: their window is not known.
+ */
+function claudeSessionSeries(history) {
+  const points = [];
+  for (const h of history) {
+    if (!h.claudeFiveUsed || !Object.keys(h.claudeFiveUsed).length || !h.claudeFiveReset) continue;
+    const resets = Object.values(h.claudeFiveReset).filter((v) => typeof v === "number");
+    if (!resets.length) continue;
+    let cap = 0, left = 0;
+    for (const v of Object.values(h.claudeFiveUsed)) { cap += 100; left += 100 * (1 - v / 100); }
+    points.push([Math.floor(Date.parse(h.t) / 1000), Math.round(left), cap, Math.min(...resets)]);
   }
   return points;
 }
@@ -1377,6 +1409,7 @@ async function publishHome() {
     limits: { ...lim, claude: lim.claude.map(({ key, ...account }) => account), pool },
     codexSeries: codexSeries(history),
     claudeSeries: claudeSeries(history),
+    claudeSessionSeries: claudeSessionSeries(history),
     aiActivity: usage.activity,
   };
   writeAtomic(path.join(feedDir, "t3plus-home.json"), JSON.stringify(data));
