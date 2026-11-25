@@ -8,6 +8,8 @@ import { APPEARANCE_ROUTE, BOT_COLORS, BOT_SHAPES, BOT_STYLES, DEFAULT_BOT_MARKE
 import { createBuilder, setAttr, setHidden, setText, uniqueId as id } from "./dom.js";
 import { createBadgeSample, createGlowSwatches, createStatusColorsSample, createSubagentSample, drawStyleFace, glowColorCss, glowSwatch, styleFace } from "./settingsPreviews.js";
 import { ALL, isBaseScope } from "./settingsScopes.js";
+import { cardAvailability, HOME_CARDS, homeOrder, markWide, mergeOrder } from "./homeWidgets.js";
+import { enableCardDrag } from "./cardDrag.js";
 
 // lucide icons (T3's set) for the scope bar.
 const SVG = 'xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"';
@@ -645,6 +647,92 @@ export function createAppearancePanel(doc, actions, { desktop = false, version =
     for (const [value, el] of styleFaces) drawStyleFace(el, BOT_STYLES[value]);
   };
   const homeToggle = switchButton("Usage widgets", (on) => actions.setHomeWidgets(on));
+  // One pressed-or-not button per home card (HOME_CARDS), shown while the widgets are on.
+  const homeCardButtons = HOME_CARDS.map(([key, label]) => {
+    // Not offered while its card has nothing to show (aria-disabled: still focusable, so its reason can be read).
+    const el = button(label, () => el.getAttribute("aria-disabled") !== "true" && actions.setHomeCard?.(key, el.getAttribute("aria-pressed") !== "true"), "t3plus-home-card-pick");
+    el.setAttribute("data-t3plus-home-card", key);
+    return [key, el];
+  });
+  // A small copy of the home page's cards as they are set: which show, in what order.
+  // Drag a tile to move its card (the same as dragging a card's header on the home page).
+  const SVG = "http://www.w3.org/2000/svg";
+  const sketch = (markup) => {
+    const svg = doc.createElementNS(SVG, "svg");
+    svg.setAttribute("viewBox", "0 0 100 30");
+    svg.setAttribute("preserveAspectRatio", "none");
+    svg.setAttribute("class", "t3plus-hp-sketch");
+    svg.innerHTML = markup;
+    return svg;
+  };
+  const poolSketch = (color, d) => sketch(`<path d="${d}L100 30L0 30Z" fill="${color}" fill-opacity="0.35"/><path d="${d}" fill="none" stroke="${color}" stroke-width="1.5" vector-effect="non-scaling-stroke"/>`);
+  const TILE_ART = {
+    claudePool: () => [h("span", { class: "t3plus-hp-num", text: "67%" }), poolSketch("#d97757", "M0 4L25 6L50 9L75 12L100 14")],
+    claudeSession: () => [h("span", { class: "t3plus-hp-num", text: "73%" }), poolSketch("#d97757", "M0 2L30 6L60 12L72 13")],
+    codexPool: () => [h("span", { class: "t3plus-hp-num", text: "88%" }), poolSketch("#6f9cf5", "M0 3L40 5L70 7L100 9")],
+    activity: () => [
+      h("div", { class: "t3plus-hp-heat" }, Array.from({ length: 36 }, (_, i) => h("span", { "data-level": String([0, 0, 1, 0, 2, 0, 0, 3, 1, 0, 0, 2, 4, 1, 0, 3][(i * 7) % 16]) }))),
+    ],
+    forecast: () => [
+      h("div", { class: "t3plus-hp-bars" }, [
+        h("span", { style: "--w:45%;--p:92%" }),
+        h("span", { style: "--w:33%;--p:60%" }),
+      ]),
+    ],
+    needsYou: () => [
+      h("div", { class: "t3plus-hp-needs" }, [h("span", { "data-tone": "ask" }), h("i", {}), h("span", { "data-tone": "bad" }), h("i", {})]),
+    ],
+    streak: () => [
+      h("span", { class: "t3plus-hp-num", text: "5 days" }),
+      h("div", { class: "t3plus-hp-heat t3plus-hp-strip" }, Array.from({ length: 12 }, (_, i) => h("span", { "data-level": i > 6 || i === 3 ? "3" : "0" }))),
+    ],
+    projects: () => [
+      h("div", { class: "t3plus-hp-bars t3plus-hp-projects" }, [h("span", { style: "--w:90%" }), h("span", { style: "--w:55%" }), h("span", { style: "--w:30%" })]),
+    ],
+    usage: () => [sketch(`<path d="M0 30L45 30L55 22L62 30L75 30L82 4L88 22L93 10L100 28L100 30Z" fill="#d97757" fill-opacity="0.45"/><path d="M0 29.5H100" stroke="currentColor" stroke-opacity="0.5" vector-effect="non-scaling-stroke"/>`)],
+  };
+  const previewTiles = new Map(
+    HOME_CARDS.map(([key, label]) => [
+      key,
+      h("div", { class: "t3plus-hp-tile", "data-t3plus-card": key, title: `Drag to move ${label}` }, [h("span", { class: "t3plus-hp-title", text: label }), ...TILE_ART[key]()]),
+    ]),
+  );
+  const homePreviewGrid = h("div", { class: "t3plus-hp-grid" });
+  const homePreviewEmpty = h("p", { class: "t3plus-hp-empty", text: "No widgets on.", hidden: "" });
+  const homePreview = h("div", { class: "t3plus-hp", "aria-hidden": "true" }, [
+    h("div", { class: "t3plus-hp-composer" }, [h("span", { text: "Ask anything…" }), h("span", { class: "t3plus-hp-send" })]),
+    homePreviewGrid,
+    homePreviewEmpty,
+  ]);
+  let homePreviewOrder = null; // settings.home.order as last shown
+  let homePreviewSignature = "";
+  const previewSorter = enableCardDrag(homePreviewGrid, {
+    item: ".t3plus-hp-tile",
+    handle: ".t3plus-hp-tile",
+    keyOf: (el) => el.getAttribute("data-t3plus-card"),
+    onLive: (grid) => markWide([...grid.children]),
+    onOrder: (keys) => actions.setHomeOrder?.(mergeOrder(homePreviewOrder, keys)),
+  });
+  function updateHomePreview(home, unavailable) {
+    homePreviewOrder = home.order;
+    if (previewSorter.dragging()) return;
+    const keys = homeOrder(home.order).filter((key) => home[key] !== false && !unavailable[key]);
+    const signature = keys.join();
+    if (signature === homePreviewSignature) return;
+    homePreviewSignature = signature;
+    const tiles = keys.map((key) => previewTiles.get(key));
+    markWide(tiles);
+    homePreviewGrid.replaceChildren(...tiles);
+    setHidden(homePreviewEmpty, keys.length > 0);
+  }
+  // Why a card is not offered (its provider off, or signed out), under the buttons.
+  const homeCardsNote = h("p", { class: "t3plus-row-desc t3plus-home-card-note", role: "status", "aria-live": "polite", hidden: "" });
+  const homeCardsRow = row({
+    title: "Widgets",
+    description: "Which cards show under the new-thread composer. Drag them here, or by their title on the home page, to reorder.",
+    extra: h("div", { class: "t3plus-home-cards" }, [h("div", { class: "t3plus-home-card-picks", role: "group", "aria-label": "Home widgets" }, homeCardButtons.map(([, el]) => el)), homeCardsNote, homePreview]),
+    paths: [...HOME_CARDS.map(([key]) => `home.${key}`), "home.order"],
+  });
   const statusColorsToggle = switchButton("Status colors", (on) => actions.setSidebarFeature("statusColors", on));
   const statusBadgesToggle = switchButton("Status badges", (on) => actions.setSidebarFeature("statusBadges", on));
   const statusColorsSample = createStatusColorsSample(h);
@@ -671,6 +759,7 @@ export function createAppearancePanel(doc, actions, { desktop = false, version =
       paths: ["sidebar.subagentShape", "sidebar.subagentColor"],
     }),
     row({ title: "Usage widgets", description: "Usage and limits under the new-thread composer.", control: homeToggle, paths: ["home.widgets"] }),
+    homeCardsRow,
   ]);
 
   // ---------- Changelog ----------
@@ -1377,6 +1466,20 @@ export function createAppearancePanel(doc, actions, { desktop = false, version =
     for (const [value, input] of Object.entries(botStyleInputs)) input.checked = settings.sidebar.botStyle === value;
     drawStyleFaces();
     setAttr(homeToggle, "aria-checked", String(settings.home.widgets));
+    // A card with nothing to show is off and not offered, with its reason; the choice
+    // stored stays, so it comes back by itself once its provider reports again.
+    const unavailable = cardAvailability(state.homeFeed ?? null);
+    for (const [key, el] of homeCardButtons) {
+      const reason = unavailable[key];
+      setAttr(el, "aria-pressed", String(!reason && settings.home[key] !== false));
+      setAttr(el, "aria-disabled", reason ? "true" : null);
+      setAttr(el, "title", reason);
+    }
+    const reasons = HOME_CARDS.filter(([key]) => unavailable[key]).map(([key, label]) => `${label}: ${unavailable[key]}`);
+    setText(homeCardsNote, reasons.join(" "));
+    setHidden(homeCardsNote, reasons.length === 0);
+    setHidden(homeCardsRow, !settings.home.widgets);
+    updateHomePreview(settings.home, unavailable);
     setAttr(statusColorsToggle, "aria-checked", String(settings.sidebar.statusColors));
     setAttr(statusBadgesToggle, "aria-checked", String(settings.sidebar.statusBadges));
     statusColorsSample.update(settings.sidebar.statusColors);

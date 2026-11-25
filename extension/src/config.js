@@ -365,6 +365,18 @@ export const DEFAULT_SETTINGS = Object.freeze({
   home: Object.freeze({
     /** Activity, limits, spend and automations under the new-thread composer. */
     widgets: true,
+    /** Each card under the composer (homeWidgets.js HOME_CARDS); shown while `widgets` is on. */
+    claudePool: true,
+    claudeSession: true,
+    codexPool: true,
+    activity: true,
+    usage: true,
+    forecast: true,
+    needsYou: true,
+    streak: true,
+    projects: true,
+    /** The cards' order, dragged into place: a comma list of their keys (homeWidgets.js homeOrder). */
+    order: "codexPool,claudePool,claudeSession,forecast,needsYou,activity,usage,streak,projects",
   }),
   demo: Object.freeze({
     /** Screenshot mode: stand-in titles, projects and message text (demoMode.js). */

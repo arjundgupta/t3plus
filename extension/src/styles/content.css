@@ -868,6 +868,176 @@ html[data-t3plus-glass] [data-t3plus-surface]:not([data-slot="composer-shell"] *
   border-color: color-mix(in srgb, var(--primary) 55%, var(--border));
 }
 
+/* Settings → t3+ → Widgets: a small copy of the home cards under a composer, in
+   their order; tiles are dragged to reorder (cardDrag.js). */
+/* A card with nothing to show (its provider off): greyed out, not offered. */
+.t3plus-home-card-pick[aria-disabled="true"] {
+  opacity: 0.45;
+  cursor: not-allowed;
+  text-decoration: line-through;
+}
+.t3plus-home-card-note {
+  margin: 0.5rem 0 0;
+}
+
+.t3plus-hp {
+  margin-top: 0.75rem;
+  padding: 1rem 1.25rem 1.25rem;
+  border-radius: 0.75rem;
+  border: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
+  background:
+    radial-gradient(60% 55% at 50% 0%, color-mix(in srgb, var(--t3plus-accent, var(--primary)) 28%, transparent), transparent 70%),
+    var(--background);
+  color: var(--foreground);
+  font-size: 11px;
+  user-select: none;
+}
+.t3plus-hp-composer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  max-width: 22rem;
+  margin: 0 auto 0.75rem;
+  padding: 0.5rem 0.5rem 0.5rem 0.75rem;
+  border-radius: 0.75rem;
+  border: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
+  background: color-mix(in srgb, var(--card, #111) 80%, transparent);
+  color: var(--muted-foreground);
+}
+.t3plus-hp-send {
+  width: 1.1rem;
+  height: 1.1rem;
+  border-radius: 999px;
+  background: var(--primary);
+}
+.t3plus-hp-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.4rem;
+  max-width: 22rem;
+  margin: 0 auto;
+}
+.t3plus-hp-grid > .t3plus-w-wide {
+  grid-column: 1 / -1;
+}
+.t3plus-hp-tile {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  min-height: 3.6rem;
+  padding: 0.45rem 0.55rem;
+  border-radius: 0.5rem;
+  border: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
+  background: color-mix(in srgb, var(--card, #111) 78%, transparent);
+  cursor: grab;
+  touch-action: none;
+}
+.t3plus-hp-title {
+  color: var(--muted-foreground);
+  font-weight: 500;
+}
+.t3plus-hp-num {
+  font-size: 13px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+.t3plus-hp-sketch {
+  width: 100%;
+  height: 1.1rem;
+  margin-top: auto;
+  overflow: visible;
+}
+.t3plus-hp-heat {
+  display: grid;
+  grid-template-columns: repeat(12, 1fr);
+  gap: 2px;
+  margin-top: auto;
+}
+.t3plus-hp-heat > span {
+  aspect-ratio: 1;
+  border-radius: 1px;
+  background: color-mix(in srgb, var(--foreground) 10%, transparent);
+}
+.t3plus-hp-heat > span[data-level="1"] { background: color-mix(in srgb, #6f9cf5 40%, transparent); }
+.t3plus-hp-heat > span[data-level="2"] { background: color-mix(in srgb, #6f9cf5 60%, transparent); }
+.t3plus-hp-heat > span[data-level="3"] { background: color-mix(in srgb, #6f9cf5 80%, transparent); }
+.t3plus-hp-heat > span[data-level="4"] { background: #6f9cf5; }
+.t3plus-hp-bars {
+  display: grid;
+  gap: 4px;
+  margin-top: auto;
+}
+.t3plus-hp-bars > span {
+  height: 4px;
+  border-radius: 2px;
+  background:
+    linear-gradient(#d97757, #d97757) 0 0 / var(--w, 50%) 100% no-repeat,
+    linear-gradient(color-mix(in srgb, #d97757 35%, transparent), color-mix(in srgb, #d97757 35%, transparent)) 0 0 / var(--p, 0%) 100% no-repeat,
+    color-mix(in srgb, var(--foreground) 10%, transparent);
+}
+.t3plus-hp-projects > span {
+  background: linear-gradient(color-mix(in srgb, var(--foreground) 55%, transparent), color-mix(in srgb, var(--foreground) 55%, transparent)) 0 0 / var(--w) 100% no-repeat;
+}
+.t3plus-hp-needs {
+  display: grid;
+  grid-template-columns: 0.9rem 1fr;
+  align-items: center;
+  gap: 4px 6px;
+  margin-top: auto;
+}
+.t3plus-hp-needs > span {
+  height: 6px;
+  border-radius: 3px;
+  background: #e8964a;
+}
+.t3plus-hp-needs > span[data-tone="bad"] {
+  background: #e5484d;
+}
+.t3plus-hp-needs > i {
+  height: 4px;
+  border-radius: 2px;
+  background: color-mix(in srgb, var(--foreground) 30%, transparent);
+}
+.t3plus-hp-strip {
+  grid-template-columns: repeat(12, 1fr);
+}
+.t3plus-hp-empty {
+  margin: 0;
+  text-align: center;
+  color: var(--muted-foreground);
+}
+
+/* A card being dragged (home page and the preview): lifted, above the others. */
+.t3plus-home[data-t3plus-sortable] > .t3plus-w > .t3plus-w-head {
+  cursor: grab;
+  touch-action: none;
+  user-select: none;
+}
+[data-t3plus-sorting],
+[data-t3plus-sorting] .t3plus-w,
+[data-t3plus-sorting] .t3plus-w-head,
+[data-t3plus-sorting] .t3plus-w-plot,
+[data-t3plus-sorting] .t3plus-hp-tile {
+  cursor: grabbing !important;
+}
+.t3plus-w[data-t3plus-dragging],
+.t3plus-hp-tile[data-t3plus-dragging] {
+  position: relative;
+  z-index: 5;
+  box-shadow: 0 12px 28px rgb(0 0 0 / 0.35);
+  scale: 1.02;
+  opacity: 0.95;
+}
+
+/* Settings → t3+ → Widgets: one toggle per home card, wrapping under the row's text. */
+.t3plus-home-card-picks {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 10px;
+}
+
 .t3plus-button:disabled {
   opacity: 0.5;
   cursor: default;
@@ -2807,6 +2977,198 @@ html[data-t3plus-profile-drag] .t3plus-profile-dot[data-over] {
 }
 
 /* Thread details: what the open thread has cost so far (like T3's Context row). */
+/* ---------- Needs You ---------- */
+/* (The list, not the card: the card itself is .t3plus-w-needs.) */
+.t3plus-w-needs-list {
+  display: grid;
+  gap: 2px;
+  margin: 0.1rem -0.35rem 0;
+  padding: 0;
+  list-style: none;
+}
+.t3plus-w-needs-row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  grid-template-areas: "word title" "word meta";
+  align-items: center;
+  column-gap: 0.5rem;
+  width: 100%;
+  padding: 0.3rem 0.35rem;
+  border: 0;
+  border-radius: 0.375rem;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.t3plus-w-needs-row:hover,
+.t3plus-w-needs-row:focus-visible {
+  background: color-mix(in srgb, var(--foreground) 7%, transparent);
+}
+.t3plus-w-needs-word {
+  grid-area: word;
+  padding: 0.1rem 0.4rem;
+  border-radius: 999px;
+  font-size: 0.6875rem;
+  font-weight: 500;
+  color: #e8964a;
+  background: color-mix(in srgb, #e8964a 16%, transparent);
+}
+.t3plus-w-needs-word[data-tone="bad"] {
+  color: #e5484d;
+  background: color-mix(in srgb, #e5484d 16%, transparent);
+}
+.t3plus-w-needs-word[data-tone="info"] {
+  color: #6f9cf5;
+  background: color-mix(in srgb, #6f9cf5 16%, transparent);
+}
+.t3plus-w-needs-title {
+  grid-area: title;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 500;
+}
+.t3plus-w-needs-meta {
+  grid-area: meta;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.t3plus-w-needs-more {
+  margin-top: 0.25rem;
+}
+.t3plus-w-needs-clear {
+  margin: 0.15rem 0 0;
+}
+
+/* ---------- Limit Forecast ---------- */
+.t3plus-w-fc {
+  display: grid;
+  gap: 0.6rem;
+  margin-top: 0.15rem;
+}
+.t3plus-w-fc-text {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.5rem;
+  margin-bottom: 0.3rem;
+}
+.t3plus-w-fc-label {
+  font-weight: 500;
+}
+.t3plus-w-fc-say {
+  color: var(--muted-foreground);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+.t3plus-w-fc-row[data-state="runsOut"] .t3plus-w-fc-say {
+  color: #e5484d;
+}
+.t3plus-w-fc-bar {
+  position: relative;
+  height: 6px;
+  border-radius: 3px;
+  overflow: hidden;
+  background: color-mix(in srgb, var(--foreground) 9%, transparent);
+}
+.t3plus-w-fc-bar > span {
+  position: absolute;
+  inset: 0 auto 0 0;
+  border-radius: inherit;
+}
+.t3plus-w-fc-projected {
+  width: var(--projected);
+  background: color-mix(in srgb, var(--fc-color) 32%, transparent);
+}
+.t3plus-w-fc-used {
+  width: var(--used);
+  background: var(--fc-color);
+}
+
+/* ---------- Streak ---------- */
+.t3plus-w-streak-today {
+  margin-top: 0.15rem;
+}
+.t3plus-w-streak-strip {
+  display: grid;
+  /* Squares of at most 1.25rem, spread over the card: a wide card kept them huge. */
+  grid-template-columns: repeat(14, minmax(0, 1.25rem));
+  justify-content: space-between;
+  gap: 3px;
+  margin-top: 0.6rem;
+  border-radius: 0.25rem;
+}
+.t3plus-w-streak-strip:focus-visible {
+  outline: 2px solid var(--ring, var(--primary));
+  outline-offset: 3px;
+}
+.t3plus-w-streak-strip > .t3plus-w-cell {
+  aspect-ratio: 1;
+  cursor: pointer;
+}
+.t3plus-w-streak-strip > .t3plus-w-cell:hover {
+  filter: brightness(1.25);
+}
+/* The day whose numbers the line shows. */
+.t3plus-w-streak-strip > .t3plus-w-cell[data-t3plus-picked] {
+  outline: 2px solid var(--foreground);
+  outline-offset: 1px;
+}
+
+/* ---------- Projects ---------- */
+/* (The list, not the card: the card itself is .t3plus-w-projects.) */
+.t3plus-w-project-list {
+  display: grid;
+  gap: 0.4rem;
+  margin: 0.15rem 0 0;
+  padding: 0;
+  list-style: none;
+}
+.t3plus-w-project {
+  display: grid;
+  /* Name (up to 12rem), its share (the rest of the row), 7 days, turns. */
+  grid-template-columns: minmax(4.5rem, 12rem) minmax(1.5rem, 1fr) auto 4.5rem;
+  align-items: center;
+  gap: 0.75rem;
+}
+.t3plus-w-project-share {
+  height: 6px;
+  border-radius: 3px;
+  overflow: hidden;
+  background: color-mix(in srgb, var(--foreground) 8%, transparent);
+}
+.t3plus-w-project-share > span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: color-mix(in srgb, #d97757 70%, transparent);
+}
+.t3plus-w-project-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.t3plus-w-project-days {
+  display: flex;
+  align-items: flex-end;
+  gap: 2px;
+  height: 0.9rem;
+}
+.t3plus-w-project-days > span {
+  width: 4px;
+  border-radius: 1px;
+  background: #d97757;
+}
+.t3plus-w-project-days > span[data-zero] {
+  background: color-mix(in srgb, var(--foreground) 14%, transparent);
+}
+.t3plus-w-project-runs {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
 .t3plus-w-spend {
   display: flex;
   align-items: baseline;

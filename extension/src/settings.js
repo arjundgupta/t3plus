@@ -15,6 +15,8 @@ const asPercent = (value) => {
   const n = Number(value);
   return Number.isFinite(n) ? Math.min(100, Math.max(0, Math.round(n))) : undefined;
 };
+/** A comma list of home card keys (homeWidgets.js homeOrder makes sense of it). */
+const asOrder = (value) => (typeof value === "string" && /^[a-zA-Z,]{0,200}$/.test(value) ? value : undefined);
 const oneOf = (values) => (value) => (values.includes(value) ? value : undefined);
 /** "theme" or a lowercase #rrggbb. */
 const asColor = (value) => (value === "theme" ? "theme" : typeof value === "string" && HEX_COLOR.test(value) ? value.toLowerCase() : undefined);
@@ -41,7 +43,7 @@ const RULES = Object.freeze({
     subagentColor: (value) => (value === SAME_AS_BOT || PICKABLE_BOT_COLORS.includes(value) ? value : undefined),
   },
   chat: { bubble: asColor },
-  home: { widgets: asBool },
+  home: { widgets: asBool, claudePool: asBool, claudeSession: asBool, codexPool: asBool, activity: asBool, usage: asBool, forecast: asBool, needsYou: asBool, streak: asBool, projects: asBool, order: asOrder },
   demo: { enabled: asBool },
 });
 

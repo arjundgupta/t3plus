@@ -45,14 +45,14 @@ test("thread details: the current provider's pool replaces T3's usage rows; othe
   assert.equal(section.getAttribute(T3PLUS.detailsPoolAttr), "claude");
   const pool = section.querySelector(".t3plus-details-pool");
   assert.ok(pool, "pool inserted into T3's section");
-  assert.equal(pool.querySelector(".t3plus-w").getAttribute("aria-label"), "Claude pool");
+  assert.equal(pool.querySelector(".t3plus-w").getAttribute("aria-label"), "Claude Pool");
   assert.ok(doc.getElementById("t3-usage-rows"), "T3's rows stay in the DOM (hidden by CSS)");
 
   // Switching the composer to a Codex model switches the card.
   doc.querySelector("[data-chat-provider-model-picker]").setAttribute("aria-label", "GPT-6.1 Sol, High");
   app.watcher.flush();
   assert.equal(section.getAttribute(T3PLUS.detailsPoolAttr), "codex");
-  assert.equal(section.querySelector(".t3plus-w").getAttribute("aria-label"), "Codex pool");
+  assert.equal(section.querySelector(".t3plus-w").getAttribute("aria-label"), "Codex Pool");
 
   // A provider without a pool: T3's own rows.
   doc.querySelector("[data-chat-provider-model-picker]").setAttribute("aria-label", "Gemini 3 Pro");

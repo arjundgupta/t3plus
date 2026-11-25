@@ -19,7 +19,7 @@ import {
 import { LOOK, applyComposerTheme, dropLook, measureBackdropAnchor, setLook, syncBackdropHosts, syncComposerSurfaces } from "./composer.js";
 import { botMetaText, botPreviewText, botSubagents, threadIdFromKey, threadSpend } from "./botFeed.js";
 import { BOT_FEED_POLL_MS, BOT_LIMITS, DEFAULT_BOT_MARKER, DOM_CHECK_THROTTLE_MS, HOME_FEED_POLL_MS, SAMPLE_IMAGE_LIGHT_PATH, SAMPLE_IMAGE_PATH, STORAGE_KEYS, T3_ATTRS, T3_CLASSES, T3_SELECTORS, T3PLUS, USAGE_ROUTE } from "./config.js";
-import { createHomeView } from "./homeWidgets.js";
+import { createHomeView, showsAnyCard } from "./homeWidgets.js";
 import { createUsageDither } from "./usageDither.js";
 import { createDemoMode } from "./demoMode.js";
 import { hasPool, providerKind } from "./homeData.js";
@@ -53,7 +53,7 @@ import {
   setScopeValues,
   SCOPED_PATHS,
 } from "./settingsScopes.js";
-import { BOT_STATUS, STATUS_BOT_COLORS, STATUS_ICON, STATUS_WORDS, buildStatusModel, createStatusView, normalizeViewState } from "./statusView.js";
+import { BOT_STATUS, STATUS_BOT_COLORS, STATUS_ICON, STATUS_WORDS, ago, buildStatusModel, createStatusView, normalizeViewState } from "./statusView.js";
 
 /** The settings groups Reset puts back: the appearance (background and glass). */
 const APPEARANCE_GROUPS = Object.freeze(["composerGradient", "glass"]);
@@ -1105,10 +1105,45 @@ export function createT3Plus(deps) {
     if (el.style.getPropertyValue(name) !== value) el.style.setProperty(name, value);
   };
 
+  /**
+   * The Needs You card's rows: the Status view's "Needs you" group (T3's rows over the
+   * thread feed), for the open profile, named as the sidebar names them (a bot without its
+   * marker, screenshot mode's stand-ins). Null when there is nothing to build it from yet.
+   */
+  function needsForHome() {
+    const scan = lastScan;
+    if (threadsFeedDue()) refreshThreadsFeed();
+    if (!scan && !state.threadsFeed) return null;
+    const folderTitles = new Map([...(scan?.folders ?? [])].map(([key, { row }]) => [key, ((demo.active ? demo.realText(folderName(row)) : folderName(row).textContent) ?? "").trim()]));
+    const profile = scan && profilesOn() && shownProfile ? shownProfile : null;
+    const profiles = profile ? deps.profiles.state : null;
+    const groups = buildStatusModel({
+      scan,
+      feed: state.threadsFeed,
+      folderTitles,
+      include: (folderKey, fromList) => !profiles || (folderKey === null ? fromList : profileOf(profiles, folderKey) === profile),
+    });
+    const now = Date.now();
+    const rows = (groups.find((g) => g.id === "needs")?.rows ?? []).slice(0, 20).map((r) => {
+      const marked = parseBotTitle(r.title, DEFAULT_BOT_MARKER);
+      const title = marked ? marked.label : r.title;
+      return {
+        key: r.key,
+        status: r.status,
+        word: STATUS_WORDS[r.status],
+        title: demoOn() ? demo.label(marked ? "bot" : "title", title || r.key) : title,
+        project: demoOn() && r.project ? demo.label("project", r.project) : r.project,
+        ago: ago(r.at, now),
+      };
+    });
+    return { rows };
+  }
+
   function syncHome() {
     // Without a feed (a build with no feed folder) the cards could only ever wait, and
     // T3's own usage rows, which they replace, stay as T3 draws them.
-    const widgets = Boolean(state.settings.home.widgets && deps.homeFeed);
+    // Every card turned off (Settings → t3+ → Widgets) is the same as the widgets off.
+    const widgets = Boolean(state.settings.home.widgets && showsAnyCard(state.settings.home) && deps.homeFeed);
     // Whether the widgets are on at all, whatever the page: content.css centers any
     // new-thread composer by it together with T3's own hero class, so the centering comes
     // and goes in the same style pass as T3's layout (no frame with T3's room on a hero,
@@ -1128,7 +1163,14 @@ export function createT3Plus(deps) {
     if (!doc.documentElement.hasAttribute(T3PLUS.homeAttr)) doc.documentElement.setAttribute(T3PLUS.homeAttr, "");
     // Filled before measuring: placed while still empty, the block moved again
     // once the cards arrived.
-    home.update({ feed: state.homeFeed, cell: ditherCell() });
+    home.update({
+      feed: state.homeFeed,
+      cell: ditherCell(),
+      show: state.settings.home,
+      needs: state.settings.home.needsYou !== false ? needsForHome() : null,
+      // Screenshot mode covers project names on the Projects card as it does in the sidebar.
+      projectLabel: demoOn() ? (title) => demo.label("project", title) : null,
+    });
     // The cards are exactly as wide as the composer: content.css hangs them from its stack
     // (left and right 0), so no width is measured or written (a width written in the check
     // lagged a frame behind a resize, and came out narrower on a narrow window).
@@ -1355,6 +1397,8 @@ export function createT3Plus(deps) {
         if (!next || next === state.homeFeed || stopped) continue;
         state.homeFeed = next;
         changed = true;
+        // Settings' Widgets row offers only the cards with something to show.
+        panelChanged();
       } while (homeAgain && !stopped);
     } finally {
       homeLoading = false;
@@ -1438,6 +1482,8 @@ export function createT3Plus(deps) {
       panel.leave();
     }
     if (panelStale && panel.element.isConnected) updatePanel();
+    // The Widgets row says which cards have data: read the feed if it is due.
+    if (container && homeFeedDue()) refreshHomeFeed();
   }
 
   // While t3+'s section is open, T3's sections in the page's column and the header's page
@@ -1748,6 +1794,10 @@ export function createT3Plus(deps) {
     setGlassStrength: (strength) => persist(glass({ strength })),
     setSidebarFeature: (name, on) => persist((s) => ({ ...s, sidebar: { ...s.sidebar, [name]: on } })),
     setHomeWidgets: (on) => persist((s) => ({ ...s, home: { ...s.home, widgets: on } })),
+    /** One home card on or off (homeWidgets.js HOME_CARDS key). */
+    setHomeCard: (key, on) => persist((s) => ({ ...s, home: { ...s.home, [key]: on } })),
+    /** The home cards' order (a comma list of their keys), dragged on the home page or in Settings. */
+    setHomeOrder: (order) => persist((s) => ({ ...s, home: { ...s.home, order } })),
     setDemo: (on) => persist((s) => ({ ...s, demo: { ...s.demo, enabled: on } })),
     async chooseImage(file) {
       state.message = "Preparing image…";
@@ -1896,7 +1946,7 @@ export function createT3Plus(deps) {
     onClose: (latest) => deps.updates?.toastDone(latest),
   });
   const panel = createAppearancePanel(doc, actions, { desktop: Boolean(deps.desktop), version: deps.version ?? null });
-  const home = createHomeView(doc);
+  const home = createHomeView(doc, { onReorder: (order) => actions.setHomeOrder(order), onOpen: (key) => openThread(key) });
   const detailsPool = createHomeView(doc, { variant: "pool" });
   const usageDither = createUsageDither(doc);
 

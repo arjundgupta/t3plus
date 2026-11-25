@@ -143,8 +143,9 @@ test("app: four compact cards mount under the hero composer (and only there) and
     assert.ok(home, "mounted");
     assert.equal(home.parentElement, doc.querySelector('[data-chat-composer-stack="true"]'), "inside T3's composer stack");
     assert.ok(doc.documentElement.hasAttribute(T3PLUS.homeAttr));
-    assert.deepEqual([...home.querySelectorAll(".t3plus-w-head h3")].map((e) => e.textContent), ["Codex pool", "Claude pool", "Activity", "Usage"]);
-    assert.equal(home.querySelectorAll(".t3plus-w-cell").length, HEAT_WEEKS * 7);
+    assert.deepEqual([...home.querySelectorAll(".t3plus-w-head h3")].map((e) => e.textContent), ["Codex Pool", "Claude Pool", "Claude 5-Hour", "Limit Forecast", "Needs You", "Activity", "Usage", "Streak", "Projects"]);
+    assert.ok(home.querySelector(".t3plus-w-projects").classList.contains("t3plus-w-wide"), "the odd card out spans the last row");
+    assert.equal(home.querySelectorAll(".t3plus-w-activity .t3plus-w-cell").length, HEAT_WEEKS * 7);
     assert.match(home.querySelector(".t3plus-w-codex .t3plus-w-big-num").textContent, /%$/);
     assert.equal(home.querySelector(".t3plus-w-codex .t3plus-w-line-projected"), null, "past usage only: no projection");
     assert.ok(home.querySelector(".t3plus-w-codex .t3plus-w-line"), "the recorded line");

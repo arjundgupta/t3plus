@@ -55,6 +55,12 @@ export function parseHomeFeedText(raw) {
     limits.codex && Array.isArray(limits.codex.accounts)
       ? { accounts: limits.codex.accounts.slice(0, 32).map((a) => ({ plan: text(a?.plan, 40), windows: windowsOf(a) })) }
       : null;
+  // Each five-hour reading's window, by the reading's time: [t, left, cap, reset] (unix seconds).
+  const sessionResets = new Map(
+    (Array.isArray(d.claudeSessionSeries) ? d.claudeSessionSeries : [])
+      .filter((p) => Array.isArray(p) && typeof p[0] === "number" && typeof p[3] === "number" && Number.isFinite(p[3]))
+      .map((p) => [p[0] * 1000, p[3] * 1000]),
+  );
   // Recorded pools: [unix seconds, left, cap, (five-hour left, five-hour cap)] in percent of a Plus week.
   const series = (list) =>
     (Array.isArray(list) ? list : [])
@@ -64,6 +70,8 @@ export function parseHomeFeedText(raw) {
       .sort((a, b) => a.t - b.t);
   return {
     generatedAt: iso(d.generatedAt),
+    // Project names by their place in the list (activity cells name projects by it).
+    projects: (Array.isArray(d.projects) ? d.projects : []).slice(0, 500).map((p) => text(p?.title, 60)),
     activity,
     spend,
     claude,
@@ -81,6 +89,9 @@ export function parseHomeFeedText(raw) {
       }),
     ),
     claudeSeries: series(d.claudeSeries),
+    // Claude's five-hour window, recorded the same way, each reading with the reset of
+    // its window (ms; null in feeds from before resets were kept).
+    claudeSessionSeries: series(d.claudeSessionSeries).map((p) => ({ ...p, reset: sessionResets.get(p.t) ?? null })),
   };
 }
 
@@ -196,6 +207,178 @@ export function poolModel(feed, kind, now = Date.now(), { back = 3 } = {}) {
   }
   recorded.push({ t: now, left });
   return { cap: Math.round(cap), left: Math.round(left), from, now, recorded, nextRefill: Number.isFinite(nextReset) ? { at: nextReset } : null };
+}
+
+// ---------- Claude's five-hour window ----------
+
+/** A five-hour (session) window, as T3 says (kind); a feed without kinds tells by its length. */
+export const isSession = (w) => (w.kind ? w.kind === "session" : (w.durationMins ?? 0) > 0 && (w.durationMins ?? 0) < 1440);
+/** Whether a Claude account reports its five-hour window (sessionModel is not null). */
+export const hasSession = (feed) => Boolean(feed) && feed.claude.some((a) => a.windows.some(isSession));
+
+/**
+ * Claude's five-hour window for its card, past usage only, in poolModel's shape: what is
+ * left now (each account 100%), the line recorded since the window opened, and when it
+ * resets ({ at }, or null). A window whose reset has passed is full again and has no
+ * reset until the next message opens a new one (`active` false).
+ */
+export function sessionModel(feed, now = Date.now()) {
+  if (!feed) return null;
+  const accounts = feed.claude.filter((a) => a.windows.some(isSession));
+  if (!accounts.length) return null;
+  let cap = 0;
+  let left = 0;
+  let nextReset = Infinity;
+  let length = 300 * 60000;
+  let active = false;
+  for (const a of accounts) {
+    const w = a.windows.find(isSession);
+    const at = Date.parse(w.resetsAt ?? "");
+    // No reset reported: the reported use still stands.
+    const open = !Number.isFinite(at) || at > now;
+    cap += 100;
+    left += 100 * (1 - (open ? w.usedPercent : 0) / 100);
+    if (open) active = true;
+    if (open && at < nextReset) nextReset = at;
+    if (w.durationMins) length = w.durationMins * 60000;
+  }
+  // The window opened `length` before its reset; never after now (the provider's clock a little ahead).
+  // With none running, the chart shows the five hours a window opened now would cover,
+  // empty: not the five hours before, which read as a window that had just been used.
+  const from = active ? Math.min(now - 60000, Number.isFinite(nextReset) ? nextReset - length : now - length) : now;
+  const recorded = [];
+  if (active) {
+    // A window opens at 0% used: its start is a known point even before any sample was
+    // recorded in it (samples only began when t3+ started recording this window).
+    const opened = Number.isFinite(nextReset);
+    if (opened) recorded.push({ t: from, left: cap });
+    for (const p of feed.claudeSessionSeries ?? []) {
+      if (p.t < from || p.t > now) continue;
+      // Only readings of this window: T3 can still report the one that just ended a few
+      // minutes into the next (its 100% drew a drop to empty at the new window's start).
+      // A reading with no window known is left out once the window is.
+      if (Number.isFinite(nextReset) && (p.reset === null || p.reset === undefined || Math.abs(p.reset - nextReset) > 5 * 60000)) continue;
+      recorded.push(p.cap > 0 && p.cap !== cap ? { ...p, left: (p.left * cap) / p.cap, cap } : p);
+    }
+    recorded.push({ t: now, left });
+  }
+  // `end`: the chart spans the whole window, up to its reset (the line stops at now).
+  const end = active && Number.isFinite(nextReset) ? Math.max(now, nextReset) : active ? now : now + length;
+  return { cap: Math.round(cap), left: Math.round(left), from, now, end, recorded, active, nextRefill: Number.isFinite(nextReset) ? { at: nextReset } : null };
+}
+
+// ---------- Limit Forecast ----------
+
+/**
+ * Where a limit is headed at the pace used since its window opened: `cap` and `left` in
+ * the pool's units, the window from `start` to `reset` (ms). One of
+ *   { state: "early" }               under ten minutes in, too soon to tell
+ *   { state: "unused" }              nothing used yet
+ *   { state: "runsOut", at }         the pace empties it before the reset, at `at`
+ *   { state: "lasts", leftAtReset }  it lasts, with about that much left (in % of cap)
+ * plus usedFrac (0..1 now) and projectedFrac (0..1 at the reset, capped at 1).
+ */
+export function forecast({ cap, left, start, reset, now }) {
+  const used = Math.max(0, cap - left);
+  const usedFrac = cap > 0 ? Math.min(1, used / cap) : 0;
+  const base = { usedFrac, projectedFrac: usedFrac };
+  const elapsed = now - start;
+  if (!(cap > 0) || !Number.isFinite(reset) || !Number.isFinite(start)) return { state: "unused", ...base };
+  if (used <= 0) return { state: "unused", ...base };
+  if (elapsed < 10 * 60000) return { state: "early", ...base };
+  const rate = used / elapsed; // pool units per ms
+  const projected = used + rate * Math.max(0, reset - now);
+  const projectedFrac = Math.min(1, projected / cap);
+  if (left <= 0) return { state: "runsOut", at: now, usedFrac, projectedFrac };
+  const at = now + left / rate;
+  if (at < reset) return { state: "runsOut", at, usedFrac, projectedFrac };
+  return { state: "lasts", leftAtReset: Math.max(0, Math.round(((cap - projected) / cap) * 100)), usedFrac, projectedFrac };
+}
+
+/** The limits to forecast, as rows: { key, label, color, ...forecast() }. */
+export function forecastRows(feed, now = Date.now()) {
+  if (!feed) return [];
+  const rows = [];
+  const session = sessionModel(feed, now);
+  if (session?.active && session.nextRefill) {
+    rows.push({ key: "session", label: "Claude 5-Hour", reset: session.nextRefill.at, ...forecast({ cap: session.cap, left: session.left, start: session.from, reset: session.nextRefill.at, now }) });
+  } else if (session) rows.push({ key: "session", label: "Claude 5-Hour", reset: null, state: "idle", usedFrac: 0, projectedFrac: 0 });
+  for (const [kind, label] of [["claude", "Claude Week"], ["codex", "Codex Week"]]) {
+    const pool = poolModel(feed, kind, now, { back: 0 });
+    if (!pool) continue;
+    const reset = pool.nextRefill?.at ?? NaN;
+    rows.push({ key: kind, label, reset: Number.isFinite(reset) ? reset : null, ...forecast({ cap: pool.cap, left: pool.left, start: reset - 7 * 86400000, reset, now }) });
+  }
+  return rows;
+}
+
+// ---------- Streak ----------
+
+const WEEKDAYS = ["Sundays", "Mondays", "Tuesdays", "Wednesdays", "Thursdays", "Fridays", "Saturdays"];
+/**
+ * From a daily map (tokenDaily or dailyActivity: day -> { runs }): the streak of active
+ * days up to today (or up to yesterday while today has none yet: still alive), the
+ * longest one in the data, today's amount against the average active day of the four
+ * weeks before, the busiest weekday over the last eight weeks, and the last 14 days.
+ */
+export function streakStats(daily, now) {
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const keyAt = (back) => dayKey(new Date(today.getFullYear(), today.getMonth(), today.getDate() - back));
+  const amount = (back) => daily.get(keyAt(back))?.runs ?? 0;
+  const todayAmount = amount(0);
+  let current = 0;
+  for (let back = todayAmount > 0 ? 0 : 1; amount(back) > 0; back += 1) current += 1;
+  const days = [...daily.keys()].filter((k) => (daily.get(k)?.runs ?? 0) > 0).sort();
+  let longest = 0;
+  let run = 0;
+  let prev = null;
+  for (const key of days) {
+    const d = new Date(`${key}T12:00:00`);
+    run = prev && Math.round((d - prev) / 86400000) === 1 ? run + 1 : 1;
+    longest = Math.max(longest, run);
+    prev = d;
+  }
+  longest = Math.max(longest, current);
+  const before = [];
+  for (let back = 1; back <= 28; back += 1) if (amount(back) > 0) before.push(amount(back));
+  const average = before.length ? before.reduce((n, v) => n + v, 0) / before.length : 0;
+  const byWeekday = Array(7).fill(0);
+  for (let back = 0; back < 56; back += 1) byWeekday[new Date(today.getFullYear(), today.getMonth(), today.getDate() - back).getDay()] += amount(back);
+  const top = Math.max(...byWeekday);
+  return {
+    current,
+    longest,
+    alive: todayAmount > 0,
+    today: todayAmount,
+    ratio: average > 0 && todayAmount > 0 ? todayAmount / average : null,
+    /** The average active day of the four weeks before today (0: none), to compare any day with. */
+    average,
+    busiest: top > 0 ? WEEKDAYS[byWeekday.indexOf(top)] : null,
+    last14: Array.from({ length: 14 }, (_, i) => amount(13 - i) > 0),
+  };
+}
+
+// ---------- Projects ----------
+
+/**
+ * The most active projects of the last `days` days by turns: [{ title, runs, threads, perDay }]
+ * (perDay: turns per day, oldest first), at most `limit`, unnamed ones left out.
+ */
+export function projectStats(feed, now, { days = 7, limit = 4 } = {}) {
+  const keys = Array.from({ length: days }, (_, i) => dayKey(new Date(now.getFullYear(), now.getMonth(), now.getDate() - (days - 1 - i))));
+  const byProject = new Map();
+  keys.forEach((key, i) => {
+    for (const [p, threads, runs] of feed.activity.get(key) ?? []) {
+      const title = feed.projects[p];
+      if (!title || !(runs > 0 || threads > 0)) continue;
+      const entry = byProject.get(p) ?? { title, runs: 0, threads: 0, perDay: Array(days).fill(0) };
+      entry.runs += runs;
+      entry.threads += threads;
+      entry.perDay[i] += runs;
+      byProject.set(p, entry);
+    }
+  });
+  return [...byProject.values()].sort((a, b) => b.runs - a.runs || a.title.localeCompare(b.title)).slice(0, limit);
 }
 
 /** Tokens per provider per day for the last `days` days (T3's usage chart), plus month totals. */
