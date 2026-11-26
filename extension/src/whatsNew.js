@@ -9,6 +9,12 @@ import { STORAGE_KEYS, T3PLUS } from "./config.js";
 
 export const WHATS_NEW = Object.freeze([
   {
+    version: "0.23.5",
+    notes: [
+      ["Pool charts after a reset", "The new week's line fills the chart instead of starting partway across."],
+    ],
+  },
+  {
     version: "0.23.4",
     notes: [
       ["Thread keys per profile", "Cmd+1-9 and Cmd+Shift+[ / ] only reach the open profile's threads."],

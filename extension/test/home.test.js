@@ -314,6 +314,74 @@ test("pool card: two plain lines, what remains and when it resets (to the minute
   view.destroy();
 });
 
+// A Codex pool whose week reset at `reset`, with samples [iso, left], seen at `now`.
+function resetPool(now, reset, samples) {
+  const dom = createDom("/", "<div></div>");
+  const doc = dom.window.document;
+  const view = createHomeView(doc, { variant: "pool" });
+  const feedJson = {
+    ...FEED,
+    generatedAt: samples.at(-1)[0],
+    limits: { claude: [], codex: { checkedAt: samples.at(-1)[0], accounts: [{ label: "Codex", plan: "ChatGPT Pro 200 Subscription", windows: [{ label: "Weekly", kind: "weekly", durationMins: 10080, usedPercent: 100 - samples.at(-1)[1], resetsAt: new Date(Date.parse(reset) + 7 * 86400000).toISOString() }] }] } },
+    codexSeries: samples.map(([iso, left]) => [Date.parse(iso) / 1000, left, 100]),
+  };
+  view.update({ feed: parseHomeFeedText(JSON.stringify(feedJson)), kind: "codex", now: new Date(now) });
+  doc.body.append(view.element);
+  const plot = view.element.querySelector(".t3plus-w-plot");
+  plot.getBoundingClientRect = () => ({ left: 0, top: 0, right: 300, bottom: 72, width: 300, height: 72, x: 0, y: 0 });
+  const line = view.element.querySelector(".t3plus-w-line").getAttribute("d");
+  const startX = Number(/^M(-?[\d.]+) /.exec(line)[1]);
+  return { dom, doc, view, plot, line, startX };
+}
+const timeOf = (iso) => new Date(iso).toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" });
+
+test("pool card: a reset minutes ago draws the new week across the plot, not from partway in", () => {
+  // A reset used early at 02:49; the last week's empty pool before it, the first new sample at 02:56.
+  const samples = [["2026-11-26T02:47:33Z", 0], ["2026-11-26T02:56:55Z", 98]];
+  const { dom, doc, view, plot, line, startX } = resetPool("2026-11-26T03:01:00Z", "2026-11-26T02:49:24Z", samples);
+  assert.equal(startX, 0, "the line starts at the reset, the plot's left edge");
+  assert.ok(line.split(/[ML]/).filter(Boolean).every((p) => Number(p.split(" ")[1]) < 10), "level near the top: the last week's empty pool is not drawn");
+  assert.equal(view.element.querySelector(".t3plus-w-pool-head").textContent, "98%remaining");
+
+  // The pointer at the left edge: the nearest recorded sample, not the drawn start.
+  plot.dispatchEvent(new dom.window.MouseEvent("pointermove", { bubbles: true, clientX: 1, clientY: 10 }));
+  const tip = doc.querySelector(".t3plus-tip");
+  assert.ok(tip.hasAttribute("data-open"));
+  assert.equal(tip.textContent, `${timeOf("2026-11-26T02:56:55Z")}Left98% of 100%`);
+  const marker = plot.querySelector(".t3plus-w-hover");
+  assert.ok(marker.hasAttribute("data-on"));
+  assert.ok(Number(/^(-?[\d.]+)px/.exec(marker.style.translate)[1]) > 150, "the crosshair sits on that sample, not at the edge");
+  plot.dispatchEvent(new dom.window.MouseEvent("pointermove", { bubbles: true, clientX: 299, clientY: 10 }));
+  assert.match(tip.textContent, / · nowLeft98% of 100%$/);
+  view.element.dispatchEvent(new dom.window.MouseEvent("pointerleave"));
+  assert.equal(tip.hasAttribute("data-open"), false);
+
+  // Keys: the same samples (now first, Home the first one after the reset).
+  plot.focus();
+  assert.match(tip.textContent, / · now/);
+  plot.dispatchEvent(new dom.window.KeyboardEvent("keydown", { key: "Home", bubbles: true }));
+  assert.equal(tip.textContent, `${timeOf("2026-11-26T02:56:55Z")}Left98% of 100%`);
+  plot.dispatchEvent(new dom.window.KeyboardEvent("keydown", { key: "ArrowLeft", bubbles: true }));
+  assert.equal(tip.textContent, `${timeOf("2026-11-26T02:56:55Z")}Left98% of 100%`, "nothing before it");
+  plot.dispatchEvent(new dom.window.KeyboardEvent("keydown", { key: "End", bubbles: true }));
+  assert.match(tip.textContent, / · now/);
+  view.destroy();
+});
+
+test("pool card: the line starts at the plot's edge through a reset's first hours, and is not filled in when the week was first recorded late", () => {
+  const reset = "2026-11-26T02:49:24Z";
+  const after = [["2026-11-26T02:47:33Z", 0], ["2026-11-26T02:56:55Z", 98], ["2026-11-26T04:00:00Z", 97], ["2026-11-26T04:50:00Z", 95]];
+  // Two hours and three minutes in: the plot's last two hours start before the first sample.
+  assert.equal(resetPool("2026-11-26T04:52:30Z", reset, after).startX, 0);
+  // Later the plot starts at the first sample itself.
+  assert.equal(resetPool("2026-11-26T06:00:00Z", reset, [...after, ["2026-11-26T05:59:00Z", 94]]).startX, 0);
+  // A reset at 02:49 seen first at 05:30 (T3 closed): what came between is unknown.
+  const late = resetPool("2026-11-26T05:40:00Z", reset, [["2026-11-26T02:47:33Z", 0], ["2026-11-26T05:30:00Z", 90]]);
+  assert.ok(late.startX > 250, `the line starts at the first sample (x ${late.startX})`);
+  // No sample since the reset but the one now: still a line across the plot.
+  assert.equal(resetPool("2026-11-26T02:52:00Z", reset, [["2026-11-26T02:47:33Z", 0], ["2026-11-26T02:51:59Z", 100]]).startX, 0);
+});
+
 test("pool card: a reset reads Today or Tomorrow, then its weekday within the week, else its date", () => {
   const dom = createDom("/", "<div></div>");
   const now = new Date(2026, 10, 16, 20, 0); // Monday 8 PM, local

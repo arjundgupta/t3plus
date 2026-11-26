@@ -279,6 +279,14 @@ export function createHomeView(doc, { variant = "home" } = {}) {
     const y = (v) => H - 1 - (Math.max(0, Math.min(pool.cap, v)) / pool.cap) * (H - 8);
     // A single sample (a pool just started being recorded) still shows as a short level line.
     const recorded = pool.recorded.length > 1 ? pool.recorded : [{ t: pool.now - span * 0.02, left: pool.left }, { t: pool.now, left: pool.left }];
+    // The week's first sample comes some minutes after its reset (the weekly one, or one
+    // used early): a plot starting before that sample (at the reset, the first two hours)
+    // left the plot empty up to it, and the line began partway across. When that sample
+    // is close to the reset, the line is drawn from the plot's start at its level. A week
+    // first recorded hours in (T3 was closed) is not filled in: that part is unknown.
+    // Hovers and keys stay on the recorded samples.
+    const weekFromReset = firstSample !== undefined && firstSample - weekStart <= 30 * 60000;
+    const drawn = weekFromReset && recorded[0].t > pool.from ? [{ t: pool.from, left: recorded[0].left }, ...recorded] : recorded;
     const svg = svgEl("svg", { viewBox: `0 0 ${W} ${H}`, preserveAspectRatio: "none", class: "t3plus-w-plot-svg", "data-t3plus-dither-chart": "area", "aria-hidden": "true" });
     svg.style.setProperty("--pool-color", color);
     svg.append(svgEl("path", { d: `M0 ${y(pool.cap / 2)}H${W}`, class: "t3plus-w-grid" }));
@@ -286,8 +294,8 @@ export function createHomeView(doc, { variant = "home" } = {}) {
     svg.append(svgEl("path", { d: `M0 ${H - 0.5}H${W}`, class: "t3plus-w-grid t3plus-w-base" }));
     const line = (points) => points.map((p, i) => `${i ? "L" : "M"}${x(p.t).toFixed(1)} ${y(p.left).toFixed(1)}`).join("");
     const area = (points) => `${line(points)}L${x(points.at(-1).t).toFixed(1)} ${H}L${x(points[0].t).toFixed(1)} ${H}Z`;
-    svg.append(svgEl("path", { d: area(recorded), class: "t3plus-w-area" }));
-    svg.append(svgEl("path", { d: line(recorded), class: "t3plus-w-line", "vector-effect": "non-scaling-stroke" }));
+    svg.append(svgEl("path", { d: area(drawn), class: "t3plus-w-area" }));
+    svg.append(svgEl("path", { d: line(drawn), class: "t3plus-w-line", "vector-effect": "non-scaling-stroke" }));
 
     const pct = (t) => `${((x(t) / W) * 100).toFixed(2)}%`;
     // Day names over a few days; hours ("6 PM") over a shorter span.
@@ -306,7 +314,7 @@ export function createHomeView(doc, { variant = "home" } = {}) {
       ticks.push(h("span", { style: `left:${pct(t)}`, text }));
     }
     const frac = (points) => points.map((p) => [x(p.t) / W, y(p.left) / H]);
-    const poolDither = dither([{ points: frac(recorded), color, fillAlpha: 0.85 }]);
+    const poolDither = dither([{ points: frac(drawn), color, fillAlpha: 0.85 }]);
     const poolPlot = h("div", chartAttrs(`pool-${kind}`, `${title}: ${formatPercent(pool.left)} remaining of ${formatPercent(pool.cap)} this week`, { class: "t3plus-w-plot" }), [poolDither, svg]);
     const poolHover = (f) => {
       const t = pool.from + f * span;
