@@ -4,7 +4,7 @@ import { test } from "node:test";
 import { createAppearancePanel } from "../src/appearancePanel.js";
 import { DEFAULT_SETTINGS, STORAGE_KEYS } from "../src/config.js";
 import { createSettingsNavItem } from "../src/settingsSection.js";
-import { createUpdateNotice, createUpdateToast, isNewer, normalizeRelease, UPDATE_COMMAND } from "../src/updateNotice.js";
+import { createUpdateNotice, createUpdateToast, isNewer, normalizeRelease, UPDATE_COMMAND, updateCommand, WINDOWS_UPDATE_COMMAND } from "../src/updateNotice.js";
 import { createDom } from "./helpers.js";
 
 test("isNewer compares x.y.z by number, and nothing unparsable is newer", () => {
@@ -106,6 +106,11 @@ test("Settings → t3+ shows the update card at the top: the release, the comman
 test("the update command is the README's", () => {
   const readme = readFileSync(new URL("../../README.md", import.meta.url), "utf8");
   assert.ok(readme.includes(UPDATE_COMMAND));
+  assert.ok(readme.includes(WINDOWS_UPDATE_COMMAND));
+  const on = (userAgent) => updateCommand({ navigator: { userAgent } });
+  assert.equal(on("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"), WINDOWS_UPDATE_COMMAND);
+  assert.equal(on("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"), UPDATE_COMMAND);
+  assert.equal(updateCommand(null), UPDATE_COMMAND);
 });
 
 test("t3+'s Settings entry carries a dot while an update is out", () => {

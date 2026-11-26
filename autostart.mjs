@@ -1,13 +1,14 @@
 #!/usr/bin/env node
 // Loads t3+ into T3 Code whenever the app starts. Run by the launch agent
-// com.t3plus.autostart, which fires when T3 rewrites <T3's home>/userdata/server-runtime.json
-// (it does at every launch). Does nothing if the app is not running or already has t3+.
+// com.t3plus.autostart (on Windows by windows/startup.mjs), which fires when T3 rewrites
+// <T3's home>/userdata/server-runtime.json (it does at every launch). Does nothing if the app is not running or already has t3+.
 //   node ~/.t3plus/autostart.mjs [--force]
-import { execFileSync, spawnSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
 import { appendFileSync, mkdirSync, readFileSync, realpathSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
+import { identity, mainPids, notify, parentPid, WINDOWS } from "./platform.mjs";
 
 const HOME = join(homedir(), ".t3plus");
 const STATE = join(HOME, "state");
@@ -15,17 +16,11 @@ const LOG = join(STATE, "autostart.log");
 const MARK = join(STATE, "injected-app");
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const log = (m) => appendFileSync(LOG, `${new Date().toISOString()} ${m}\n`);
-const ps = (...args) => { try { return execFileSync("ps", args, { encoding: "utf8" }); } catch { return ""; } };
-/** A macOS notification, so a launch where t3+ could not load does not just look like plain T3. */
-function notify(message) {
-  const quote = (s) => JSON.stringify(String(s)); // AppleScript strings use the same \" and \\ escapes
-  try { execFileSync("osascript", ["-e", `display notification ${quote(message)} with title "t3+"`], { timeout: 10_000 }); } catch {}
-}
 /** Why loading failed, in plain words, from the CLI's error output. */
 export function explain(stderr) {
   const text = String(stderr || "");
   if (/inspector did not open/.test(text)) return "T3 Code did not open its debugger port, which t3+ loads through. This T3 version may have turned that off.";
-  if (/files missing/.test(text)) return "t3+'s built files are missing. Run ~/.t3plus/build.sh.";
+  if (/files missing/.test(text)) return `t3+'s built files are missing. Run ~/.t3plus/${WINDOWS ? "windows/build.mjs" : "build.sh"}.`;
   if (/expected one running T3 Code app/.test(text)) return "More than one T3 Code app is running.";
   if (/port \d+ (belongs to|was taken by) another process/.test(text)) return "Another program is using port 9229 (a Node debugger, maybe). Close it and reopen T3 Code.";
   if (/needs Node 22/.test(text)) return "The Node found for t3+ is older than 22. Install Node 22 or newer.";
@@ -43,15 +38,15 @@ export function t3Home(home = HOME) {
   return config.t3Home || (process.env.T3CODE_HOME || "").trim() || join(homedir(), ".t3");
 }
 
-/** The app's main process: launched by launchd (ppid 1), the app's own binary. Not this
- *  script, which runs on that same binary (ELECTRON_RUN_AS_NODE) when no Node is installed. */
+/** The app's main process, when exactly one T3 Code app runs. */
 function mainPid() {
-  // This user's processes only (fast user switching: another user's T3 is not ours).
-  const hits = ps("-U", String(process.getuid()), "-o", "pid=,ppid=,comm=").split("\n").map((l) => l.trim().match(/^(\d+)\s+(\d+)\s+(.*)$/))
-    .filter((m) => m && m[2] === "1" && Number(m[1]) !== process.pid && /\/T3 Code[^/]*\.app\/Contents\/MacOS\/T3 Code[^/]*$/.test(m[3]));
-  return hits.length === 1 ? Number(hits[0][1]) : null;
+  try {
+    const hits = mainPids();
+    return hits.length === 1 ? hits[0] : null;
+  } catch {
+    return null;
+  }
 }
-const identity = (pid) => `${pid}@${ps("-o", "lstart=", "-p", String(pid)).trim()}`;
 
 /** True once the app (main process `app`) has started its backend, as `runtimeFile` (T3's
  *  server-runtime.json) names it: by then the app's main process is fully up, so the debugger
@@ -59,7 +54,7 @@ const identity = (pid) => `${pid}@${ps("-o", "lstart=", "-p", String(pid)).trim(
 export async function backendReady(app, runtimeFile) {
   try {
     const rt = JSON.parse(readFileSync(runtimeFile, "utf8"));
-    if (Number(ps("-o", "ppid=", "-p", String(rt.pid)).trim()) !== app) return false;
+    if (parentPid(Number(rt.pid)) !== app) return false;
     const res = await fetch(`http://127.0.0.1:${rt.port}/.well-known/t3/environment`, { signal: AbortSignal.timeout(2000) });
     return res.ok;
   } catch {
@@ -98,7 +93,7 @@ async function main() {
   let attempt = 0;
   while (Date.now() < tryUntil) {
     attempt += 1;
-    const run = spawnSync(process.execPath, [join(HOME, "t3plus.mjs"), "on"], { encoding: "utf8", timeout: 60_000, env: process.env });
+    const run = spawnSync(process.execPath, [join(HOME, "t3plus.mjs"), "on"], { encoding: "utf8", timeout: 60_000, env: process.env, windowsHide: true });
     lastError = run.stderr || lastError;
     if (run.status === 0 && /injected/.test(run.stdout)) {
       writeFileSync(MARK, id);

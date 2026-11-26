@@ -608,7 +608,18 @@ function publishBots(ids) {
 }
 
 // ---------- T3's API (limits, usage summary) ----------
-const run = (args) => new Promise((resolve, reject) => cp.execFile(t3Cli, args, { timeout: 30000, encoding: "utf8" }, (e, out) => (e ? reject(e) : resolve(out))));
+// On Windows T3's launcher is a batch file (t3.cmd), which only cmd.exe runs. Every word is
+// quoted for it; one with a character it would still read in quotes is refused.
+function cliCommand(args) {
+  if (process.platform !== "win32") return [t3Cli, args, {}];
+  const words = [t3Cli, ...args].map(String);
+  if (words.some((w) => /["%!\r\n]/.test(w))) throw new Error("T3's CLI cannot be given these words on Windows");
+  return [process.env.ComSpec || "cmd.exe", ["/d", "/s", "/c", `"${words.map((w) => `"${w}"`).join(" ")}"`], { windowsVerbatimArguments: true, windowsHide: true }];
+}
+const run = (args) => new Promise((resolve, reject) => {
+  const [file, words, options] = cliCommand(args); // thrown here, it rejects
+  cp.execFile(file, words, { ...options, timeout: 30000, encoding: "utf8" }, (e, out) => (e ? reject(e) : resolve(out)));
+});
 // One read-only session for several publishes, not one per publish: T3 keeps a row
 // for every session it ever issued (revoked ones too), so a fresh one every five
 // minutes left a trail in T3's database. It is held in this worker only, never

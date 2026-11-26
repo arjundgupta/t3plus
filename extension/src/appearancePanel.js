@@ -1,6 +1,6 @@
 import { botArt, botClipPath, botEdgeColor, botFillUrl, botShapeHasOwnColors, botStill } from "./botArt.js";
 import { renderNotes } from "./whatsNew.js";
-import { UPDATE_COMMAND } from "./updateNotice.js";
+import { updateCommand } from "./updateNotice.js";
 import { PROFILE_COLORS, profileHex } from "./profiles.js";
 import { PROFILE_ICONS, profileIconSvg } from "./profileIcons.js";
 import { applyAvatarVars, botPaintColor, PROJECT_COLOR, resolveBotPresentation, shownBotPrefs, subagentFace } from "./bots.js";
@@ -1270,7 +1270,7 @@ export function createAppearancePanel(doc, actions, { desktop = false, version =
   let copiedTimer = null;
   updateCopy.addEventListener("click", () => {
     const win = doc.defaultView;
-    Promise.resolve(win?.navigator?.clipboard?.writeText(UPDATE_COMMAND))
+    Promise.resolve(win?.navigator?.clipboard?.writeText(updateCommand(win)))
       .then(() => {
         setText(updateCopy, "Copied");
         win?.clearTimeout(copiedTimer);
@@ -1284,7 +1284,7 @@ export function createAppearancePanel(doc, actions, { desktop = false, version =
         h("div", { class: "t3plus-row-text" }, [h("div", { class: "t3plus-row-head" }, [updateTitle]), updateDesc]),
         h("div", { class: "t3plus-row-control" }, [updateNotes, updateHide]),
       ]),
-      h("div", { class: "t3plus-update-command" }, [h("code", { text: UPDATE_COMMAND }), updateCopy]),
+      h("div", { class: "t3plus-update-command" }, [h("code", { text: updateCommand(doc.defaultView) }), updateCopy]),
     ]),
   ]);
   function updateUpdateCard(update) {

@@ -260,6 +260,13 @@ function fakeT3Api(t, f, { sources }) {
 /** T3's CLI: issues a session (and notes each call). */
 function fakeCli(f) {
   const calls = join(f.home, "cli-calls");
+  if (process.platform === "win32") {
+    // A batch file, as T3's own launcher is there, in a folder with a space and an "&" in its name.
+    mkdirSync(join(f.home, "a & b"), { recursive: true });
+    const cmd = join(f.home, "a & b", "t3.cmd");
+    writeFileSync(cmd, `@echo off\r\n>>"${calls}" echo %~1 %~2 %~3\r\nif "%~3"=="issue" echo {"token":"tok","sessionId":"s-1"}\r\nexit /b 0\r\n`);
+    return { path: cmd, calls: () => (existsSync(calls) ? readFileSync(calls, "utf8").trim().split(/\r?\n/) : []) };
+  }
   writeFileSync(join(f.home, "t3cli"), `#!/bin/sh\necho "$1 $2 $3" >> '${calls}'\n[ "$3" = issue ] && echo '{"token":"tok","sessionId":"s-1"}'\nexit 0\n`, { mode: 0o755 });
   return { path: join(f.home, "t3cli"), calls: () => (existsSync(calls) ? readFileSync(calls, "utf8").trim().split("\n") : []) };
 }
@@ -313,8 +320,21 @@ test("bots: only the threads asked for or marked go into the feed, at most 64 (t
   assert.ok("asked" in feed, "asked for: kept first");
   assert.ok(!("other" in feed) && !("inside" in feed), "neither asked for nor marked (first or last word)");
   assert.equal(Object.keys(feed).length, 64, "a marker mid-title takes no place under the cap");
-  assert.equal(statSync(join(f.home, "feeds", "t3plus-bots.json")).mode & 0o777, 0o600, "your threads' text: readable by you alone");
+  // (On Windows a file has no such mode: it is its user's through the profile folder it is in.)
+  if (process.platform !== "win32") assert.equal(statSync(join(f.home, "feeds", "t3plus-bots.json")).mode & 0o777, 0o600, "your threads' text: readable by you alone");
   await worker.call("dispose");
+});
+
+test("Windows: T3's launcher is never given a word cmd.exe would read on its own", { skip: process.platform !== "win32" }, async (t) => {
+  const f = makeHome(t);
+  f.close();
+  t.mock.method(globalThis, "fetch", async () => { throw new Error("connect ECONNREFUSED"); });
+  const cli = fakeCli(f);
+  for (const name of ["%PATH%", "a!b"]) {
+    const worker = loadWorker(f.home, { t3Cli: join(f.home, name, "t3.cmd") });
+    await assert.rejects(worker.call("home"), /cannot be given these words/);
+  }
+  assert.deepEqual(cli.calls(), [], "nothing was run");
 });
 
 test("dispose: the T3 session the home feed held is revoked, once", async (t) => {

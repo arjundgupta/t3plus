@@ -12,7 +12,9 @@ Pixel-art bots, profiles, a dithered glow and usage widgets for the T3 Code desk
 
 ## Install
 
-You need macOS, the T3 Code desktop app and Node 22.2+. Copy this to your coding agent (Claude Code, Codex or T3 Code itself):
+You need macOS or Windows, the T3 Code desktop app and Node 22.2+. Copy this to your coding agent (Claude Code, Codex or T3 Code itself):
+
+### macOS
 
 ```text
 Install t3+ for T3 Code on this Mac:
@@ -28,6 +30,22 @@ Settings are in T3 Code under Settings → t3+.
 - **Update:** t3+ tells you when a new version is out. Run `git -C ~/.t3plus pull && sh ~/.t3plus/build.sh && node ~/.t3plus/t3plus.mjs on`.
 - **Turn off:** `node ~/.t3plus/t3plus.mjs off` (it loads again when T3 Code restarts)
 - **Uninstall:** `launchctl bootout gui/$(id -u)/com.t3plus.autostart; rm ~/Library/LaunchAgents/com.t3plus.autostart.plist; node ~/.t3plus/t3plus.mjs off; rm -rf ~/.t3plus`
+
+### Windows
+
+```text
+Install t3+ for T3 Code on this PC (PowerShell):
+1. git clone https://github.com/arjundgupta/t3plus "$HOME\.t3plus"
+2. node "$HOME\.t3plus\windows\build.mjs"   (needs Node 22.2 or newer)
+3. With T3 Code open: node "$HOME\.t3plus\t3plus.mjs" on
+4. Load it every time T3 Code starts: node "$HOME\.t3plus\windows\startup.mjs" on
+```
+
+Step 4 adds a shortcut to your Startup folder (Task Manager → Startup apps) that runs a small hidden watcher. It needs no administrator rights, and it keeps using the Node that ran it: run it again if you remove or move that Node.
+
+- **Update:** `git -C "$HOME\.t3plus" pull; node "$HOME\.t3plus\windows\build.mjs"; node "$HOME\.t3plus\t3plus.mjs" on; node "$HOME\.t3plus\windows\startup.mjs" on`
+- **Turn off:** `node "$HOME\.t3plus\t3plus.mjs" off` (it loads again when T3 Code restarts)
+- **Uninstall:** `node "$HOME\.t3plus\windows\startup.mjs" off; node "$HOME\.t3plus\t3plus.mjs" off; Remove-Item -Recurse -Force "$HOME\.t3plus"`
 
 ## Glow and glass
 
@@ -111,7 +129,7 @@ Under the new-thread composer: your Codex and Claude pools, a tokens-per-day hea
 
 Thread details show the provider's pool and what the thread has cost.
 
-All data is read on your Mac, from T3's database, T3's local API and your Claude and Codex logs. The only network request t3+ makes is a daily check of this repo for a new release.
+All data is read on your computer, from T3's database, T3's local API and your Claude and Codex logs. The only network request t3+ makes is a daily check of this repo for a new release.
 
 </td>
 </tr>

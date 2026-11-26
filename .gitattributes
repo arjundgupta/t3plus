@@ -1,0 +1,3 @@
+# LF everywhere: Windows Git may otherwise check files out with CRLF, which breaks the shell
+# scripts (and a test that reads the stylesheet's selectors).
+* text=auto eol=lf

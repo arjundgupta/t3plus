@@ -39,7 +39,7 @@ test("public path policy excludes personal configuration, unknown roots, and nes
   for (const path of ["private/notes.md", "personal.md", "t3plus.local.json", "config.json", "feeds/t3plus-home.json", "state/health.json", "server/config.local.json", "extension/server/config.local.json", "extension/AGENTS.md", "extension/docs/setup.md", "extension/harness/serve.mjs", "extension/src/.env", "extension/src/.env.local", "extension/tools/signing.key", "extension/.github/workflows/ci.yml", "src/app.js"]) {
     assert.equal(isPublicPath(path), false, path);
   }
-  for (const path of ["README.md", "LICENSE", "t3plus.mjs", "build.sh", "inject/main-loader.js", "launchd/com.t3plus.autostart.plist", "media/hero.gif", "extension/src/app.js", "extension/test/app.test.js", "extension/package.json", "extension/tools/publish-policy.mjs"]) assert.equal(isPublicPath(path), true, path);
+  for (const path of ["README.md", "LICENSE", "t3plus.mjs", "platform.mjs", "build.sh", ".gitattributes", "windows/startup.mjs", "inject/main-loader.js", "launchd/com.t3plus.autostart.plist", "media/hero.gif", "extension/src/app.js", "extension/test/app.test.js", "extension/package.json", "extension/tools/publish-policy.mjs"]) assert.equal(isPublicPath(path), true, path);
   assert.throws(() => parseDenyPatterns("# empty"), /at least one/);
   assert.throws(() => parseDenyPatterns("["), /Invalid private-detail pattern/);
   const privateText = "internal-host";
